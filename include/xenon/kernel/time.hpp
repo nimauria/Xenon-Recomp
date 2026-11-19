@@ -69,6 +69,7 @@ class HostTimerResolution {
 
  private:
   bool active_{false};
+  bool using_time_period_{false};
   std::uint32_t requested_{};  // 100 ns units, as granted to this scope
 };
 

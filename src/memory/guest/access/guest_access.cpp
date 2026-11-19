@@ -373,10 +373,8 @@ T AddressSpace::read_integer(GuestAddress address, bool little_endian) {
 
 template <typename T>
 void AddressSpace::write_integer(GuestAddress address, T value, bool little_endian) {
-  if constexpr (sizeof(T) == 4u) {
-    if (xenon::cpu::is_write_trapped(address)) {
-      xenon::cpu::debug_signal_write_trap(address, static_cast<std::uint64_t>(value));
-    }
+  if (xenon::cpu::is_write_trapped(address, sizeof(T))) [[unlikely]] {
+    xenon::cpu::debug_signal_write_trap(address, static_cast<std::uint64_t>(value));
   }
   validate_guest_range(address, sizeof(T), AccessKind::Write);
   {

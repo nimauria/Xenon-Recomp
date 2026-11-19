@@ -1,15 +1,23 @@
-# Ace Combat 6 runtime stall: structural notes
+# Ace Combat 6 runtime stall: historical structural notes
 
-Status: **open**. This note was written during the structural refactor
+Status: **historical investigation, superseded as a current progress summary**.
+As of 11 November 2026, the project owner reports that AC6 loads through the
+main menu into the first cutscene with fully working audio. Cutscene frame
+rate/pacing is actively being fixed; gameplay remains unconfirmed. See the
+[current milestone](../../README.md#current-milestone-project-gracemeria).
+
+This note was written during the structural refactor
 (branch `development-restructure`). That pass deliberately changed no runtime
 behaviour, so nothing here is a fix. It records who owns what in the
 GPU/audio/guest-callback paths, which existing probes cover them, and which
 structural properties deserve investigation first.
 
-## Symptom
+## Historical symptom
 
-GPU and audio processing perform an initial pass, or a small number of
-passes, and then useful activity stops. The cause is not established.
+At that snapshot, GPU and audio processing performed an initial pass, or a
+small number of passes, and then useful activity stopped. The cause was not
+established in that structural pass. The ownership map and hypotheses below
+describe that earlier investigation, not the current cutscene issue.
 
 ## Ownership map
 

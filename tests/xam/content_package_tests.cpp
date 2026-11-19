@@ -8,6 +8,7 @@
 // nothing, so a title's "save:\..." file I/O had nowhere to go and no save
 // survived a restart.
 
+#include <array>
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
@@ -30,7 +31,10 @@
 #include "xenon/kernel/memory.hpp"
 #include "xenon/kernel/process.hpp"
 #include "xenon/memory/address_space.hpp"
+#include "xenon/xam/content_graph.hpp"
 #include "xenon/xam/content_manager.hpp"
+#include "xenon/xam/dlc_manager.hpp"
+#include "../support/test_stfs.hpp"
 #include "xenon/xam/xam_session.hpp"
 #include "xenon/xam/types.hpp"
 
@@ -155,7 +159,8 @@ struct Fixture {
 
   // XamContentCreateEx(user, root, data, flags, disposition*, license*, 0, 0, overlapped).
   std::uint32_t create(const std::string& root, memory::GuestAddress data, std::uint32_t flags,
-                       std::uint32_t* disposition = nullptr, memory::GuestAddress overlapped = 0u) {
+                       std::uint32_t* disposition = nullptr, memory::GuestAddress overlapped = 0u,
+                       std::uint32_t expected_license = 0u) {
     const auto disposition_ptr = alloc(4);
     const auto license_ptr = alloc(4);
     address_space->write32_be(license_ptr, 0xAAAAAAAAu);
@@ -170,7 +175,7 @@ struct Fixture {
     address_space->write32_be(stack_top + 0x54u, overlapped);
     const auto result = call(kCreateEx, cpu);
     if (disposition) *disposition = address_space->read32_be(disposition_ptr);
-    if (result == 0u) assert(address_space->read32_be(license_ptr) == 0u);
+    if (result == 0u) assert(address_space->read32_be(license_ptr) == expected_license);
     return result;
   }
 
@@ -415,6 +420,100 @@ void test_thumbnails_and_creator() {
 
 }  // namespace
 
+// Regression (AC6's add-on aircraft never appeared): DLC packages found in the
+// launch's DLC folder were mounted as dlcN: but never listed as installed
+// content, so the title's XamContentCreateEnumerator for marketplace content
+// came back empty. Each package is now listed as marketplace content on the
+// hard disk, and XamContentCreate mounts it read-only under the title's root.
+void test_installed_dlc_is_enumerable_and_opens_read_only() {
+  const auto root = scratch("installed_dlc");
+  const auto dlc_folder = root / "dlc";
+  std::filesystem::create_directories(dlc_folder);
+  std::filesystem::create_directories(root / "base");
+  const auto package_name = std::string("101112131415161718191A1B1C1D1E1F20212223");
+  {
+    const auto bytes = xenon::test::make_test_stfs(0u, 0x11223344u);
+    std::ofstream file(dlc_folder / package_name, std::ios::binary);
+    file.write(reinterpret_cast<const char*>(bytes.data()),
+               static_cast<std::streamsize>(bytes.size()));
+  }
+  Fixture f(root / "saves");
+
+  // The content graph the session mounts, with its DLC found the way the
+  // runtime host finds it.
+  xam::ContentGraph graph{};
+  graph.base = std::make_unique<xam::BaseGameContent>();
+  graph.base->source_path = root / "base";
+  graph.base->status = xam::ContentStatus::Available;
+  xam::DLCManager dlc_manager;
+  for (auto& dlc : dlc_manager.discover_dlc_packages(dlc_folder, 0u))
+    graph.installed_dlc.push_back(std::move(dlc));
+  assert(graph.installed_dlc.size() == 1u);
+  assert(f.content_manager.mount_content_graph(*f.session.filesystem(), graph));
+
+  // Listed as marketplace content, under its package file name.
+  const auto listed = f.content_manager.enumerate_content(
+      xam::storage_device::HardDisk, xam::ContentType::Marketplace, 0u);
+  assert(listed.size() == 1u);
+  assert(listed[0].file_name == package_name);
+  assert(listed[0].display_name == "Test DLC");
+  assert(listed[0].size_bytes > 0u);
+  // Device 0 (XCONTENTDEVICE_ANY) lists it too: AC6 enumerates its DLC so.
+  const auto any_device =
+      f.content_manager.enumerate_content(0u, xam::ContentType::Marketplace, 0u);
+  assert(any_device.size() == 1u && any_device[0].file_name == package_name);
+
+  // XamContentCreateEx(OPEN_EXISTING) with the enumerated XCONTENT_DATA
+  // mounts the package's files read-only.
+  const auto data = f.alloc(0x134u);
+  f.address_space->write32_be(data, xam::storage_device::HardDisk);
+  f.address_space->write32_be(data + 4u, 2u);
+  for (std::size_t i = 0; i < package_name.size(); ++i)
+    f.address_space->write8(data + 264u + static_cast<std::uint32_t>(i),
+                            static_cast<std::uint8_t>(package_name[i]));
+  // Fully licensed: AC6 hides every DLC aircraft colour whose license bit
+  // is clear, and reported none.
+  std::uint32_t disposition = 0;
+  assert(f.create("dlc", data, kOpenExisting, &disposition, 0u, 0xFFFFFFFFu) ==
+         xam::result::Success);
+  assert(disposition == 2u && "opened");
+  {
+    filesystem::OpenOptions options{};
+    options.access = filesystem::FileAccess::Read;
+    options.disposition = filesystem::CreateDisposition::Open;
+    std::unique_ptr<filesystem::FileHandle> file;
+    assert(f.session.filesystem()->open("dlc:\\Content\\data.bin", options, file) ==
+           filesystem::FsError::None);
+    std::array<std::byte, 8> bytes{};
+    std::size_t read = 0;
+    assert(file->read(bytes, read) == filesystem::FsError::None && read == bytes.size());
+    for (std::size_t i = 0; i < bytes.size(); ++i)
+      assert(bytes[i] == static_cast<std::byte>((i * 37u + 11u) & 0xFFu));
+  }
+  assert(!f.write_file("dlc:\\Content\\new.bin", "x") && "read-only");
+  {
+    // AC6 opens its DLC files read/write: the handle is granted, the
+    // writes fail.
+    filesystem::OpenOptions options{};
+    options.access = filesystem::FileAccess::Read | filesystem::FileAccess::Write;
+    options.disposition = filesystem::CreateDisposition::Open;
+    std::unique_ptr<filesystem::FileHandle> file;
+    assert(f.session.filesystem()->open("dlc:\\Content\\data.bin", options, file) ==
+           filesystem::FsError::None);
+    const std::array<std::byte, 1> one{std::byte{1}};
+    std::size_t written = 0;
+    assert(file->write(one, written) != filesystem::FsError::None && written == 0u);
+  }
+
+  // The user's download is not the title's to delete or recreate.
+  assert(f.root_call(kClose, "dlc") == xam::result::Success);
+  assert(f.remove(data) == kAccessDenied);
+  assert(f.create("dlc", data, kCreateAlways) == kAccessDenied);
+  assert(f.create("dlc", data, kOpenExisting, nullptr, 0u, 0xFFFFFFFFu) == xam::result::Success);
+  assert(f.root_call(kClose, "dlc") == xam::result::Success);
+  std::cout << "test_installed_dlc_is_enumerable_and_opens_read_only passed\n";
+}
+
 int main() {
   test_create_mounts_writes_reach_the_host_and_close_unmounts();
   test_creation_dispositions();
@@ -422,6 +521,7 @@ int main() {
   test_overlapped_results_and_xam_content_create();
   test_a_package_the_host_cannot_remove_is_not_reported_deleted();
   test_thumbnails_and_creator();
+  test_installed_dlc_is_enumerable_and_opens_read_only();
   std::cout << "All content package tests passed!\n";
   return 0;
 }

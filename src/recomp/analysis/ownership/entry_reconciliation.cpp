@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <set>
 
 #include "recomp/analysis/analysis_phases.hpp"
 #include "recomp/driver/driver_support.hpp"
@@ -145,6 +146,55 @@ void build_guest_entry_map(AnalysisReport& report, std::vector<GuestEntryPoint> 
   }
   std::sort(report.entries.begin(), report.entries.end(),
             [](const auto& a, const auto& b) { return a.address < b.address; });
+}
+
+void build_guest_entry_map_withdrawing_unanchored(
+    AnalysisReport& report, const std::vector<GuestEntryPoint>& absorbed_entries,
+    const DriverOptions& effective,
+    const std::vector<analysis::RuntimeHelper>& expanded_runtime_helpers) {
+  // A function known ONLY from runtime observation (an interpreter entry, an
+  // indirect jump target) is a guess at a boundary: a switch case or loop
+  // check inside a function analysis never found. When one of its own jumps
+  // then leaves it for an address with no entry - back to the loop head
+  // before it - it cannot be compiled on its own, and generation must refuse
+  // it. That code stays with the interpreter, as before it was observed,
+  // instead of the whole preparation failing (AC6: 0x82382F3C inside a copy
+  // routine, 0x820B54D4 a switch case inside a loop). Functions with any
+  // other evidence keep the strict check. Withdrawing one can strand another
+  // that jumped into it, so this repeats until nothing changes.
+  const auto runtime_only = [](const DiscoveredFunction& function) {
+    return !function.sources.empty() &&
+           std::all_of(function.sources.begin(), function.sources.end(), [](DiscoverySource source) {
+             return source == DiscoverySource::RuntimeObservation;
+           });
+  };
+  for (;;) {
+    std::vector<GuestEntryPoint> absorbed;
+    for (const auto& entry : absorbed_entries) {
+      const auto owner = std::find_if(report.functions.begin(), report.functions.end(), [&](const auto& fn) {
+        return fn.guest_start == entry.owner_function;
+      });
+      if (owner == report.functions.end() || owner->compiled) absorbed.push_back(entry);
+    }
+    build_guest_entry_map(report, std::move(absorbed), effective, expanded_runtime_helpers);
+    std::set<GuestAddress> entries;
+    for (const auto& entry : report.entries) entries.insert(entry.address);
+    bool withdrew = false;
+    for (auto& function : report.functions) {
+      if (!function.compiled || function.native_replacement || !runtime_only(function)) continue;
+      const auto stranded = std::find_if(function.branches.begin(), function.branches.end(), [&](const auto& branch) {
+        return !branch.linked && !owns_address(function, branch.target) && !entries.contains(branch.target);
+      });
+      if (stranded == function.branches.end()) continue;
+      function.compiled = false;
+      withdrew = true;
+      report.warnings.push_back("runtime-observed region 0x" + hex_string(function.guest_start) +
+                                " left to the interpreter: its jump 0x" + hex_string(stranded->site) +
+                                " -> 0x" + hex_string(stranded->target) +
+                                " has no entry outside it (the enclosing function is not known)");
+    }
+    if (!withdrew) return;
+  }
 }
 
 void diagnose_function_ownership(AnalysisReport& report, const ExecutableRangeIndex& range_index) {

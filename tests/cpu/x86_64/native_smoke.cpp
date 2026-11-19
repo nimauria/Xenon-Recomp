@@ -86,7 +86,9 @@ int main(){
   smoke_vsel(s,mem,rt);
   for (unsigned i=0; i<16; ++i)
     assert(s.vr[3].bytes[i] == static_cast<std::uint8_t>((a.bytes[i]&~mask.bytes[i])|(b.bytes[i]&mask.bytes[i])));
-  s.vr[3]=a; s.vr[1]=b; s.vr[2]=mask;
+  // vsel128 v3,v1,v2,v3: the old vD is the mask (binutils {VD128,VA128,
+  // VB128,VS128}; xenia InstrEmit_vsel128), so v3 = (v1 & ~v3) | (v2 & v3).
+  s.vr[1]=a; s.vr[2]=b; s.vr[3]=mask;
   smoke_vsel128(s,mem,rt);
   for (unsigned i=0; i<16; ++i)
     assert(s.vr[3].bytes[i] == static_cast<std::uint8_t>((a.bytes[i]&~mask.bytes[i])|(b.bytes[i]&mask.bytes[i])));
@@ -110,12 +112,18 @@ int main(){
   const auto rotated=rotate_left64(s.gpr[11],8);
   assert(s.gpr[10] == (rotated & 0xFFFFFFFF00000000ull));
 
-  // OE+Rc: signed overflow sets OV/SO and CR0 includes SO.
+  // OE+Rc: signed overflow of the low word sets OV/SO and CR0 includes SO.
+  s.xer=0; s.gpr[13]=0x7FFFFFFFull; s.gpr[14]=1;
+  smoke_addo_rc(s,mem,rt);
+  assert(s.gpr[12]==0x80000000ull);
+  assert(s.xer_ov() && s.xer_so());
+  assert(s.cr_field(0)==0x9u); // LT | SO: low word 0x80000000 is negative
+  // A 64-bit-only overflow is not one: the low word is -1 + 1 = 0.
   s.xer=0; s.gpr[13]=0x7FFFFFFFFFFFFFFFull; s.gpr[14]=1;
   smoke_addo_rc(s,mem,rt);
   assert(s.gpr[12]==0x8000000000000000ull);
-  assert(s.xer_ov() && s.xer_so());
-  assert(s.cr_field(0)==0x9u); // LT | SO
+  assert(!s.xer_ov() && !s.xer_so());
+  assert(s.cr_field(0)==0x2u); // EQ: CR0 reads the low word, which is 0
 
   // Sign/move FP instructions do not modify FPSCR, but Rc snapshots it into CR1.
   s.fpscr=fpscr_bits::OX|fpscr_bits::OE; aot::recompute_fpscr_summaries(s);

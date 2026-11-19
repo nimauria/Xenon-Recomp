@@ -1,3 +1,4 @@
+import { t } from "../localization";
 import { useEffect, useState } from "react";
 import type { LauncherIntent } from "../../contracts/launcher";
 import { commandResults } from "../search";
@@ -14,10 +15,15 @@ export function CommandPalette({
   const [selected, select] = useState(0);
   const results = commandResults(state, query);
   useEffect(() => select(0), [query]);
+  useEffect(() => {
+    document
+      .getElementById(`command-option-${selected}`)
+      ?.scrollIntoView({ block: "nearest" });
+  }, [selected, query]);
   return (
-    <Modal title="Go anywhere" close={close}>
+    <Modal title={t("ui.fa8a81ce45d6")} close={close}>
       <label>
-        Search commands
+        {t("ui.00ff7398c308")}
         <input
           autoFocus
           role="combobox"
@@ -45,7 +51,7 @@ export function CommandPalette({
         className="command-list"
         id="command-results"
         role="listbox"
-        aria-label="Commands"
+        aria-label={t("ui.b269dc4e81a5")}
       >
         {results.map((item, index) => (
           <button
@@ -65,9 +71,7 @@ export function CommandPalette({
         ))}
       </div>
       {!results.length && (
-        <Empty title="No matching commands">
-          Try a page, game, module, profile or setting.
-        </Empty>
+        <Empty title={t("ui.1b8aace29798")}>{t("ui.d581988e9355")}</Empty>
       )}
     </Modal>
   );

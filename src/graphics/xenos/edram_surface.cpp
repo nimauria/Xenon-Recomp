@@ -46,14 +46,21 @@ std::uint16_t float_to_half(float value) noexcept {
   const auto sign = std::uint16_t((bits >> 16u) & 0x8000u);
   const auto magnitude = bits & 0x7FFFFFFFu;
   if (magnitude >= 0x7F800000u) {
-    return std::uint16_t(sign | (magnitude == 0x7F800000u ? 0x7C00u : 0x7E00u));
+    // Infinity, or a NaN keeping its payload's top bits (half_to_float() puts
+    // a half NaN's there, so the pair round-trips); a NaN whose top bits are
+    // zero stays a NaN.
+    if (magnitude == 0x7F800000u) return std::uint16_t(sign | 0x7C00u);
+    const auto payload = std::uint16_t((magnitude >> 13u) & 0x03FFu);
+    return std::uint16_t(sign | 0x7C00u | (payload ? payload : 0x0200u));
   }
   if (magnitude >= 0x477FF000u) return std::uint16_t(sign | 0x7C00u);
   if (magnitude < 0x33000000u) return sign;
   std::uint32_t rounded{};
   if (magnitude < 0x38800000u) {
+    // A half denormal is m * 2^-24: the 24-bit significand of 2^(e-127)
+    // shifted right by 126 - e.
     const auto mantissa = (magnitude & 0x7FFFFFu) | 0x800000u;
-    const auto shift = 113u - (magnitude >> 23u);
+    const auto shift = 126u - (magnitude >> 23u);
     rounded = mantissa >> shift;
     const auto remainder = mantissa & ((1u << shift) - 1u);
     const auto halfway = 1u << (shift - 1u);
@@ -117,22 +124,35 @@ bool EdramSurfaceLayout::valid() const noexcept {
 }
 
 namespace {
+// A surface's identity, packed exactly into the low 48 bits - base tile 12,
+// pitch 16, height 16, MSAA 2, 64bpp and depth 1 each - so two surfaces get
+// the same key only when they are the same surface; callers XOR their own
+// tags into bits 56 and up. (Every render-target and ownership lookup of a
+// draw computes these: the byte-wise FNV-1a they replace was a chain of 48
+// dependent multiplies each, ~15% of a draw's host time in draw-bench.)
+// Fields outside those ranges - only an invalid surface has them - are mixed
+// into all 64 bits instead.
 std::uint64_t hash_surface(const EdramSurfaceLayout& surface,
                            bool include_height) noexcept {
-  std::uint64_t hash = 14695981039346656037ull;
-  auto add = [&](std::uint64_t value) {
-    for (unsigned i = 0; i < 8; ++i) {
-      hash ^= static_cast<std::uint8_t>(value >> (i * 8u));
-      hash *= 1099511628211ull;
-    }
+  const std::uint64_t height = include_height ? surface.height_pixels : 0u;
+  const auto msaa = static_cast<std::uint64_t>(surface.msaa);
+  if (surface.base_tile < (1u << 12u) && surface.pitch_pixels < (1u << 16u) &&
+      height < (1u << 16u) && msaa < 4u) {
+    return std::uint64_t{surface.base_tile} | std::uint64_t{surface.pitch_pixels} << 12u |
+           height << 28u | msaa << 44u | std::uint64_t{surface.is_64bpp} << 46u |
+           std::uint64_t{surface.depth} << 47u;
+  }
+  const auto mix = [](std::uint64_t value) {
+    value ^= value >> 30u;
+    value *= 0xBF58476D1CE4E5B9ull;
+    value ^= value >> 27u;
+    value *= 0x94D049BB133111EBull;
+    return value ^ (value >> 31u);
   };
-  add(surface.base_tile);
-  add(surface.pitch_pixels);
-  if (include_height) add(surface.height_pixels);
-  add(static_cast<std::uint8_t>(surface.msaa));
-  add(surface.is_64bpp);
-  add(surface.depth);
-  return hash;
+  auto value = mix(std::uint64_t{surface.base_tile} | std::uint64_t{surface.pitch_pixels} << 32u);
+  value = mix(value ^ height ^ msaa << 40u ^ std::uint64_t{surface.is_64bpp} << 50u ^
+              std::uint64_t{surface.depth} << 51u);
+  return value | (1ull << 48u);  // never equal to an exact packing's low bits alone
 }
 }  // namespace
 
@@ -346,6 +366,12 @@ bool color_host_requires_conversion(ColorRenderTargetFormat format) noexcept {
     default:
       return false;
   }
+}
+
+bool color_host_transfers_as_integer(ColorRenderTargetFormat format) noexcept {
+  const auto storage = color_host_storage(format);
+  return storage == ColorHostStorage::R16G16Float ||
+         storage == ColorHostStorage::R16G16B16A16Float;
 }
 
 bool encode_host_color_sample(ColorRenderTargetFormat format,
@@ -661,6 +687,11 @@ bool clear_edram_surface_region(Edram& edram,
   return true;
 }
 
+std::uint32_t whole_tile_height_pixels(const EdramSurfaceLayout& layout) noexcept {
+  const auto rows_per_tile = layout.msaa == MsaaSamples::X1 ? 16u : 8u;
+  return (layout.height_pixels + rows_per_tile - 1u) / rows_per_tile * rows_per_tile;
+}
+
 std::uint32_t rows_before_next_surface(const EdramSurfaceLayout& layout,
                                        std::span<const std::uint32_t> bound_bases) {
   auto rows = layout.max_resident_height_pixels();
@@ -788,6 +819,35 @@ bool edram_direct_transfer_supported(const EdramSurfaceLayout& source,
                           source.base_tile % Edram::kTileCount) % 2u)
     return false;
   return true;
+}
+
+namespace {
+
+bool converting_transfer_format(EdramTransferEndpoint endpoint) noexcept {
+  if (endpoint.depth) {
+    const auto format = static_cast<DepthRenderTargetFormat>(endpoint.format);
+    return format == DepthRenderTargetFormat::D24S8 || format == DepthRenderTargetFormat::D24FS8;
+  }
+  switch (storage_color_format(static_cast<ColorRenderTargetFormat>(endpoint.format))) {
+    case ColorRenderTargetFormat::R8G8B8A8:
+    case ColorRenderTargetFormat::R10G10B10A2:
+    case ColorRenderTargetFormat::R16G16Float:
+    case ColorRenderTargetFormat::R32Float:
+      return true;
+    default:
+      return false;
+  }
+}
+
+}  // namespace
+
+bool edram_converting_transfer_supported(EdramTransferEndpoint source,
+                                         EdramTransferEndpoint destination) noexcept {
+  return converting_transfer_format(source) && converting_transfer_format(destination);
+}
+
+bool edram_canonical_load_supported(EdramTransferEndpoint destination) noexcept {
+  return converting_transfer_format(destination);
 }
 
 std::optional<EdramTransferSample> edram_transfer_source(

@@ -32,6 +32,23 @@ std::uint32_t color_bytes_per_pixel(ColorRenderTargetFormat format) noexcept {
   return color_host_bytes_per_pixel(format);
 }
 
+// The integer view of a 16-bit float color target and the typeless format
+// its resource needs to allow both views.
+DXGI_FORMAT integer_transfer_format(DXGI_FORMAT format) noexcept {
+  switch (format) {
+    case DXGI_FORMAT_R16G16_FLOAT: return DXGI_FORMAT_R16G16_UINT;
+    case DXGI_FORMAT_R16G16B16A16_FLOAT: return DXGI_FORMAT_R16G16B16A16_UINT;
+    default: return DXGI_FORMAT_UNKNOWN;
+  }
+}
+DXGI_FORMAT typeless_format(DXGI_FORMAT format) noexcept {
+  switch (format) {
+    case DXGI_FORMAT_R16G16_FLOAT: return DXGI_FORMAT_R16G16_TYPELESS;
+    case DXGI_FORMAT_R16G16B16A16_FLOAT: return DXGI_FORMAT_R16G16B16A16_TYPELESS;
+    default: return format;
+  }
+}
+
 bool create_shader_visible_srv_heap(
     ID3D12Device* device, ID3D12Resource* resource, DXGI_FORMAT format,
     bool multisampled,
@@ -59,7 +76,7 @@ bool create_sample_transfer_pipeline(
     bool write, Microsoft::WRL::ComPtr<ID3D12RootSignature>& root_signature,
     Microsoft::WRL::ComPtr<ID3D12PipelineState>& pipeline,
     std::string& error) {
-  DxcShaderCompiler compiler;
+  UtilityShaderCompiler compiler;
   const auto vs = compiler.compile(make_transfer_fullscreen_vertex_shader());
   const auto ps = compiler.compile(write ? make_color_sample_write_shader()
                                          : make_color_sample_read_shader(source_samples));
@@ -148,6 +165,12 @@ bool RenderTargetImage::initialize(ID3D12Device* device,
     error_ = "Xenos color target format needs a non-native conversion path";
     return false;
   }
+  const bool integer_transfers = color_host_transfers_as_integer(color_format);
+  transfer_format_ = integer_transfers ? integer_transfer_format(format_) : format_;
+  if (transfer_format_ == DXGI_FORMAT_UNKNOWN) {
+    error_ = "D3D12 color target has no integer view for its 16-bit float storage";
+    return false;
+  }
   width_ = surface.pitch_pixels;
   height_ = surface.height_pixels;
   surface_ = surface;
@@ -169,7 +192,7 @@ bool RenderTargetImage::initialize(ID3D12Device* device,
   desc.Height = surface.height_pixels;
   desc.DepthOrArraySize = 1;
   desc.MipLevels = 1;
-  desc.Format = format_;
+  desc.Format = integer_transfers ? typeless_format(format_) : format_;
   desc.SampleDesc.Count = 1u << static_cast<unsigned>(host_msaa_);
   desc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
   desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
@@ -187,13 +210,24 @@ bool RenderTargetImage::initialize(ID3D12Device* device,
   }
   D3D12_DESCRIPTOR_HEAP_DESC heap_desc{};
   heap_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
-  heap_desc.NumDescriptors = 1;
+  heap_desc.NumDescriptors = 2;
   if (FAILED(device->CreateDescriptorHeap(&heap_desc, IID_PPV_ARGS(&rtv_heap_)))) {
     error_ = "D3D12 RTV heap creation failed";
     reset(); return false;
   }
+  // Explicit view formats: the resource may be typeless.
+  const auto create_rtv = [&](DXGI_FORMAT format, D3D12_CPU_DESCRIPTOR_HANDLE handle) {
+    D3D12_RENDER_TARGET_VIEW_DESC view{};
+    view.Format = format;
+    view.ViewDimension = host_msaa_ != MsaaSamples::X1 ? D3D12_RTV_DIMENSION_TEXTURE2DMS
+                                                       : D3D12_RTV_DIMENSION_TEXTURE2D;
+    device->CreateRenderTargetView(resource_.Get(), &view, handle);
+  };
   rtv_ = rtv_heap_->GetCPUDescriptorHandleForHeapStart();
-  device->CreateRenderTargetView(resource_.Get(), nullptr, rtv_);
+  create_rtv(format_, rtv_);
+  transfer_rtv_ = rtv_;
+  transfer_rtv_.ptr += device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+  create_rtv(transfer_format_, transfer_rtv_);
   return true;
 }
 
@@ -678,7 +712,7 @@ ID3D12DescriptorHeap* RenderTargetImage::shader_resource_heap() {
   if (srv_heap_) return srv_heap_.Get();
   Microsoft::WRL::ComPtr<ID3D12Device> device;
   if (!resource_ || FAILED(resource_->GetDevice(IID_PPV_ARGS(&device))) ||
-      !create_shader_visible_srv_heap(device.Get(), resource_.Get(), format_,
+      !create_shader_visible_srv_heap(device.Get(), resource_.Get(), transfer_format_,
                                       host_msaa_ != MsaaSamples::X1, srv_heap_)) {
     error_ = "D3D12 color-target SRV creation failed";
     srv_heap_.Reset();
@@ -691,8 +725,8 @@ void RenderTargetImage::reset() noexcept {
   srv_heap_.Reset();
   resource_.Reset();
   rtv_heap_.Reset();
-  rtv_ = {};
-  format_ = DXGI_FORMAT_UNKNOWN;
+  rtv_ = transfer_rtv_ = {};
+  format_ = transfer_format_ = DXGI_FORMAT_UNKNOWN;
   guest_format_ = ColorRenderTargetFormat::R8G8B8A8;
   width_ = height_ = bytes_per_pixel_ = 0;
   surface_ = {};

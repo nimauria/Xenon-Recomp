@@ -26,7 +26,7 @@ ExecutionResult guest_return(cpu::CpuState& state) {
   return {FlowReason::Return, static_cast<GuestAddress>(state.lr & ~3ull), 0};
 }
 
-std::vector<std::byte> read_guest_bytes(cpu::MemoryPort& memory, GuestAddress address,
+std::vector<std::byte> read_guest_bytes(cpu::MemoryAccessContext& memory, GuestAddress address,
                                         std::uint32_t count) {
   std::vector<std::byte> bytes(count);
   memory.read_bytes(address, bytes);
@@ -37,7 +37,7 @@ std::vector<std::byte> read_guest_bytes(cpu::MemoryPort& memory, GuestAddress ad
 // bound) to guarantee termination even against a malformed/unterminated
 // guest buffer - a genuine safety property real hardware's string routines
 // do not need but a host-side loop must have.
-std::string read_guest_cstring(cpu::MemoryPort& memory, GuestAddress address,
+std::string read_guest_cstring(cpu::MemoryAccessContext& memory, GuestAddress address,
                                std::uint32_t max_length = 0xFFFFu) {
   std::string result;
   for (std::uint32_t i = 0; i < max_length; ++i) {
@@ -55,8 +55,8 @@ ExecutionResult memcpy_v2(ExecutionContext& context) {
   const auto dst = static_cast<GuestAddress>(state.gpr[3]);
   const auto src = static_cast<GuestAddress>(state.gpr[4]);
   const auto count = static_cast<std::uint32_t>(state.gpr[5]);
-  const auto bytes = read_guest_bytes(context.memory, src, count);
-  context.memory.write_bytes(dst, bytes);
+  const auto bytes = read_guest_bytes(context.memory_access, src, count);
+  context.memory_access.write_bytes(dst, bytes);
   state.gpr[3] = dst;  // memcpy returns dst
   return guest_return(state);
 }
@@ -73,7 +73,7 @@ ExecutionResult memset_v2(ExecutionContext& context) {
   const auto dst = static_cast<GuestAddress>(state.gpr[3]);
   const auto value = static_cast<std::uint8_t>(state.gpr[4] & 0xFFu);
   const auto count = static_cast<std::uint32_t>(state.gpr[5]);
-  context.memory.fill_bytes(dst, count, value);
+  context.memory_access.fill_bytes(dst, count, value);
   state.gpr[3] = dst;  // memset returns dst
   return guest_return(state);
 }
@@ -91,8 +91,8 @@ ExecutionResult memcpy_checked_v2(ExecutionContext& context) {
     state.gpr[3] = 34u;  // ERANGE
     return guest_return(state);
   }
-  const auto bytes = read_guest_bytes(context.memory, src, count);
-  context.memory.write_bytes(dst, bytes);
+  const auto bytes = read_guest_bytes(context.memory_access, src, count);
+  context.memory_access.write_bytes(dst, bytes);
   state.gpr[3] = 0u;
   return guest_return(state);
 }
@@ -106,8 +106,8 @@ ExecutionResult memcmp_v2(ExecutionContext& context) {
   const auto lhs = static_cast<GuestAddress>(state.gpr[3]);
   const auto rhs = static_cast<GuestAddress>(state.gpr[4]);
   const auto count = static_cast<std::uint32_t>(state.gpr[5]);
-  const auto lhs_bytes = read_guest_bytes(context.memory, lhs, count);
-  const auto rhs_bytes = read_guest_bytes(context.memory, rhs, count);
+  const auto lhs_bytes = read_guest_bytes(context.memory_access, lhs, count);
+  const auto rhs_bytes = read_guest_bytes(context.memory_access, rhs, count);
   std::int32_t result = 0;
   for (std::uint32_t i = 0; i < count; ++i) {
     const auto a = std::to_integer<std::uint8_t>(lhs_bytes[i]);
@@ -121,7 +121,7 @@ ExecutionResult memcmp_v2(ExecutionContext& context) {
 ExecutionResult strlen_v2(ExecutionContext& context) {
   auto& state = context.state;
   const auto str = static_cast<GuestAddress>(state.gpr[3]);
-  const auto text = read_guest_cstring(context.memory, str);
+  const auto text = read_guest_cstring(context.memory_access, str);
   state.gpr[3] = static_cast<std::uint64_t>(text.size());
   return guest_return(state);
 }
@@ -133,8 +133,8 @@ ExecutionResult strncmp_v2(ExecutionContext& context) {
   const auto count = static_cast<std::uint32_t>(state.gpr[5]);
   std::int32_t result = 0;
   for (std::uint32_t i = 0; i < count; ++i) {
-    const auto a = context.memory.read8(lhs + i);
-    const auto b = context.memory.read8(rhs + i);
+    const auto a = context.memory_access.read8(lhs + i);
+    const auto b = context.memory_access.read8(rhs + i);
     if (a != b) { result = static_cast<std::int32_t>(a) - static_cast<std::int32_t>(b); break; }
     if (a == 0) break;  // both strings ended identically within count
   }
@@ -151,10 +151,10 @@ ExecutionResult strncpy_v2(ExecutionContext& context) {
   for (std::uint32_t i = 0; i < count; ++i) {
     std::uint8_t byte = 0;
     if (!ended) {
-      byte = context.memory.read8(src + i);
+      byte = context.memory_access.read8(src + i);
       if (byte == 0) ended = true;
     }
-    context.memory.write8(dst + i, byte);  // real strncpy zero-pads the remainder
+    context.memory_access.write8(dst + i, byte);  // real strncpy zero-pads the remainder
   }
   state.gpr[3] = dst;  // strncpy returns dst
   return guest_return(state);
@@ -166,7 +166,7 @@ ExecutionResult strchr_v2(ExecutionContext& context) {
   const auto target = static_cast<std::uint8_t>(state.gpr[4] & 0xFFu);
   GuestAddress result = 0;
   for (GuestAddress offset = 0;; ++offset) {
-    const auto byte = context.memory.read8(str + offset);
+    const auto byte = context.memory_access.read8(str + offset);
     if (byte == target) { result = str + offset; break; }
     if (byte == 0) break;  // target not found before the terminator
   }
@@ -178,8 +178,8 @@ ExecutionResult strstr_v2(ExecutionContext& context) {
   auto& state = context.state;
   const auto haystack_addr = static_cast<GuestAddress>(state.gpr[3]);
   const auto needle_addr = static_cast<GuestAddress>(state.gpr[4]);
-  const auto haystack = read_guest_cstring(context.memory, haystack_addr);
-  const auto needle = read_guest_cstring(context.memory, needle_addr);
+  const auto haystack = read_guest_cstring(context.memory_access, haystack_addr);
+  const auto needle = read_guest_cstring(context.memory_access, needle_addr);
   GuestAddress result = 0;
   if (needle.empty()) {
     result = haystack_addr;
@@ -197,7 +197,7 @@ ExecutionResult strrchr_v2(ExecutionContext& context) {
   auto& state = context.state;
   const auto str = static_cast<GuestAddress>(state.gpr[3]);
   const auto target = static_cast<std::uint8_t>(state.gpr[4] & 0xFFu);
-  const auto text = read_guest_cstring(context.memory, str);
+  const auto text = read_guest_cstring(context.memory_access, str);
   GuestAddress result = 0;
   const auto position = text.find_last_of(static_cast<char>(target));
   if (position != std::string::npos) {
@@ -215,16 +215,16 @@ ExecutionResult strcpy_checked_v2(ExecutionContext& context) {
   const auto dst = static_cast<GuestAddress>(state.gpr[3]);
   const auto dst_size = static_cast<std::uint32_t>(state.gpr[4]);
   const auto src = static_cast<GuestAddress>(state.gpr[5]);
-  const auto text = read_guest_cstring(context.memory, src, dst_size);
+  const auto text = read_guest_cstring(context.memory_access, src, dst_size);
   if (dst_size == 0 || text.size() + 1u > dst_size) {
-    if (dst_size > 0) context.memory.write8(dst, 0);
+    if (dst_size > 0) context.memory_access.write8(dst, 0);
     state.gpr[3] = 34u;  // ERANGE
     return guest_return(state);
   }
   for (std::size_t i = 0; i < text.size(); ++i) {
-    context.memory.write8(dst + static_cast<GuestAddress>(i), static_cast<std::uint8_t>(text[i]));
+    context.memory_access.write8(dst + static_cast<GuestAddress>(i), static_cast<std::uint8_t>(text[i]));
   }
-  context.memory.write8(dst + static_cast<GuestAddress>(text.size()), 0);
+  context.memory_access.write8(dst + static_cast<GuestAddress>(text.size()), 0);
   state.gpr[3] = 0u;
   return guest_return(state);
 }

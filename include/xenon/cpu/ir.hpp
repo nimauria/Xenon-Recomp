@@ -85,7 +85,13 @@ enum class Op : std::uint16_t {
   Branch, BranchIf, BranchIndirect, Call, CallIndirect, Return,
   Trap, Syscall,
 
-
+  // A module-supplied native routine run at this point of a guest function
+  // (a mid-instruction hook - see InstructionHook in function_compiler.hpp).
+  // imm0 is the hook's ordinal in the module's hook table; imm1 packs the
+  // InstructionHookAction taken when it returns true (bits 0-1) and false
+  // (bits 2-3); each Jump action takes its I64 constant target as an operand,
+  // true target first. Every guest register and memory is visible to it.
+  HostHook,
 };
 
 // All current Xenon IR operations use at most four value operands. Keeping

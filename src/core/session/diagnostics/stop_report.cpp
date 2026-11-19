@@ -57,8 +57,29 @@ std::vector<std::string> XenonSession::describe_pump_state() {
   vsync << "GPU vsync interrupt: callback=0x" << std::hex << interrupt.callback_address
         << " context=0x" << interrupt.context << std::dec
         << " delivered=" << gpu_interrupts_delivered_.load()
-        << " failed=" << gpu_interrupts_failed_.load();
+        << " failed=" << gpu_interrupts_failed_.load()
+        << " display_locked_vblanks=" << gpu_vblanks_display_locked_.load()
+        << " scanout_latch_timeouts=" << scanout_latch_timeouts_.load();
   lines.push_back(vsync.str());
+  if (input_) {
+    // Whether a controller reached the guest: a pad that was never enumerated,
+    // never assigned to a user, or gated by focus leaves the title idle.
+    const auto input = input_->diagnostics();
+    lines.push_back("Input: " + std::to_string(input.driver_count) + " drivers, " +
+                    std::to_string(input.connected_device_count) + " connected devices, " +
+                    std::to_string(input.assigned_user_count) + " assigned users; focused=" +
+                    (input.focused ? "yes" : "no") +
+                    " effective_active=" + (input.effective_active ? "yes" : "no"));
+    for (const auto& device : input.devices) {
+      const auto info = input_->device(device.id);
+      lines.push_back("  " + device.identity_key + " '" + (info ? info->name : std::string{}) +
+                      "' " + (device.connected ? "connected" : "disconnected") + " user=" +
+                      std::to_string(device.assigned_user) + " state polls " +
+                      std::to_string(device.state_polls) + " (failed " +
+                      std::to_string(device.state_failures) + "), last result " +
+                      std::string(input::to_string(device.last_result)));
+    }
+  }
   if (memory_) {
     // Who owns the 512 MiB: a title that exhausts physical memory sees
     // MmAllocatePhysicalMemoryEx/NtAllocateVirtualMemory fail and usually
@@ -308,6 +329,20 @@ void XenonSession::report_stop_diagnostics() {
                     << performance.resolve_operations << " (" << performance.failed_resolves
                     << " failed); last error: "
                     << (gpu_->last_error().empty() ? "none" : gpu_->last_error()) << std::endl;
+          for (const auto& reason : gpu_->failure_reasons()) {
+            std::cout << "[XenonSession]   " << (reason.resolve ? "resolve" : "draw")
+                      << " failed x" << reason.count << ": " << reason.message << std::endl;
+          }
+          // Which passes resolved to nothing: a black frame with no failed
+          // draws is traced from here.
+          for (const auto& kind : gpu_->resolve_census()) {
+            std::cout << "[XenonSession]   " << (kind.depth ? "depth" : "color")
+                      << " resolve rt format " << unsigned(kind.source_format)
+                      << " -> texture format " << unsigned(kind.destination_format) << ' '
+                      << kind.width << 'x' << kind.height << ": x" << kind.count << ", all-zero x"
+                      << kind.all_zero << ", single-lane x" << kind.single_lane << " (latest to 0x"
+                      << std::hex << kind.last_destination << std::dec << ")" << std::endl;
+          }
         }
         // Whether the scanout source holds an image at all: a black window
         // with an all-zero front buffer is a rendering problem, not a
@@ -497,17 +532,18 @@ void XenonSession::report_stop_diagnostics() {
     sample_memory_watch(final_sample);
     const auto history = memory_watch_.history();
     std::scoped_lock console_log_lock(console_log_mutex());
-    std::cout << "[XenonSession] Memory watch: " << memory_watch_.addresses().size()
+    const auto targets = memory_watch_.targets();
+    std::cout << "[XenonSession] Memory watch: " << targets.size()
               << " word(s), " << memory_watch_.total_changes() << " change(s), "
               << history.size() << " retained record(s):" << std::endl;
     for (const auto& record : history) {
       std::cout << "[XenonSession]   " << GuestMemoryWatch::format(record) << std::endl;
     }
-    for (const auto address : memory_watch_.addresses()) {
-      const auto value = memory_watch_.last_value(address);
-      std::cout << "[XenonSession]   0x" << std::hex << std::uppercase << address << " = ";
+    for (const auto& target : targets) {
+      const auto value = memory_watch_.last_value(target);
+      std::cout << "[XenonSession]   " << format_watch_target(target) << " = ";
       if (value) {
-        std::cout << "0x" << *value;
+        std::cout << "0x" << std::hex << std::uppercase << *value;
       } else {
         std::cout << "<unreadable>";
       }

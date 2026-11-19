@@ -12,7 +12,7 @@ a boot-progress report is meaningful even before a title is loaded).
 ## Scope: platform-observable only, never game-state
 
 The pass's instructions are explicit that boot checkpoints must never
-hardcode game-state addresses or detect title-specific screens. Twelve
+hardcode game-state addresses or detect title-specific screens. Thirteen
 platform-level checkpoints are defined
 (`XEX_LOADED`/`ENTRY_STARTED`/`FIRST_GUEST_THREAD`/`FIRST_FILE_OPEN`/
 `FIRST_INPUT_POLL`/`FIRST_AUDIO_CLIENT`/`FIRST_GPU_SUBMISSION`/`FIRST_SHADER`/

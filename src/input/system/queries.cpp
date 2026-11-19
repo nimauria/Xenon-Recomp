@@ -9,6 +9,34 @@
 #include <utility>
 
 namespace xenon::input {
+namespace {
+
+// A deliberate input since the previous poll: a newly pressed button, or a
+// trigger or stick pushed well past a resting position. Small stick drift and
+// held inputs are not activity, so they never take control away.
+bool gamepad_activity(const GamepadState& previous, const GamepadState& now) noexcept {
+  constexpr int kStickActive = 12000;
+  constexpr int kStickStep = 4000;
+  constexpr int kTriggerActive = 64;
+  if ((now.buttons & ~previous.buttons) != 0) return true;
+  const auto trigger = [](std::uint8_t before, std::uint8_t after) {
+    return after >= kTriggerActive && before < kTriggerActive;
+  };
+  if (trigger(previous.left_trigger, now.left_trigger) ||
+      trigger(previous.right_trigger, now.right_trigger)) {
+    return true;
+  }
+  const auto stick = [](std::int16_t before, std::int16_t after) {
+    const int a = after;
+    const int delta = a - static_cast<int>(before);
+    return (a >= kStickActive || a <= -kStickActive) &&
+           (delta >= kStickStep || delta <= -kStickStep);
+  };
+  return stick(previous.thumb_lx, now.thumb_lx) || stick(previous.thumb_ly, now.thumb_ly) ||
+         stick(previous.thumb_rx, now.thumb_rx) || stick(previous.thumb_ry, now.thumb_ry);
+}
+
+}  // namespace
 
 Result InputSystem::poll_state_source(std::uint32_t user_index,
                                       const RoutedDevice& route,
@@ -57,6 +85,7 @@ Result InputSystem::get_state(std::uint32_t user_index, State& out_state) {
 
   bool enabled{};
   Source primary{};
+  std::optional<Source> companion{};
   std::vector<Source> additional_sources;
   {
     std::scoped_lock lock(mutex_);
@@ -67,6 +96,12 @@ Result InputSystem::get_state(std::uint32_t user_index, State& out_state) {
     primary.route = *routed;
     primary.driver = drivers_[routed->driver_index].driver.get();
     ++records_.at(routed->id).state_polls;
+
+    if (const auto paired = companion_route_locked(user_index);
+        paired && paired->id != routed->id) {
+      ++records_.at(paired->id).state_polls;
+      companion = Source{*paired, drivers_[paired->driver_index].driver.get()};
+    }
 
     const auto& extras = extra_sources_[user_index];
     if (!extras.empty()) {
@@ -108,7 +143,35 @@ Result InputSystem::get_state(std::uint32_t user_index, State& out_state) {
     }
   };
 
-  poll(primary);
+  if (companion) {
+    // A controller and its companion (keyboard + mouse) are interchangeable:
+    // whichever the player touched last drives the user, so an idle pad's
+    // resting stick never fights the keyboard and vice versa.
+    GamepadState pad{};
+    GamepadState keys{};
+    const auto pad_result = poll_state_source(user_index, primary.route, *primary.driver, pad);
+    const auto keys_result =
+        poll_state_source(user_index, companion->route, *companion->driver, keys);
+    if (pad_result != Result::Success && keys_result != Result::Success) return pad_result;
+    {
+      std::scoped_lock lock(mutex_);
+      auto& sticky = companion_sticky_[user_index];
+      const bool pad_moved = pad_result == Result::Success &&
+                             gamepad_activity(sticky.last_pad, pad);
+      const bool keys_moved = keys_result == Result::Success &&
+                              gamepad_activity(sticky.last_keys, keys);
+      if (keys_moved && !pad_moved) sticky.companion_active = true;
+      if (pad_moved && !keys_moved) sticky.companion_active = false;
+      if (pad_result != Result::Success) sticky.companion_active = true;
+      if (keys_result != Result::Success) sticky.companion_active = false;
+      if (pad_result == Result::Success) sticky.last_pad = pad;
+      if (keys_result == Result::Success) sticky.last_keys = keys;
+      merged = sticky.companion_active ? keys : pad;
+    }
+    any_success = true;
+  } else {
+    poll(primary);
+  }
   for (auto& source : additional_sources) poll(source);
   if (!any_success) return first_error;
 

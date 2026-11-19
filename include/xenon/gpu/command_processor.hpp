@@ -1,13 +1,18 @@
 #pragma once
 
+#include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <cstddef>
 #include <functional>
+#include <memory>
 #include <optional>
 #include <span>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
+#include "xenon/gpu/front_buffer_swap.hpp"
 #include "xenon/gpu/ir.hpp"
 #include "xenon/gpu/register_file.hpp"
 #include "xenon/memory/address_space.hpp"
@@ -67,11 +72,17 @@ class CommandProcessor {
     std::uint64_t event_memory_writes{};
     std::uint64_t event_counter_writes{};
     std::uint64_t extent_event_writes{};
+    // EVENT_WRITE_EXT packets whose write left memory unchanged (no barrier).
+    std::uint64_t unchanged_event_writes{};
     std::uint64_t viz_query_begins{};
     std::uint64_t viz_query_ends{};
     std::uint64_t viz_query_visible_results{};
     std::uint64_t interrupt_packets{};
     std::uint64_t interrupt_dispatches{};
+    // VdSwap front-buffer flips executed in stream order.
+    std::uint64_t front_buffer_swaps{};
+    // GPU/CPU synchronisation points (set_sync_point_callback()).
+    std::uint64_t sync_points{};
     // Type-3 packets with no executor (NOP excepted), emitted as unlowered
     // ir::Type3Packet. Nonzero is a real gap in the command processor.
     std::uint64_t unexecuted_packets{};
@@ -109,15 +120,25 @@ class CommandProcessor {
                                            std::uint32_t write_index);
 
   void reset();
-  // Guest presentation / swap progress. EVENT_WRITE_SHD may request this
-  // counter rather than its literal payload value (initiator bit 31).
-  void notify_present() noexcept { ++swap_counter_; }
+  // The GPU progress counter EVENT_WRITE_SHD writes instead of its literal
+  // value when the initiator's bit 31 is set. It advances on every front
+  // buffer swap and on every vblank (xenia's and rexglue's counter_,
+  // incremented by the swap packet and by MarkVblank). The vblank thread
+  // and the command-processor worker both advance it, hence the atomic
+  // access.
+  void notify_present() noexcept { advance_progress_counter(); }
+  void notify_vblank() noexcept { advance_progress_counter(); }
   [[nodiscard]] std::uint32_t swap_counter() const noexcept {
-    return swap_counter_;
+    return std::atomic_ref<const std::uint32_t>(swap_counter_).load(std::memory_order_acquire);
   }
   void set_interrupt_callback(
       std::function<void(std::uint32_t cpu_index)> callback) {
     interrupt_callback_ = std::move(callback);
+  }
+  // A front-buffer flip VdSwap placed in the stream (front_buffer_swap.hpp),
+  // run when the command processor reaches it, after the work queued before it.
+  void set_swap_callback(std::function<void(const FrontBufferSwap&)> callback) {
+    swap_callback_ = std::move(callback);
   }
   // Called before every effect of the command stream a guest can observe:
   // a write to guest memory (fences, MEM_WRITE, REG_TO_MEM, scratch
@@ -126,8 +147,52 @@ class CommandProcessor {
   // commands before them have executed, so a renderer that executes graphics
   // IR after decoding installs a barrier that executes what is pending
   // (GraphicsSystem::submit_ring(Backend&, ...)). Empty: decode only.
+  // What a guest-visible barrier is for (last_barrier_kind(), read by the
+  // barrier callback): a CP interrupt, a front-buffer flip, a wait on memory
+  // or a register, or a guest memory write or instruction store.
+  enum class BarrierKind : std::uint8_t { Write, Wait, Interrupt, Swap, ShaderStore };
+  [[nodiscard]] BarrierKind last_barrier_kind() const noexcept { return barrier_kind_; }
   void set_guest_visible_barrier(std::function<void()> barrier) {
     guest_visible_barrier_ = std::move(barrier);
+  }
+  // Called where the command processor synchronises with the CPU: a wait is
+  // satisfied (WAIT_REG_MEM, WAIT_REG_EQ/GTE), and an interrupt is about to run
+  // the title's handler. What follows reads guest memory as it stands at that
+  // point (gpu::Backend::sync_guest_reads()).
+  void set_sync_point_callback(std::function<void()> callback) {
+    sync_point_callback_ = std::move(callback);
+  }
+  // Called after each draw (a resolve is one) is emitted into the stream, so
+  // a renderer executing IR on another thread can hand work over while the
+  // drain continues (GraphicsSystem streams it to its backend thread).
+  void set_draw_emitted_callback(std::function<void()> callback) {
+    draw_emitted_callback_ = std::move(callback);
+  }
+  // GPU V3: with a sink installed, the guest memory writes the command
+  // stream makes - fences (EVENT_WRITE_SHD), MEM_WRITE, REG_TO_MEM, scratch
+  // write-back, EVENT_WRITE_EXT - are handed to it instead of performed here.
+  // The sink performs each after the work before it, as the hardware does
+  // when the GPU reaches the packet (GraphicsSystem: an ordered backend task),
+  // so decoding does not wait for that work. `skip_if_unchanged`: the write
+  // may be dropped when memory already holds the bytes (EVENT_WRITE_EXT; the
+  // sink reports the outcome through note_deferred_extent_write()). Without a
+  // sink, each write is made here after the guest-visible barrier.
+  using GuestWriteSink = std::function<void(std::uint32_t physical_address,
+                                            std::vector<std::byte> bytes,
+                                            bool skip_if_unchanged)>;
+  void set_guest_write_sink(GuestWriteSink sink) { guest_write_sink_ = std::move(sink); }
+  // Called with the physical range the command processor is about to read
+  // (COND_EXEC, COND_WRITE, memory waits, constant and microcode loads), so it
+  // reads what the stream wrote there before. The command stream's own words
+  // (ring, indirect buffers) are fetched without it, as the hardware's
+  // prefetching command fetch does.
+  void set_guest_read_fence(std::function<void(std::uint32_t address, std::uint32_t size)> fence) {
+    guest_read_fence_ = std::move(fence);
+  }
+  // The outcome of a deferred EVENT_WRITE_EXT; callable from any thread.
+  void note_deferred_extent_write(bool unchanged) noexcept {
+    (unchanged ? deferred_extent_unchanged_ : deferred_extent_written_)
+        .fetch_add(1u, std::memory_order_relaxed);
   }
 
   // The WAIT_REG_MEM the most recent stalled drain is parked on (diagnostics: a
@@ -147,7 +212,19 @@ class CommandProcessor {
   // no notification, so the drainer polls while this holds.
   [[nodiscard]] bool parked_on_wait() const noexcept { return resume_pending_; }
 
-  [[nodiscard]] const Statistics& statistics() const noexcept { return stats_; }
+  // Counters so far. Deferred EVENT_WRITE_EXT outcomes are folded in.
+  [[nodiscard]] Statistics statistics() const noexcept {
+    auto result = stats_;
+    const auto unchanged = deferred_extent_unchanged_.load(std::memory_order_relaxed);
+    const auto written = deferred_extent_written_.load(std::memory_order_relaxed);
+    result.unchanged_event_writes += unchanged;
+    result.event_memory_writes += written;
+    result.physical_writes += 3u * written;
+    return result;
+  }
+  // Draws (resolves included) decoded so far: the cheap read of
+  // statistics().draws for per-barrier checks.
+  [[nodiscard]] std::uint64_t draw_count() const noexcept { return stats_.draws; }
   [[nodiscard]] std::uint32_t max_indirect_depth() const noexcept {
     return max_indirect_depth_;
   }
@@ -160,6 +237,25 @@ class CommandProcessor {
   [[nodiscard]] const std::optional<ShaderProgram>& active_pixel_program() const noexcept {
     return active_pixel_program_;
   }
+  // Whether a draw the last execute_ring() decoded reads, by address, guest
+  // memory commands have been fetched from - the ring itself or an indirect
+  // buffer: Direct3D's BeginVertices/DrawPrimitiveUP data, and its resolve
+  // rectangles, can live in its command buffers. The guest recycles command
+  // memory as the read pointer passes it, so the read pointer of such a
+  // drain must not reach the guest before its draws have read their data.
+  // Checked: index buffers, the vertex fetches of both active shaders, and a
+  // resolve's rectangle vertices (fetch constant 0).
+  [[nodiscard]] bool drain_reads_command_memory() const noexcept {
+    return drain_reads_command_memory_;
+  }
+  // The guest physical ranges commands have been fetched from, [begin, end),
+  // sorted and disjoint (bounded: past kCommandMemoryRanges the closest
+  // neighbours merge, which only widens the check).
+  [[nodiscard]] const std::vector<std::pair<std::uint64_t, std::uint64_t>>& command_memory()
+      const noexcept {
+    return command_memory_;
+  }
+  static constexpr std::size_t kCommandMemoryRanges = 64;
 
  private:
   static constexpr std::uint32_t kMaximumIndirectDepth = 32;
@@ -236,17 +332,54 @@ class CommandProcessor {
   ir::ShaderReference active_pixel_shader_{};
   std::optional<ShaderProgram> active_vertex_program_{};
   std::optional<ShaderProgram> active_pixel_program_{};
+  // Their decodes (the vertex fetches a draw makes).
+  std::shared_ptr<const DecodedShader> active_vertex_decoded_{};
+  std::shared_ptr<const DecodedShader> active_pixel_decoded_{};
+  std::vector<std::pair<std::uint64_t, std::uint64_t>> command_memory_{};
+  bool drain_reads_command_memory_{};
+  void note_command_memory(std::uint64_t begin, std::uint64_t end);
+  [[nodiscard]] bool overlaps_command_memory(std::uint64_t begin,
+                                             std::uint64_t end) const noexcept;
+  // Sets drain_reads_command_memory_ when `draw` reads command memory.
+  void note_draw_memory_reads(const ir::DrawPacket& draw);
+  // One decode per distinct program (ShaderProgram::hash() covers stage,
+  // start slot and microcode); repeated loads share it.
+  std::unordered_map<std::uint64_t, std::shared_ptr<const DecodedShader>> decoded_programs_{};
+  [[nodiscard]] std::shared_ptr<const DecodedShader> decode_program(const ShaderProgram& program);
   ShaderPartitionState shader_partition_{};
   std::uint32_t bin_base_offset_{};
   std::uint64_t bin_mask_{};
   std::uint64_t bin_select_{};
   std::uint64_t active_viz_queries_{};
   std::uint64_t viz_query_draws_{};
-  std::uint32_t swap_counter_{};
+  void advance_progress_counter() noexcept {
+    std::atomic_ref<std::uint32_t>(swap_counter_).fetch_add(1u, std::memory_order_acq_rel);
+  }
+  alignas(std::atomic_ref<std::uint32_t>::required_alignment) std::uint32_t swap_counter_{};
   std::function<void(std::uint32_t cpu_index)> interrupt_callback_{};
+  std::function<void(const FrontBufferSwap&)> swap_callback_{};
   std::function<void()> guest_visible_barrier_{};
-  void before_guest_visible_effect() {
+  std::function<void()> sync_point_callback_{};
+  std::function<void()> draw_emitted_callback_{};
+  GuestWriteSink guest_write_sink_{};
+  std::function<void(std::uint32_t, std::uint32_t)> guest_read_fence_{};
+  std::atomic<std::uint64_t> deferred_extent_unchanged_{0};
+  std::atomic<std::uint64_t> deferred_extent_written_{0};
+  // A guest memory write the stream makes at this point: through the sink,
+  // or here after the guest-visible barrier.
+  void write_guest_effect(std::uint32_t address, std::span<const std::byte> bytes,
+                          const char* failure);
+  void before_guest_memory_read(std::uint32_t address, std::uint32_t size) const {
+    if (guest_read_fence_) guest_read_fence_(address, size);
+  }
+  void before_guest_visible_effect(BarrierKind kind = BarrierKind::Write) {
+    barrier_kind_ = kind;
     if (guest_visible_barrier_) guest_visible_barrier_();
+  }
+  BarrierKind barrier_kind_{BarrierKind::Write};
+  void sync_point() {
+    ++stats_.sync_points;
+    if (sync_point_callback_) sync_point_callback_();
   }
   std::uint64_t submission_dwords_{};
   std::uint32_t max_indirect_depth_{};

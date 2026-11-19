@@ -7,6 +7,7 @@
 
 #include <vulkan/vulkan.h>
 
+#include "xenon/gpu/depth_format.hpp"
 #include "xenon/gpu/edram_surface.hpp"
 #include "xenon/gpu/vulkan/command_queue.hpp"
 
@@ -47,6 +48,19 @@ class DepthTargetImage {
       std::uint32_t top, std::uint32_t right, std::uint32_t bottom,
       std::span<const std::uint32_t> source, std::uint32_t row_pitch);
   void transition_to_depth_attachment(VkCommandBuffer command) noexcept;
+  [[nodiscard]] VkImageLayout layout() const noexcept { return layout_; }
+  // Makes the image readable by fragment shaders as a direct EDRAM transfer
+  // source (DEPTH_STENCIL_READ_ONLY_OPTIMAL); transition_to_depth_attachment
+  // returns it.
+  void transition_to_sampled(VkCommandBuffer command) noexcept;
+  // A descriptor set of `set_layout` (bindings 16 and 17 sampled images)
+  // holding this image's depth and stencil aspects for that layout, created
+  // on first use. Null on failure (error()). EDRAM transfers and GPU depth
+  // resolves both read the image through it, so every caller's layout must
+  // give both bindings exactly kSampledSourceStages.
+  static constexpr VkShaderStageFlags kSampledSourceStages =
+      VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_COMPUTE_BIT;
+  [[nodiscard]] VkDescriptorSet sampled_descriptor_set(VkDescriptorSetLayout set_layout);
   void reset() noexcept;
   [[nodiscard]] VkImage image() const noexcept { return image_; }
   [[nodiscard]] VkImageView view() const noexcept { return view_; }
@@ -63,6 +77,10 @@ class DepthTargetImage {
   [[nodiscard]] bool requires_float24_conversion() const noexcept {
     return float24_;
   }
+  // How depth written into this image (uploads, transfers, GPU clears) encodes
+  // a D24 code: the device's calibrated encoding (calibrate_unorm24_depth_write).
+  [[nodiscard]] Unorm24DepthWrite unorm24_depth_write() const noexcept { return unorm24_write_; }
+  void set_unorm24_depth_write(Unorm24DepthWrite write) noexcept { unorm24_write_ = write; }
   [[nodiscard]] const std::string& error() const noexcept { return error_; }
 
  private:
@@ -73,6 +91,8 @@ class DepthTargetImage {
   VkImageView view_{VK_NULL_HANDLE};
   VkImageView depth_view_{VK_NULL_HANDLE};
   VkImageView stencil_view_{VK_NULL_HANDLE};
+  VkDescriptorPool sampled_pool_{VK_NULL_HANDLE};
+  VkDescriptorSet sampled_set_{VK_NULL_HANDLE};
   VkFormat format_{VK_FORMAT_UNDEFINED};
   DepthRenderTargetFormat guest_format_{DepthRenderTargetFormat::D24S8};
   MsaaSamples host_msaa_{MsaaSamples::X1};
@@ -81,6 +101,7 @@ class DepthTargetImage {
   std::uint32_t height_{};
   EdramSurfaceLayout surface_{};
   bool float24_{};
+  Unorm24DepthWrite unorm24_write_{Unorm24DepthWrite::Midpoint};
   std::string error_{};
 };
 

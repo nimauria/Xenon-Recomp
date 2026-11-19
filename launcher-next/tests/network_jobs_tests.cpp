@@ -2,6 +2,7 @@
 #include "core/archive.hpp"
 #include "core/releases.hpp"
 #include "picosha2/picosha2.h"
+#include "repository_fixture.hpp"
 #include <chrono>
 #include <fstream>
 #include <iostream>
@@ -53,7 +54,7 @@ public:
   explicit GatedHttp(const fs::path &root) : delegate_(fixture_http(root)) {}
   bool fixture() const override { return true; }
   HttpResponse get(const std::string &url, const HttpTransfer &transfer) override {
-    if (url.find("/releases/download/") != std::string::npos && pause.load()) {
+    if (url.ends_with("/xenon-module.json") && pause.load()) {
       entered = true;
       while (pause.load()) {
         if (transfer.cancelled && transfer.cancelled())
@@ -70,55 +71,71 @@ int main(int argc, char **argv) {
     check(argc == 2, "Supply the settings schema fixture");
     fs::create_directories(root / "state");
     fs::copy_file(fs::u8path(argv[1]), root / "state/settings-schema.json");
-    const auto id = "test.online.module", repo = "fixture/module";
-    const auto asset = "module-" + host_key() + ".zip";
-    const std::string base = "https://raw.githubusercontent.com/nimauria/Xenon-Modules/main/",
-                      api = "https://api.github.com/repos/fixture/module/releases?per_page=30";
+    const auto bundled = fs::u8path(argv[1]).parent_path() / "module-catalog-fallback.json";
+    fs::create_directories(root / "bundled");
+    fs::copy_file(bundled, root / "bundled/module-catalog-fallback.json");
+    {
+      LauncherService offline(root / "bundled", false);
+      check(offline.snapshot()["catalog"]["state"] == "bundled" &&
+                offline.snapshot()["catalog"]["entries"][0]["sourcePath"] ==
+                    "games/nimauria/project-gracemeria",
+            "Version-2 bundled catalogue must load without a network connection");
+    }
+    const auto id = "test.online.module";
+    const std::string base = "https://raw.githubusercontent.com/nimauria/Xenon-Modules/main/";
     write_document(root / "catalog.json",
                    {{"schema", "xenon.module-catalog"},
-                    {"version", 1},
-                    {"modules", Json::array({"modules/test.online.module.json"})}});
+                    {"version", 2},
+                    {"modules", Json::array({"games/fixture/module/entry.json"})}});
     write_document(
         root / "entry.json",
         {{"schema", "xenon.module-entry"},
-         {"version", 1},
+         {"version", 2},
          {"id", id},
          {"name", "Fixture module"},
          {"type", "game"},
          {"description", "Explicit test-only catalogue entry"},
          {"publisher", {{"name", "Fixture publisher"}, {"verified", false}}},
-         {"repository", {{"provider", "github"}, {"owner", "fixture"}, {"name", "module"}}},
-         {"releaseAssets", {{host_key(), asset}}}});
+         {"repository", {{"provider", "github"}, {"owner", "nimauria"}, {"name", "Xenon-Modules"}}},
+         {"sourcePath", "games/fixture/module"},
+         {"platforms", Json::array({host_key()})}});
     Json mapping = {{base + "catalog.json", {{"file", "catalog.json"}}},
-                    {base + "modules/test.online.module.json", {{"file", "entry.json"}}},
-                    {api, {{"file", "releases.json"}}}};
-    const auto publish = [&](const std::string &version, bool digest_valid = true) {
-      write_zip(root / "package.zip", {{"module/module.json", Json({{"id", id},
-                                                                    {"name", "Fixture module"},
-                                                                    {"version", version},
-                                                                    {"settings", Json::array()}})
-                                                                  .dump()},
-                                       {"module/example.txt", "verified package"}});
-      const auto url =
-          "https://github.com/fixture/module/releases/download/v" + version + "/" + asset;
-      write_document(
-          root / "releases.json",
-          Json::array({{{"tag_name", "v" + version},
-                        {"name", nullptr},
-                        {"body", nullptr},
-                        {"prerelease", false},
-                        {"draft", false},
-                        {"assets",
-                         Json::array({{{"name", asset},
-                                       {"browser_download_url", url},
-                                       {"size", fs::file_size(root / "package.zip")},
-                                       {"digest",
-                                        "sha256:" + (digest_valid ? hash_file(root / "package.zip")
-                                                                  : std::string(64, '0'))}}})}}}));
-      mapping[url] = {{"file", "package.zip"}};
-      write_document(root / "responses.json", mapping);
+                    {base + "games/fixture/module/entry.json", {{"file", "entry.json"}}}};
+    const auto publish = [&](const std::string &version, bool digest_valid = true,
+                             const std::string &content = "verified package") {
+      repository_fixture(root, mapping, base + "games/fixture/module", id, version, digest_valid,
+                         content);
     };
     publish("1.0.0");
+    const auto entry =
+        catalog_entry(read_document(root / "entry.json"), "games/fixture/module/entry.json");
+    const auto expect_rejected = [&](const std::function<void()> &operation) {
+      bool rejected = false;
+      try {
+        operation();
+      } catch (const std::exception &) {
+        rejected = true;
+      }
+      check(rejected, "Unsafe repository metadata must be rejected");
+    };
+    auto invalid_package = read_document(root / "repository-package.json");
+    invalid_package["files"][0]["path"] = "../outside.dll";
+    expect_rejected([&] { repository_package(invalid_package, entry); });
+    invalid_package = read_document(root / "repository-package.json");
+    invalid_package["files"].push_back(invalid_package["files"][0]);
+    expect_rejected([&] { repository_package(invalid_package, entry); });
+    invalid_package = read_document(root / "repository-package.json");
+    invalid_package["moduleId"] = "another.contributor.game";
+    expect_rejected([&] { repository_package(invalid_package, entry); });
+    auto invalid_entry = read_document(root / "entry.json");
+    invalid_entry["sourcePath"] = "games/fixture/../module";
+    expect_rejected([&] { catalog_entry(invalid_entry, "games/fixture/../module/entry.json"); });
+    invalid_entry = read_document(root / "entry.json");
+    invalid_entry["repository"]["name"] = "Other-Repository";
+    expect_rejected([&] { catalog_entry(invalid_entry, "games/fixture/module/entry.json"); });
+    auto invalid_catalog = read_document(root / "catalog.json");
+    invalid_catalog["modules"].push_back(invalid_catalog["modules"][0]);
+    expect_rejected([&] { catalog_paths(invalid_catalog); });
     check(Version::parse("v1.10.0")->compare(*Version::parse("1.9.9")) > 0,
           "Semantic version sorting must not be lexical");
     check(Version::parse("1.0.0-rc.10")->compare(*Version::parse("1.0.0-rc.2")) > 0,
@@ -201,6 +218,21 @@ int main(int argc, char **argv) {
             "Offline operation must retain the last catalogue");
       action(service, "updates.clearHistory", {{"id", id}});
       check(service.snapshot()["updateHistory"].empty(), "Per-module update history should clear");
+    }
+    // Same-version source edits must be visible, including after reopening and rollback.
+    mapping[base + "catalog.json"].erase("status");
+    publish("1.0.0", true, "repository edit without a version bump");
+    {
+      LauncherService service(root / "state", false, {}, {}, http);
+      check(run(service, "modules.checkUpdate", {{"id", id}})["state"] == "completed" &&
+                service.snapshot()["moduleUpdates"][id]["canDownload"],
+            "Same-version repository edits must be downloadable after reopening");
+      check(run(service, "modules.downloadUpdate", {{"id", id}})["state"] == "completed" &&
+                run(service, "modules.installDownloaded", {{"id", id}})["state"] == "completed",
+            "Same-version repository edit must install safely");
+      run(service, "modules.checkUpdate", {{"id", id}});
+      check(!service.snapshot()["moduleUpdates"][id]["canDownload"],
+            "Installed source digest must suppress duplicate updates");
     }
     fs::remove_all(root);
     std::cout << "Registry, semver, digest verification, staged installation, network "

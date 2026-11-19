@@ -1,3 +1,4 @@
+import { t } from "../localization";
 import { Component, type ErrorInfo, type ReactNode } from "react";
 export class ErrorBoundary extends Component<
   { children: ReactNode },
@@ -13,10 +14,12 @@ export class ErrorBoundary extends Component<
   render() {
     return this.state.error ? (
       <main className="startup" role="alert">
-        <h1>Unable to display the launcher</h1>
+        <h1>{t("ui.93f5e76befd5")}</h1>
         <p>{this.state.error}</p>
-        <p>Your stored data has been preserved.</p>
-        <button onClick={() => location.reload()}>Reload launcher</button>
+        <p>{t("ui.daf3302ae966")}</p>
+        <button onClick={() => location.reload()}>
+          {t("ui.a0912e803e23")}
+        </button>
       </main>
     ) : (
       this.props.children

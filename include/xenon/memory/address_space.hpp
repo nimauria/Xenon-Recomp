@@ -341,6 +341,13 @@ class AddressSpace final : public xenon::cpu::MemoryPort {
 
   [[nodiscard]] bool range_is_allocatable(GuestAddress base, std::uint32_t size,
                                           std::uint32_t required_page_size) const;
+  // allocate() with mutex_ held; on failure `failure` names the reason.
+  [[nodiscard]] bool allocate_locked(std::uint32_t size, std::uint32_t alignment,
+                                     Protect protect, bool top_down,
+                                     GuestAddress& out_address,
+                                     std::optional<std::uint32_t> page_size,
+                                     VirtualAllocationOptions options,
+                                     const char*& failure);
   [[nodiscard]] bool reserve_pages(GuestAddress base, std::uint32_t size,
                                    Protect protect, bool commit_now);
   [[nodiscard]] bool commit_pages(GuestAddress base, std::uint32_t size,

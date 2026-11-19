@@ -144,11 +144,28 @@ bool XenonSession::init_audio() {
 
 void XenonSession::set_focused(bool focused) {
   if (input_) input_->set_focused(focused);
+  // Key-up events go to whichever window has focus, so keys held when focus
+  // leaves would otherwise stay held.
+  if (!focused && keyboard_mouse_) keyboard_mouse_->clear_input();
 #if defined(XENON_HAS_AUDIO)
   if (audio_ && config_.audio_mute_unfocused) {
     audio_->set_muted(!focused);
   }
 #endif
+}
+
+void XenonSession::input_key(std::uint16_t key, bool pressed) {
+  if (keyboard_mouse_) keyboard_mouse_->set_key(key, pressed);
+}
+
+void XenonSession::input_mouse_button(std::uint8_t button, bool pressed) {
+  if (keyboard_mouse_ && button >= 1u && button <= 5u) {
+    keyboard_mouse_->set_mouse_button(static_cast<input::MouseButton>(button), pressed);
+  }
+}
+
+void XenonSession::input_mouse_motion(float dx, float dy) {
+  if (keyboard_mouse_) keyboard_mouse_->add_mouse_delta(dx, dy);
 }
 
 bool XenonSession::init_xam() {

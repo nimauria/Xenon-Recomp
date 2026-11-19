@@ -266,6 +266,20 @@ void test_export_registry_no_cross_library_collision() {
     assert(result.handled && last_called == 1);
   }
 
+  // An import thunk's key is built once at load (as the XEX spells the
+  // library) and resolved without allocating on every call; it must name
+  // exactly the export resolve(library, ordinal) does, per library.
+  for (const auto& [library, tag] : {std::pair{"xboxkrnl.exe", 1}, std::pair{"XAM.XEX", 2},
+                                    std::pair{"some_other_module", 3}}) {
+    const auto key = xenon::core::ExportRegistry::ordinal_key(library, 5u);
+    const auto* by_key = registry.resolve_key(key);
+    assert(by_key != nullptr && by_key == registry.resolve(library, 5u));
+    last_called = 0;
+    xenon::core::ExportCallContext ctx{state, memory, 0, 0};
+    assert(by_key->handler(ctx) && last_called == tag);
+  }
+  assert(registry.resolve_key(xenon::core::ExportRegistry::ordinal_key("xam", 6u)) == nullptr);
+
   std::cout << "  [ok] ExportRegistry: identical ordinal/name under different libraries never cross-resolves\n";
 }
 

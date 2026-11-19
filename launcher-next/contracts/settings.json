@@ -1,5 +1,13 @@
 [
   {
+    "key": "general/language",
+    "category": "general",
+    "type": "string",
+    "label": "Language",
+    "default": "auto",
+    "options": []
+  },
+  {
     "key": "general/startupPage",
     "category": "general",
     "type": "enum",
@@ -18,6 +26,8 @@
         "label": "Downloads",
         "value": "Downloads"
       },
+      { "label": "Updates", "value": "Updates" },
+      { "label": "Discover", "value": "Discover" },
       {
         "label": "Modules",
         "value": "Modules"

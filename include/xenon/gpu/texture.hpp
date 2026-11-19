@@ -53,6 +53,22 @@ enum class TextureHostFormat : std::uint8_t {
   BC5Unorm,
 };
 
+// How guest texels become host texels when a texture is decoded.
+enum class TextureLoad : std::uint8_t {
+  // Byte-for-byte, after the fetch constant's endian swap.
+  Copy,
+  // A packed 24_8 / 24_8_FLOAT depth/stencil word (the canonical layout
+  // pack_depth_stencil() writes and depth resolves store) becomes its depth
+  // as float32: unorm 24 in [0, 1], or 20e4 float in [0, 2). Stencil is
+  // dropped, so these formats cannot be encoded back.
+  DepthUnorm24ToFloat,
+  DepthFloat20e4ToFloat,
+  // A 32_32_32_FLOAT texel (12 bytes) becomes 32_32_32_32_FLOAT with w = 1.0,
+  // what a fetch of the three-component format returns in w. No D3D12 or
+  // Vulkan device here can sample a 96-bit format, so it is widened on load.
+  ExpandRgbFloatToRgba,
+};
+
 struct TextureFormatInfo {
   std::uint8_t xenos_format{};
   std::string_view name{};
@@ -61,8 +77,18 @@ struct TextureFormatInfo {
   std::uint8_t block_height{1};
   std::uint8_t bits_per_pixel{};
   TextureHostFormat host_format{TextureHostFormat::Unsupported};
+  TextureLoad load{TextureLoad::Copy};
+  // The host texel has one channel that stands for every guest component,
+  // so a fetch of x, y, z or w all read it (sampled depth, as on xenia).
+  bool replicate_first_component{};
+  // Bytes of one block in guest memory.
   [[nodiscard]] constexpr std::uint32_t bytes_per_block() const noexcept {
     return (std::uint32_t(bits_per_pixel) * block_width * block_height + 7u) / 8u;
+  }
+  // Bytes of one block of the host image (and of a decoded texture's linear
+  // data): the guest size, except where the load widens the texel.
+  [[nodiscard]] constexpr std::uint32_t host_bytes_per_block() const noexcept {
+    return load == TextureLoad::ExpandRgbFloatToRgba ? 16u : bytes_per_block();
   }
   [[nodiscard]] constexpr bool host_supported() const noexcept {
     return host_format != TextureHostFormat::Unsupported;
@@ -71,6 +97,12 @@ struct TextureFormatInfo {
 
 [[nodiscard]] const TextureFormatInfo& texture_format_info(
     std::uint8_t format) noexcept;
+
+// The fetch constant's swizzle (3 bits per component: 0-3 select a texel
+// component, 4/5 force 0/1) as a host view must apply it: for a format with
+// replicate_first_component, every component select reads component 0.
+[[nodiscard]] std::uint16_t host_view_swizzle(std::uint8_t format,
+                                              std::uint16_t swizzle) noexcept;
 
 // Returns the texture-format encoding whose in-memory bits exactly match a
 // native color-target readback. Formats requiring numeric conversion are not

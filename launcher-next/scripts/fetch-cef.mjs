@@ -40,5 +40,6 @@ if (
 const directory = resolve(tools, artifact.name.replace(/\.tar\.bz2$/, ""));
 if (!(await stat(resolve(directory, "cmake/FindCEF.cmake")).catch(() => null)))
   execFileSync("tar", ["-xf", archive, "-C", tools], { stdio: "inherit" });
-await writeFile(resolve(tools, "cef-root.txt"), directory + "\n");
+await writeFile(resolve(tools, `cef-root-${platform}.txt`), directory + "\n");
+if(platform===platforms[process.platform])await writeFile(resolve(tools, "cef-root.txt"), directory + "\n");
 console.log(`Verified CEF ${manifest.version}: ${directory}`);

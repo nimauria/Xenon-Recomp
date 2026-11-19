@@ -1,5 +1,6 @@
 #include "xenon/gpu/vulkan/render_target.hpp"
 
+#include <array>
 #include <cstring>
 #include <span>
 
@@ -47,7 +48,7 @@ bool read_msaa_sample(VkPhysicalDevice physical_device, VkDevice device,
                       std::uint32_t height, std::uint32_t bytes_per_pixel,
                       std::vector<std::byte>& destination,
                       std::uint32_t& row_pitch, std::string& error) {
-  DxcShaderCompiler compiler;
+  UtilityShaderCompiler compiler;
   ShaderCompileOptions options{};
   options.format = ShaderBinaryFormat::Spirv;
   const auto vs = compiler.compile(make_transfer_fullscreen_vertex_shader(), options);
@@ -130,7 +131,8 @@ bool read_msaa_sample(VkPhysicalDevice physical_device, VkDevice device,
                            VkDeviceSize(row_pitch) * height,
                            VK_BUFFER_USAGE_TRANSFER_DST_BIT,
                            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
-                               VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)) {
+                               VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                           Buffer::kCpuReadback)) {
     error = readback.error(); cleanup(); return false;
   }
 
@@ -292,7 +294,7 @@ bool write_msaa_sample(VkPhysicalDevice physical_device, VkDevice device,
                        std::uint32_t height, std::uint32_t bytes_per_pixel,
                        std::span<const std::byte> source,
                        std::uint32_t row_pitch, std::string& error) {
-  DxcShaderCompiler compiler;
+  UtilityShaderCompiler compiler;
   ShaderCompileOptions options{};
   options.format = ShaderBinaryFormat::Spirv;
   const auto vs = compiler.compile(make_transfer_fullscreen_vertex_shader(), options);
@@ -557,6 +559,15 @@ bool RenderTargetImage::initialize(VkPhysicalDevice physical_device,
     error_ = "Xenos color target format needs a non-native conversion path";
     return false;
   }
+  const bool integer_transfers = color_host_transfers_as_integer(color_format);
+  transfer_format_ = !integer_transfers                        ? format_
+                     : format_ == VK_FORMAT_R16G16_SFLOAT       ? VK_FORMAT_R16G16_UINT
+                     : format_ == VK_FORMAT_R16G16B16A16_SFLOAT ? VK_FORMAT_R16G16B16A16_UINT
+                                                                : VK_FORMAT_UNDEFINED;
+  if (transfer_format_ == VK_FORMAT_UNDEFINED) {
+    error_ = "Vulkan color target has no integer view for its 16-bit float storage";
+    return false;
+  }
   device_ = device;
   physical_device_ = physical_device;
   mip_width_ = surface.pitch_pixels;
@@ -588,6 +599,16 @@ bool RenderTargetImage::initialize(VkPhysicalDevice physical_device,
                      VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
                      VK_IMAGE_USAGE_TRANSFER_DST_BIT;
   image_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+  // The integer transfer view: the two formats listed so drivers keep the
+  // image's compression.
+  const std::array view_formats{format_, transfer_format_};
+  VkImageFormatListCreateInfo format_list{VK_STRUCTURE_TYPE_IMAGE_FORMAT_LIST_CREATE_INFO};
+  format_list.viewFormatCount = static_cast<std::uint32_t>(view_formats.size());
+  format_list.pViewFormats = view_formats.data();
+  if (integer_transfers) {
+    image_info.flags = VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;
+    image_info.pNext = &format_list;
+  }
   if (vkCreateImage(device_, &image_info, nullptr, &image_) != VK_SUCCESS) {
     error_ = "vkCreateImage failed for Xenos color target";
     reset(); return false;
@@ -613,6 +634,13 @@ bool RenderTargetImage::initialize(VkPhysicalDevice physical_device,
   if (vkCreateImageView(device_, &view_info, nullptr, &view_) != VK_SUCCESS) {
     error_ = "vkCreateImageView failed for Xenos color target";
     reset(); return false;
+  }
+  if (integer_transfers) {
+    view_info.format = transfer_format_;
+    if (vkCreateImageView(device_, &view_info, nullptr, &transfer_view_) != VK_SUCCESS) {
+      error_ = "vkCreateImageView failed for the Xenos color target's integer view";
+      reset(); return false;
+    }
   }
   return true;
 }
@@ -750,7 +778,8 @@ bool RenderTargetImage::readback(CommandQueue& queue, std::uint32_t left,
                            VkDeviceSize(row_pitch) * copy_height,
                            VK_BUFFER_USAGE_TRANSFER_DST_BIT,
                            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
-                               VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)) {
+                               VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                           Buffer::kCpuReadback)) {
     error_ = readback.error();
     return false;
   }
@@ -990,8 +1019,19 @@ void RenderTargetImage::transition_to_color_attachment(
 }
 
 VkDescriptorSet RenderTargetImage::sampled_descriptor_set(VkDescriptorSetLayout set_layout) {
-  if (sampled_set_) return sampled_set_;
-  if (!device_ || !view_ || !set_layout) {
+  return descriptor_set(set_layout, view_, sampled_pool_, sampled_set_);
+}
+
+VkDescriptorSet RenderTargetImage::transfer_descriptor_set(VkDescriptorSetLayout set_layout) {
+  if (!transfer_view_) return sampled_descriptor_set(set_layout);
+  return descriptor_set(set_layout, transfer_view_, transfer_pool_, transfer_set_);
+}
+
+VkDescriptorSet RenderTargetImage::descriptor_set(VkDescriptorSetLayout set_layout,
+                                                  VkImageView view, VkDescriptorPool& pool,
+                                                  VkDescriptorSet& set) {
+  if (set) return set;
+  if (!device_ || !view || !set_layout) {
     error_ = "Vulkan color target has no view to sample";
     return VK_NULL_HANDLE;
   }
@@ -1000,36 +1040,42 @@ VkDescriptorSet RenderTargetImage::sampled_descriptor_set(VkDescriptorSetLayout 
   pool_info.maxSets = 1;
   pool_info.poolSizeCount = 1;
   pool_info.pPoolSizes = &pool_size;
-  if (vkCreateDescriptorPool(device_, &pool_info, nullptr, &sampled_pool_) != VK_SUCCESS) {
+  if (vkCreateDescriptorPool(device_, &pool_info, nullptr, &pool) != VK_SUCCESS) {
     error_ = "Vulkan color target descriptor pool creation failed";
-    sampled_pool_ = VK_NULL_HANDLE;
+    pool = VK_NULL_HANDLE;
     return VK_NULL_HANDLE;
   }
   VkDescriptorSetAllocateInfo allocate{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
-  allocate.descriptorPool = sampled_pool_;
+  allocate.descriptorPool = pool;
   allocate.descriptorSetCount = 1;
   allocate.pSetLayouts = &set_layout;
-  if (vkAllocateDescriptorSets(device_, &allocate, &sampled_set_) != VK_SUCCESS) {
+  if (vkAllocateDescriptorSets(device_, &allocate, &set) != VK_SUCCESS) {
     error_ = "Vulkan color target descriptor allocation failed";
-    vkDestroyDescriptorPool(device_, sampled_pool_, nullptr);
-    sampled_pool_ = VK_NULL_HANDLE;
-    sampled_set_ = VK_NULL_HANDLE;
+    vkDestroyDescriptorPool(device_, pool, nullptr);
+    pool = VK_NULL_HANDLE;
+    set = VK_NULL_HANDLE;
     return VK_NULL_HANDLE;
   }
   VkDescriptorImageInfo image_info{};
-  image_info.imageView = view_;
+  image_info.imageView = view;
   image_info.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-  const VkWriteDescriptorSet write{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, sampled_set_,
+  const VkWriteDescriptorSet write{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, set,
                                    16, 0, 1, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, &image_info,
                                    nullptr, nullptr};
   vkUpdateDescriptorSets(device_, 1, &write, 0, nullptr);
-  return sampled_set_;
+  return set;
 }
 
 void RenderTargetImage::reset() noexcept {
   if (device_ && sampled_pool_) vkDestroyDescriptorPool(device_, sampled_pool_, nullptr);
   sampled_pool_ = VK_NULL_HANDLE;
   sampled_set_ = VK_NULL_HANDLE;
+  if (device_ && transfer_pool_) vkDestroyDescriptorPool(device_, transfer_pool_, nullptr);
+  transfer_pool_ = VK_NULL_HANDLE;
+  transfer_set_ = VK_NULL_HANDLE;
+  if (device_ && transfer_view_) vkDestroyImageView(device_, transfer_view_, nullptr);
+  transfer_view_ = VK_NULL_HANDLE;
+  transfer_format_ = VK_FORMAT_UNDEFINED;
   if (device_ && view_) vkDestroyImageView(device_, view_, nullptr);
   if (device_ && image_) vkDestroyImage(device_, image_, nullptr);
   if (device_ && memory_) vkFreeMemory(device_, memory_, nullptr);

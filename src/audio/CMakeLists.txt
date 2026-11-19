@@ -1,19 +1,19 @@
 # -----------------------------------------------------------------------------
-# Audio: Xbox render-driver/XMA semantics -> bounded Xenon mixer -> SDL2 host.
+# Audio: Xbox render-driver/XMA semantics -> bounded Xenon mixer -> SDL3 host.
 # FFmpeg supplies the legally redistributable XMAFRAMES decoder API; Xenon does
 # not vendor an XMA codec or substitute a silent/null production backend.
 if(XENON_ENABLE_AUDIO)
-  xenon_resolve_sdl2(XENON_AUDIO_SDL_TARGET)
+  xenon_resolve_sdl3(XENON_AUDIO_SDL_TARGET)
   xenon_resolve_audio_ffmpeg(
     XENON_AUDIO_FFMPEG_TARGET
     XENON_AUDIO_AVCODEC_INCLUDE_DIR
     XENON_AUDIO_USING_BUNDLED_FFMPEG)
 
   if(NOT XENON_AUDIO_SDL_TARGET)
-    xenon_dependency_help("sdl2")
+    xenon_dependency_help("sdl3")
     message(FATAL_ERROR
-      "Audio V1 requires SDL2. Xenon could not resolve or bootstrap the pinned dependency. "
-      "Use XENON_DEPENDENCY_MODE=SYSTEM for a host package, set XENON_SDL2_ROOT, "
+      "Audio V1 requires SDL3. Xenon could not resolve or bootstrap the pinned dependency. "
+      "Use XENON_DEPENDENCY_MODE=SYSTEM for a host package, set XENON_SDL3_ROOT, "
       "or provision the managed dependency with the command above.")
   endif()
   if(NOT XENON_AUDIO_FFMPEG_TARGET)
@@ -82,6 +82,19 @@ if(XENON_ENABLE_AUDIO)
   endif()
   xenon_enable_warnings(xenon_audio)
   add_library(Xenon::Audio ALIAS xenon_audio)
+
+  # Development tool: decodes the frames of an XMA stream dump
+  # (XENON_XMA_DUMP, walked by tools/audio/xma_stream_frames.py) in stream
+  # order with the engine's decoder - the reference the engine's output is
+  # matched against (tools/audio/xma_frame_order.py).
+  add_executable(xenon_xma_frames_decode
+    "${XENON_SOURCE_DIR}/tools/audio/xma_frames_decode.cpp")
+  target_link_libraries(xenon_xma_frames_decode PRIVATE ${XENON_AUDIO_FFMPEG_TARGET})
+  target_compile_features(xenon_xma_frames_decode PRIVATE cxx_std_20)
+  if(XENON_AUDIO_FFMPEG_HAS_CH_LAYOUT)
+    target_compile_definitions(xenon_xma_frames_decode PRIVATE XENON_AUDIO_FFMPEG_HAS_CH_LAYOUT=1)
+  endif()
+
 
   target_sources(xenon_core PRIVATE exports.cpp)
   target_compile_definitions(xenon_core PUBLIC XENON_HAS_AUDIO=1)

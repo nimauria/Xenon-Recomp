@@ -88,6 +88,10 @@ if(XENON_BUILD_TESTS)
   endif()
   xenon_enable_test_asserts(xenon_artifact_cache_tests)
   add_test(NAME xenon_artifact_cache_tests COMMAND xenon_artifact_cache_tests)
+  add_executable(xenon_workspace_lock_tests workspace_lock_tests.cpp)
+  target_link_libraries(xenon_workspace_lock_tests PRIVATE xenon_recomp)
+  xenon_enable_test_asserts(xenon_workspace_lock_tests)
+  add_test(NAME xenon_workspace_lock_tests COMMAND xenon_workspace_lock_tests)
 
   # End-to-end xenon-prepare worker tests: drives the real xenon-prepare
   # binary as a subprocess (first build, no-rebuild, hint-change rebuild,
@@ -121,6 +125,12 @@ if(XENON_BUILD_TESTS)
   xenon_enable_test_asserts(xenon_heap_native_replacement_tests)
   add_test(NAME xenon_heap_native_replacement_tests
     COMMAND xenon_heap_native_replacement_tests)
+
+  # Carrying hints between executable revisions (xenon/recomp/revision_mapping.hpp).
+  add_executable(xenon_revision_mapping_tests revision_mapping_tests.cpp)
+  target_link_libraries(xenon_revision_mapping_tests PRIVATE xenon_recomp)
+  xenon_enable_test_asserts(xenon_revision_mapping_tests)
+  add_test(NAME xenon_revision_mapping_tests COMMAND xenon_revision_mapping_tests)
 
   add_executable(xenon_analysis_v2_consumption_tests analysis_v2_consumption_tests.cpp)
   target_link_libraries(xenon_analysis_v2_consumption_tests PRIVATE xenon_recomp)

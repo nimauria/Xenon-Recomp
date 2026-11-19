@@ -138,6 +138,53 @@ if(XENON_BUILD_TESTS)
     target_link_libraries(xenon_cpu_vector_audio PRIVATE xenon_memory)
     target_compile_definitions(xenon_cpu_vector_audio PRIVATE XENON_TEST_VECTOR_FALLBACK=1)
   endif()
+  if(TARGET xenon_memory)
+    xenon_add_generated_cpu_test(vector_d3d codegen_vector_d3d.cpp vector_d3d.cpp)
+    # Every vector case of the xenia-project/xenia PPC hardware tests.
+    xenon_add_generated_cpu_test(xenia_ppc codegen_xenia_ppc.cpp xenia_ppc.cpp)
+    target_link_libraries(xenon_cpu_vector_d3d PRIVATE xenon_memory)
+    target_link_libraries(xenon_cpu_xenia_ppc PRIVATE xenon_memory)
+
+    # Inlined VMX semantics against execute_vector(), and the VMX partial
+    # loads and stores: as the runtime is built, and as generated games are
+    # built on an x86-64-v3 host (the AVX2 forms).
+    add_executable(xenon_cpu_vector_inline x86_64/vector_inline.cpp)
+    target_link_libraries(xenon_cpu_vector_inline PRIVATE xenon_cpu xenon_memory)
+    xenon_enable_test_asserts(xenon_cpu_vector_inline)
+    add_test(NAME xenon_cpu_vector_inline COMMAND xenon_cpu_vector_inline)
+    if(CMAKE_SYSTEM_PROCESSOR MATCHES "AMD64|x86_64")
+      include(CheckCXXSourceRuns)
+      check_cxx_source_runs([=[
+#ifdef _MSC_VER
+#include <intrin.h>
+static void query(int r[4], int leaf) { __cpuidex(r, leaf, 0); }
+static unsigned long long xcr0() { return _xgetbv(0); }
+#else
+#include <cpuid.h>
+static void query(int r[4], int leaf) { unsigned a, b, c, d; __cpuid_count(leaf, 0, a, b, c, d); r[0] = int(a); r[1] = int(b); r[2] = int(c); r[3] = int(d); }
+static unsigned long long xcr0() { unsigned lo, hi; __asm__("xgetbv" : "=a"(lo), "=d"(hi) : "c"(0)); return (unsigned long long)hi << 32 | lo; }
+#endif
+int main() {
+  int r[4];
+  query(r, 1);
+  if (!((r[2] >> 27) & 1) || !((r[2] >> 28) & 1) || (xcr0() & 6) != 6) return 1;
+  query(r, 7);
+  return ((r[1] >> 5) & 1) ? 0 : 1;
+}
+]=] XENON_TEST_HOST_HAS_AVX2)
+      if(XENON_TEST_HOST_HAS_AVX2)
+        add_executable(xenon_cpu_vector_inline_avx2 x86_64/vector_inline.cpp)
+        target_link_libraries(xenon_cpu_vector_inline_avx2 PRIVATE xenon_cpu xenon_memory)
+        if(MSVC)
+          target_compile_options(xenon_cpu_vector_inline_avx2 PRIVATE /arch:AVX2)
+        else()
+          target_compile_options(xenon_cpu_vector_inline_avx2 PRIVATE -march=x86-64-v3 -ffp-contract=off)
+        endif()
+        xenon_enable_test_asserts(xenon_cpu_vector_inline_avx2)
+        add_test(NAME xenon_cpu_vector_inline_avx2 COMMAND xenon_cpu_vector_inline_avx2)
+      endif()
+    endif()
+  endif()
   xenon_add_generated_cpu_test(safepoint codegen_safepoint.cpp safepoint.cpp)
   xenon_add_generated_cpu_test(indirect_branch codegen_indirect_branch.cpp indirect_branch.cpp)
   xenon_add_generated_cpu_test(scalar_memory codegen_scalar_memory.cpp scalar_memory.cpp)
@@ -145,6 +192,7 @@ if(XENON_BUILD_TESTS)
   xenon_add_generated_cpu_test(local_indirect codegen_local_indirect.cpp local_indirect.cpp)
   xenon_add_generated_cpu_test(direct_call codegen_direct_call.cpp direct_call.cpp)
   xenon_add_generated_cpu_test(tail_branch codegen_tail_branch.cpp tail_branch.cpp)
+  xenon_add_generated_cpu_test(instruction_hooks codegen_instruction_hooks.cpp instruction_hooks.cpp)
   if(XENON_ENABLE_MEMORY)
 
     add_executable(xenon_dynamic_fallback_tests

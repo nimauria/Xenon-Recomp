@@ -39,7 +39,9 @@ void BackendCore<Derived, Api>::begin_submission(
   }
   if (memory != &new_memory) {
     textures.clear();
+    replaced_texture_keys.clear();
     texture_dirty.clear();
+    guest_reads.clear();
     if (!self().initialize_mirror(new_memory)) {
       error = mirror.error();
       ready = false;
@@ -55,15 +57,28 @@ void BackendCore<Derived, Api>::begin_submission(
 }
 
 template <typename Derived, typename Api>
-void BackendCore<Derived, Api>::end_submission() {
+void BackendCore<Derived, Api>::end_submission(bool submit) {
   performance.submission_time_ns += static_cast<std::uint64_t>(
       std::chrono::duration_cast<std::chrono::nanoseconds>(
           std::chrono::steady_clock::now() - submission_started).count());
-  if (!ready) return;
+  if (!ready || !submit) return;
   if (!queue.flush()) {
     error = queue.error();
     ready = false;
   }
+}
+
+template <typename Derived, typename Api>
+void BackendCore<Derived, Api>::sync_guest_reads() {
+  if (!ready || !memory) return;
+  guest_reads.gpu_published(mirror.take_published_writes());
+  guest_reads.sync(*memory, [this](std::uint64_t key, std::uint32_t base, std::uint32_t size) {
+    if (!textures.contains(key)) return GuestReadSync::Tracking::Forget;
+    // GPU-authored bytes are current in the mirror, not in guest memory; the
+    // draw makes them visible and reads them itself.
+    return mirror.has_gpu_dirty(base, size) ? GuestReadSync::Tracking::GpuAuthored
+                                            : GuestReadSync::Tracking::Track;
+  });
 }
 
 template <typename Derived, typename Api>
@@ -74,6 +89,18 @@ bool BackendCore<Derived, Api>::make_guest_memory_cpu_visible(
     error = mirror.error();
     return false;
   }
+  return true;
+}
+
+template <typename Derived, typename Api>
+bool BackendCore<Derived, Api>::publish_gpu_writes(bool wait) {
+  if (!ready || !memory) return true;
+  if (!mirror.cpu_visibility_pending()) return true;
+  if (!mirror.complete_cpu_visibility(wait)) {
+    error = named(mirror.error());
+    return false;
+  }
+  if (wait) ++performance.published_gpu_write_waits;
   return true;
 }
 
@@ -128,6 +155,7 @@ PresentStatus BackendCore<Derived, Api>::present(
     const PresentationFrame& frame) {
   if (!presentation.ready()) return PresentStatus::NotConfigured;
   if (!ready || !memory) return PresentStatus::Error;
+  if (!apply_pending_resize()) return PresentStatus::Error;
   if (!presentation.width() || !presentation.height())
     return PresentStatus::Minimized;
   ScanoutPlan plan{};
@@ -160,7 +188,26 @@ bool BackendCore<Derived, Api>::capture_scanout(const PresentationFrame& frame,
 template <typename Derived, typename Api>
 bool BackendCore<Derived, Api>::resize_presentation(std::uint32_t width,
                                                      std::uint32_t height) {
-  if (!presentation.resize(width, height)) {
+  // Regression (AC6 crashed in the driver on going fullscreen): the window's
+  // event thread resized the swapchain - waiting the queue idle, releasing
+  // and recreating its back buffers - while the GPU thread was recording and
+  // presenting into them. The new size is only recorded here and applied by
+  // present(), on the thread that owns the swapchain; a failure to resize is
+  // reported by that present.
+  std::scoped_lock lock(pending_resize_mutex);
+  pending_resize = {width, height};
+  return true;
+}
+
+template <typename Derived, typename Api>
+bool BackendCore<Derived, Api>::apply_pending_resize() {
+  std::optional<std::pair<std::uint32_t, std::uint32_t>> size;
+  {
+    std::scoped_lock lock(pending_resize_mutex);
+    size.swap(pending_resize);
+  }
+  if (!size) return true;
+  if (!presentation.resize(size->first, size->second)) {
     error = presentation.error();
     return false;
   }
@@ -173,6 +220,7 @@ GpuPerformanceCounters BackendCore<Derived, Api>::performance_counters()
   auto result = performance;
   result.shader_cache_misses = compiled_shader_count;
   result.pipeline_cache_misses = self().pipeline_cache_misses();
+  result.pipeline_cache_hits = pipeline_cache_hits.load(std::memory_order_relaxed);
   return result;
 }
 
@@ -195,6 +243,8 @@ GpuShaderCoverage BackendCore<Derived, Api>::shader_coverage()
           ? coverage.shaders_discovered - coverage.translation_failures
           : 0u;
   coverage.cache_hits = shader_cache.hits();
+  coverage.cache_disk_hits = shader_cache.disk_hits();
+  coverage.cache_disk_writes = shader_cache.disk_writes();
   coverage.cache_misses = shader_cache.misses();
   return coverage;
 }

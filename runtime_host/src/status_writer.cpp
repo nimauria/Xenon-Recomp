@@ -8,6 +8,7 @@
 
 #include "xenon/core/json.hpp"
 #include "xenon/core/session.hpp"
+#include "xenon/logging/logger.hpp"
 
 #if defined(_WIN32)
 #define WIN32_LEAN_AND_MEAN
@@ -102,6 +103,16 @@ StatusWriter::StatusWriter(std::string session_dir, LaunchConfig config)
       config_(std::move(config)),
       started_at_epoch_ms_(now_epoch_ms()) {
   std::filesystem::create_directories(session_dir_);
+  // A stop request older than this launch was left by an earlier session in
+  // the same directory (relaunching one launch config does this) and would
+  // end this one at once. A request the launcher makes during startup is
+  // newer than that and is kept.
+  constexpr auto kStartupSlack = std::chrono::seconds(2);
+  std::error_code error;
+  const auto requested = std::filesystem::last_write_time(stop_signal_path(), error);
+  if (!error && requested < std::filesystem::file_time_type::clock::now() - kStartupSlack) {
+    std::filesystem::remove(stop_signal_path(), error);
+  }
 }
 
 std::string StatusWriter::status_path() const {
@@ -230,6 +241,13 @@ void StatusWriter::write_capability_report(core::XenonSession& session) {
 }
 
 void StatusWriter::write_fatal(const std::string& message, LaunchFailureCategory category) {
+  {
+    std::string entry = message;
+    if (category != LaunchFailureCategory::None) {
+      entry += " [" + std::string(launch_failure_category_name(category)) + "]";
+    }
+    logging::Logger::instance().record(logging::Level::Fatal, "runtime", entry);
+  }
   core::JsonValue root = core::JsonValue::make_object();
   root.set("available", true);
   root.set("pid", static_cast<double>(current_process_id()));

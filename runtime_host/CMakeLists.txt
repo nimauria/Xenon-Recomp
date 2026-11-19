@@ -14,6 +14,8 @@ add_executable(xenon_runtime_host
   src/host_setup.hpp
   src/content_source.cpp
   src/content_source.hpp
+  src/crash_report.cpp
+  src/crash_report.hpp
   src/launch_config.cpp
   src/launch_config.hpp
   src/status_writer.cpp
@@ -39,15 +41,31 @@ if(MSVC)
   target_link_options(xenon_runtime_host PRIVATE /DEBUG /MAP)
 endif()
 
+# Host stack for every thread this process creates without an explicit size,
+# which includes each guest thread's host thread. Recompiled guest functions
+# keep their state in host frames several times the size of the PowerPC
+# frames they replace, so recursion a guest stack holds can overflow the 1 MiB
+# default: Ace Combat 6 died with STATUS_STACK_OVERFLOW starting the campaign
+# opening and got past it with 64 MiB. Only address space is reserved; pages
+# are committed as a stack actually grows. xenon_runtime_host_stack_tests
+# checks the built executable keeps this.
+set(XENON_RUNTIME_HOST_STACK_RESERVE 268435456 CACHE INTERNAL
+    "Host stack reserved per xenon_runtime_host thread (256 MiB)")
+if(MSVC)
+  target_link_options(xenon_runtime_host PRIVATE /STACK:${XENON_RUNTIME_HOST_STACK_RESERVE})
+elseif(WIN32)
+  target_link_options(xenon_runtime_host PRIVATE
+    -Wl,--stack,${XENON_RUNTIME_HOST_STACK_RESERVE})
+endif()
 # The game window belongs to this process (see presentation_host.hpp), reusing
-# the same SDL2 dependency xenon_input/xenon_audio already resolve rather than
+# the same SDL3 dependency xenon_input/xenon_audio already resolve rather than
 # adding a second window/UI toolkit.
-xenon_resolve_sdl2(XENON_RUNTIME_HOST_SDL2_TARGET)
-if(XENON_RUNTIME_HOST_SDL2_TARGET)
-  target_link_libraries(xenon_runtime_host PRIVATE ${XENON_RUNTIME_HOST_SDL2_TARGET})
+xenon_resolve_sdl3(XENON_RUNTIME_HOST_SDL_TARGET)
+if(XENON_RUNTIME_HOST_SDL_TARGET)
+  target_link_libraries(xenon_runtime_host PRIVATE ${XENON_RUNTIME_HOST_SDL_TARGET})
   target_compile_definitions(xenon_runtime_host PRIVATE XENON_HAS_PRESENTATION_HOST=1)
 else()
-  message(WARNING "xenon_runtime_host: SDL2 not resolved - game window/presentation will be disabled")
+  message(WARNING "xenon_runtime_host: SDL3 not resolved - game window/presentation will be disabled")
 endif()
 
 # Managed xenia-project FFmpeg is intentionally shared for release builds.

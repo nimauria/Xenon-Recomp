@@ -58,7 +58,10 @@ The following remain later platform work:
 
 - MoltenVK provisioning and macOS surface/window qualification.
 - A `macos-arm64` CMake preset and CI runner.
-- Qt `.app` deployment, signing, notarization, and DMG/ZIP packaging.
+- Runtime qualification on macOS and signing/notarization of distributable
+  application bundles. The CEF launcher has separate bundle/CI groundwork;
+  see [its migration status](../../launcher-next/MIGRATION_STATUS.md) for
+  validation limits.
 - macOS audio/controller qualification.
 - ARM64/NEON-specific lowering or a direct native emitter.
 - Native Metal backend work, if profiling eventually justifies one.

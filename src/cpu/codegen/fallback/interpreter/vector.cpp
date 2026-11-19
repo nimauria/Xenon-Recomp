@@ -134,9 +134,11 @@ namespace xenon::cpu::fallback {
       b = state.vr[vector_vb(i)];
       c = state.vr[vector_vc(i)];
     } else {
-      a = state.vr[reg];
-      b = state.vr[vector_va(i)];
-      c = state.vr[vector_vb(i)];
+      // vsel128 vD,vA,vB,vD: the old vD is the mask, so
+      // vD = (vA & ~vD) | (vB & vD), as lifter/vector.cpp wires it.
+      a = state.vr[vector_va(i)];
+      b = state.vr[vector_vb(i)];
+      c = state.vr[reg];
     }
     state.vr[reg] = aot::execute_vector(*semantic, i.word, state, a, b, c, Vector128{});
     return true;
@@ -202,6 +204,18 @@ namespace xenon::cpu::fallback {
     const auto b = state.vr[vector_vb(i)];
     state.vr[reg] =
         aot::execute_vector(*semantic, i.word, state, old, b, Vector128{}, Vector128{});
+    return true;
+  }
+
+  // vpkd3d128/vupkd3d128 take (old vD, vB) as lifter/vector.cpp wires them:
+  // they have no vA (bits 11-15 are the type/mask immediate) and pack merges
+  // into vD.
+  if (m == "vpkd3d128" || m == "vupkd3d128") {
+    const auto semantic = vector_semantic_for(m);
+    if (!semantic) return false;
+    const auto reg = vector_vd(i);
+    state.vr[reg] = aot::execute_vector(*semantic, i.word, state, state.vr[reg],
+                                        state.vr[vector_vb(i)], Vector128{}, Vector128{});
     return true;
   }
 

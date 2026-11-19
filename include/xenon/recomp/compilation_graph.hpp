@@ -15,7 +15,9 @@ namespace xenon::recomp::graph {
 struct Versions {
   std::string decoder{"ppc-decoder-1"};
   std::string analysis{"cfg-9"};
-  std::string semantics{"cpu-8"};
+  // cpu-9: record forms set CR0 from the low 32 bits of the result.
+  // cpu-10: the add/subtract family's XER.CA/OV come from the low word.
+  std::string semantics{"cpu-10"};
   std::string ir{"xenon-ir-1"};
   std::string codegen{"cpp-aot-10"};
 };
@@ -62,6 +64,10 @@ struct RegionResult {
 };
 // Discovery still runs against the current image/hints. Only the exact ranges
 // it proves to be owned by this region are admitted to the reusable IR boundary.
+// `extra_leaders`: block starts analysis proved (resolved switch cases).
+// `hooks`: module instruction hooks inside the ranges (part of the key).
 [[nodiscard]] RegionResult compile_region(const Store& store, const Versions& versions,
-    cpu::GuestAddress entry, std::span<const cpu::FunctionCodeRange> ranges);
+    cpu::GuestAddress entry, std::span<const cpu::FunctionCodeRange> ranges,
+    std::span<const cpu::GuestAddress> extra_leaders = {},
+    std::span<const cpu::InstructionHook> hooks = {});
 } // namespace xenon::recomp::graph

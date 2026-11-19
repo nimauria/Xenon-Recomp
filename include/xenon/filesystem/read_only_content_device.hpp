@@ -40,11 +40,25 @@ class ReadOnlyContentSource {
                                std::string_view relative_path,
                                std::vector<std::byte>& out_bytes);
 
+// How a read-only device answers an open of an existing file that asks for
+// write access. Disc images refuse it. Installed marketplace packages grant
+// the handle and fail each write, which is what titles that open DLC files
+// read/write expect.
+enum class WriteAccessOpen {
+  Refuse,
+  GrantAndFailWrites,
+};
+
 class ReadOnlyContentDevice final : public Device {
  public:
   ReadOnlyContentDevice(std::string mount_point,
-                        std::shared_ptr<ReadOnlyContentSource> source);
+                        std::shared_ptr<ReadOnlyContentSource> source,
+                        WriteAccessOpen write_access = WriteAccessOpen::Refuse);
   ~ReadOnlyContentDevice() override;
+
+  [[nodiscard]] bool opens_existing_for_write() const noexcept override {
+    return write_access_ == WriteAccessOpen::GrantAndFailWrites;
+  }
 
   [[nodiscard]] FsError initialize() override;
   [[nodiscard]] FsError stat(std::string_view relative_path,
@@ -73,6 +87,7 @@ class ReadOnlyContentDevice final : public Device {
                                            std::string& out_path) const;
 
   std::shared_ptr<ReadOnlyContentSource> source_{};
+  WriteAccessOpen write_access_{WriteAccessOpen::Refuse};
   bool initialized_{};
 };
 

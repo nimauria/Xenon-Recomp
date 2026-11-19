@@ -81,7 +81,7 @@ SessionResult XenonSession::initialize(const SessionConfig& config) {
   config_ = config;
   export_trace_.clear();
   export_trace_.set_enabled(config_.enable_export_trace);
-  memory_watch_.configure(config_.memory_watch_addresses, config_.memory_watch_history);
+  memory_watch_.configure(config_.memory_watch_targets, config_.memory_watch_history);
   {
     std::lock_guard<std::mutex> observation_lock(adaptive_observation_mutex_);
     adaptive_observation_seen_.clear();

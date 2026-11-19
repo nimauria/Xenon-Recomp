@@ -1,3 +1,4 @@
+import { t } from "../localization";
 import { useEffect, useState } from "react";
 import type { Page } from "../../contracts/launcher";
 import type { ServiceOperation } from "../../contracts/services";
@@ -18,52 +19,50 @@ export function InputSettings() {
   const send = (operation: ServiceOperation) =>
     action(operation.command, operation.data);
   return (
-    <section aria-label="Input routing">
-      <h3>Devices and player routing</h3>
-      <p>{input?.status ?? "Runtime input provider unavailable"}</p>
-      {provider?.fixture && (
-        <p className="status">
-          Explicit fixture provider. These controls do not drive physical
-          devices.
-        </p>
-      )}
+    <section aria-label={t("ui.b25979de357c")}>
+      <h3>{t("ui.940ce5bed3ec")}</h3>
+      <p>{input?.status ?? t("ui.5ed6aa32cd0a")}</p>
+      {provider?.fixture && <p className="status">{t("ui.12ff42a703ef")}</p>}
       <div className="actions">
         <button
           disabled={blocked}
           onClick={() => void send({ command: "input.refresh", data: {} })}
         >
-          Refresh input devices
+          {t("ui.18ea204d7d01")}
         </button>
         <button
           disabled={blocked}
           onClick={() => void send({ command: "input.reconfigure", data: {} })}
         >
-          Reconfigure input
+          {t("ui.c22f8eea129f")}
         </button>
       </div>
       <ul>
         {input?.devices.map((device) => (
           <li key={device.id}>
             {device.name} · {device.kind} ·{" "}
-            {device.connected ? "Connected" : "Disconnected"} ·{" "}
+            {device.connected ? t("ui.22965568d22a") : t("ui.04dfac3671b4")} ·{" "}
             {device.provider}
           </li>
         ))}
       </ul>
       {input?.users.map((user) => (
         <fieldset key={user.index} disabled={blocked} className="input-player">
-          <legend>Player {user.index + 1}</legend>
+          <legend>
+            {t("ui.2b6565434216")}
+            {user.index + 1}
+          </legend>
           <p>
             {user.automatic
-              ? "Automatic device selection"
+              ? t("ui.39fcfc71c506")
               : user.sources.length
-                ? "Assigned sources"
-                : "No sources assigned"}
+                ? t("ui.5321ef16d7dd")
+                : t("ui.52f59ee3e0ec")}
           </p>
           <label>
-            Device
+            {t("ui.6ba0bdeccb42")}
             <select
-              aria-label={`Player ${user.index + 1} device`}
+              aria-label={t("ui.5f06f340f0a1", { arg0: user.index + 1 })}
               value={devices[user.index] ?? input.devices[0]?.id ?? ""}
               onChange={(event) =>
                 setDevices((previous) => ({
@@ -91,7 +90,7 @@ export function InputSettings() {
                 })
               }
             >
-              Assign device
+              {t("ui.f38714fd2161")}
             </button>
             <button
               onClick={() =>
@@ -104,7 +103,7 @@ export function InputSettings() {
                 })
               }
             >
-              Add source
+              {t("ui.6ea6c9ec2a76")}
             </button>
             <button
               onClick={() =>
@@ -114,7 +113,7 @@ export function InputSettings() {
                 })
               }
             >
-              Use automatic
+              {t("ui.539ca38b1026")}
             </button>
             <button
               onClick={() =>
@@ -124,7 +123,7 @@ export function InputSettings() {
                 })
               }
             >
-              Clear sources
+              {t("ui.1998926869df")}
             </button>
             <button
               onClick={() =>
@@ -134,9 +133,7 @@ export function InputSettings() {
                 })
               }
             >
-              {provider?.fixture
-                ? "Record fixture vibration"
-                : "Test vibration"}
+              {provider?.fixture ? t("ui.07f8c3177e63") : t("ui.c76b072d9b94")}
             </button>
           </div>
           <ul>
@@ -144,7 +141,10 @@ export function InputSettings() {
               <li key={id}>
                 {input.devices.find((device) => device.id === id)?.name ?? id}{" "}
                 <button
-                  aria-label={`Remove ${id} from player ${user.index + 1}`}
+                  aria-label={t("ui.88e95264db54", {
+                    arg0: id,
+                    arg1: user.index + 1,
+                  })}
                   onClick={() =>
                     void send({
                       command: "input.sourceRemove",
@@ -152,15 +152,15 @@ export function InputSettings() {
                     })
                   }
                 >
-                  Remove source
+                  {t("ui.f55296180370")}
                 </button>
               </li>
             ))}
           </ul>
           <label>
-            Bindings profile
+            {t("ui.74344e5f699d")}
             <select
-              aria-label={`Player ${user.index + 1} bindings profile`}
+              aria-label={t("ui.fce98dbd82ef", { arg0: user.index + 1 })}
               value={user.profileId}
               onChange={(event) =>
                 void send(
@@ -179,7 +179,7 @@ export function InputSettings() {
                 )
               }
             >
-              <option value="">Launcher default</option>
+              <option value="">{t("ui.83a1853b9f77")}</option>
               {input.profiles.map((profile) => (
                 <option key={profile.id} value={profile.id}>
                   {profile.name}
@@ -190,11 +190,14 @@ export function InputSettings() {
         </fieldset>
       ))}
       {input?.profileStorePath && (
-        <p className="path">Bindings store: {input.profileStorePath}</p>
+        <p className="path">
+          {t("ui.da971d7cbf54")}
+          {input.profileStorePath}
+        </p>
       )}
       {input?.moduleApi && (
         <details>
-          <summary>Input module API</summary>
+          <summary>{t("ui.e13008943671")}</summary>
           <pre>{JSON.stringify(input.moduleApi, null, 2)}</pre>
         </details>
       )}
@@ -232,21 +235,18 @@ export function RuntimeServices({ page }: { page: Page }) {
   if (page === "Network")
     return (
       <section className="card">
-        <h2>Network service</h2>
+        <h2>{t("ui.05c8305db484")}</h2>
         <p>
-          Host network link: {online ? "Connected" : "Disconnected"}. A host
-          connection does not prove Internet access or Xenon service readiness.
+          {t("ui.2bfcf23d49c2")}
+          {online ? t("ui.22965568d22a") : t("ui.04dfac3671b4")}
+          {t("ui.c1723e251862")}
         </p>
-        {provider?.fixture && (
-          <p className="status">
-            Explicit network fixture. No remote service is contacted.
-          </p>
-        )}
+        {provider?.fixture && <p className="status">{t("ui.5570bfab4674")}</p>}
         <button
           disabled={blocked || !provider?.capabilities.network}
           onClick={() => void send({ command: "network.refresh", data: {} })}
         >
-          Refresh network status
+          {t("ui.ffc1364cefeb")}
         </button>
         <dl>
           {Object.entries(provider?.network ?? {}).map(([key, value]) => (
@@ -254,27 +254,22 @@ export function RuntimeServices({ page }: { page: Page }) {
               <dt>{key.replace(/([A-Z])/g, " $1")}</dt>
               <dd>
                 {Array.isArray(value)
-                  ? value.join(", ") || "None"
+                  ? value.join(", ") || t("ui.dc937b598926")
                   : typeof value === "boolean"
                     ? value
-                      ? "Yes"
-                      : "No"
+                      ? t("ui.85a39ab345d6")
+                      : t("ui.1ea442a134b2")
                     : String(value || "—")}
               </dd>
             </div>
           ))}
         </dl>
-        {!provider?.capabilities.network && (
-          <p>
-            The Xenon Network adapter is not connected. Online module downloads
-            are a separate desktop service.
-          </p>
-        )}
+        {!provider?.capabilities.network && <p>{t("ui.596248effa9f")}</p>}
         {provider?.fixture && (
           <label>
-            Network fixture scenario
+            {t("ui.cc2f759e31ff")}
             <select
-              aria-label="Network fixture scenario"
+              aria-label={t("ui.cc2f759e31ff")}
               disabled={blocked}
               defaultValue="offline"
               onChange={(event) =>
@@ -301,42 +296,41 @@ export function RuntimeServices({ page }: { page: Page }) {
   if (page === "Filesystem")
     return (
       <section className="card">
-        <h2>Runtime filesystem</h2>
+        <h2>{t("ui.d5d0484d6668")}</h2>
+        <p>{provider?.fixture ? t("ui.eeae12acc5fd") : t("ui.2eff41d6b0c6")}</p>
         <p>
-          {provider?.fixture
-            ? "Explicit VFS fixture. Host-folder checks are real; image containers are not decoded."
-            : "The Xenon virtual-filesystem adapter is not connected."}
-        </p>
-        <p>
-          Initialized: {provider?.filesystem.initialized ? "Yes" : "No"} ·
-          Working directory:{" "}
-          {provider?.filesystem.workingDirectory || "Not set"}
+          {t("ui.8ecfebfa0349")}
+          {provider?.filesystem.initialized
+            ? t("ui.85a39ab345d6")
+            : t("ui.1ea442a134b2")}
+          {t("ui.377350b45c69")}{" "}
+          {provider?.filesystem.workingDirectory || t("ui.4895f73177ab")}
         </p>
         <fieldset
           disabled={blocked || !provider?.capabilities.filesystem}
           className="form"
         >
-          <legend>Mount content</legend>
+          <legend>{t("ui.52c19d7619c6")}</legend>
           <label>
-            Guest mount point
+            {t("ui.e45cb1d3f925")}
             <input
               value={mountPoint}
               onChange={(event) => mount(event.target.value)}
             />
           </label>
           <label>
-            Mount kind
+            {t("ui.73d67d413194")}
             <select
               value={kind}
               onChange={(event) => setKind(event.target.value as typeof kind)}
             >
-              <option value="host">Host folder</option>
-              <option value="gdfx">GDFX image</option>
-              <option value="stfs">STFS package</option>
+              <option value="host">{t("ui.758876bc921d")}</option>
+              <option value="gdfx">{t("ui.34c97de2630d")}</option>
+              <option value="stfs">{t("ui.f431a92fc2ac")}</option>
             </select>
           </label>
           <label>
-            Mount source
+            {t("ui.87361df7f715")}
             <input
               value={source}
               onChange={(event) => setSource(event.target.value)}
@@ -348,10 +342,10 @@ export function RuntimeServices({ page }: { page: Page }) {
               if (file) setSource(file);
             }}
           >
-            Choose mount source
+            {t("ui.7c6009b4f005")}
           </button>
           <label className="row">
-            Read only
+            {t("ui.8ac767353080")}
             <input
               type="checkbox"
               checked={readOnly}
@@ -366,16 +360,17 @@ export function RuntimeServices({ page }: { page: Page }) {
               })
             }
           >
-            Mount source
+            {t("ui.87361df7f715")}
           </button>
         </fieldset>
-        <h3>Mounted devices</h3>
+        <h3>{t("ui.87715ce37186")}</h3>
         {provider?.filesystem.mounts.map((entry) => (
           <article className="card" key={entry.mountPoint}>
             <strong>{entry.mountPoint}</strong>
             <p className="path">{entry.source}</p>
             <p>
-              {entry.kind} · {entry.readOnly ? "Read only" : "Writable"}
+              {entry.kind} ·{" "}
+              {entry.readOnly ? t("ui.8ac767353080") : t("ui.18685c640b42")}
             </p>
             <button
               disabled={blocked}
@@ -386,7 +381,8 @@ export function RuntimeServices({ page }: { page: Page }) {
                 })
               }
             >
-              Unmount {entry.mountPoint}
+              {t("ui.c1d200b896f0")}
+              {entry.mountPoint}
             </button>
           </article>
         ))}
@@ -394,16 +390,16 @@ export function RuntimeServices({ page }: { page: Page }) {
           disabled={blocked || !provider?.capabilities.filesystem}
           className="form"
         >
-          <legend>Guest symbolic links</legend>
+          <legend>{t("ui.3158348f1d1d")}</legend>
           <label>
-            Guest alias
+            {t("ui.c9fd979aa275")}
             <input
               value={alias}
               onChange={(event) => setAlias(event.target.value)}
             />
           </label>
           <label>
-            Guest target
+            {t("ui.d3d5cecbb7dc")}
             <input
               value={target}
               onChange={(event) => setTarget(event.target.value)}
@@ -414,7 +410,7 @@ export function RuntimeServices({ page }: { page: Page }) {
               void send({ command: "filesystem.link", data: { alias, target } })
             }
           >
-            Register guest link
+            {t("ui.35e9c5455526")}
           </button>
         </fieldset>
         {provider?.filesystem.symbolicLinks.map((link) => (
@@ -429,7 +425,8 @@ export function RuntimeServices({ page }: { page: Page }) {
                 })
               }
             >
-              Remove {link.alias}
+              {t("ui.5948954e3b49")}
+              {link.alias}
             </button>
           </p>
         ))}
@@ -437,9 +434,9 @@ export function RuntimeServices({ page }: { page: Page }) {
           disabled={blocked || !provider?.capabilities.filesystem}
           className="form"
         >
-          <legend>Guest path</legend>
+          <legend>{t("ui.bf1f7a6dab58")}</legend>
           <label>
-            Guest path
+            {t("ui.bf1f7a6dab58")}
             <input
               value={path}
               onChange={(event) => setPath(event.target.value)}
@@ -451,19 +448,19 @@ export function RuntimeServices({ page }: { page: Page }) {
                 void send({ command: "filesystem.cwd", data: { path } })
               }
             >
-              Set working directory
+              {t("ui.30fcdc918df9")}
             </button>
             <button
               onClick={() =>
                 void send({ command: "filesystem.test", data: { path } })
               }
             >
-              Test guest path
+              {t("ui.90db9634d9cd")}
             </button>
           </div>
         </fieldset>
         {state.serviceResult?.command.startsWith("filesystem.") && (
-          <pre aria-label="Filesystem result">
+          <pre aria-label={t("ui.c1e8adf47b65")}>
             {JSON.stringify(state.serviceResult.result, null, 2)}
           </pre>
         )}
@@ -471,7 +468,7 @@ export function RuntimeServices({ page }: { page: Page }) {
     );
   return (
     <section className="card">
-      <h2>Developer diagnostics</h2>
+      <h2>{t("ui.aab0a0a7c386")}</h2>
       <pre>
         {JSON.stringify(
           {

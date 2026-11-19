@@ -15,6 +15,12 @@
 
 #include "xenon/kernel/thread.hpp"
 
+#if defined(_WIN32)
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <windows.h>
+#endif
+
 #include <atomic>
 #include <cassert>
 #include <chrono>
@@ -296,6 +302,43 @@ void test_self_reap_never_destroys_the_calling_thread() {
   assert(manager.get_thread_ptr(id) == nullptr);
 }
 
+#if defined(_WIN32)
+// Regression (AC6 stuck on its loading screen): a guest affinity is the host
+// thread's ideal processor, not a pin. Pinning crowded every guest thread
+// onto host processors 0-5; the title's main thread stalled behind its
+// neighbours long enough for a worker it had just resumed to reach a
+// critical section it had not initialized yet. The thread runs where it
+// asked to by preference and may still run on any processor of the process,
+// and the guest reads back the affinity it set.
+void test_guest_affinity_is_a_host_preference_not_a_pin() {
+  DWORD_PTR process_mask = 0;
+  DWORD_PTR system_mask = 0;
+  assert(GetProcessAffinityMask(GetCurrentProcess(), &process_mask, &system_mask));
+  SYSTEM_INFO system_info{};
+  GetSystemInfo(&system_info);
+  if (system_info.dwNumberOfProcessors < 2) return;  // nothing to prefer on one processor
+
+  std::atomic<int> ideal_number{-1};
+  std::atomic<DWORD_PTR> mask_seen{0};
+  ThreadCreationParams params{};
+  params.processor_affinity = 0x2u;  // hardware thread 1
+  KernelThread thread([&]() -> std::uint32_t {
+    PROCESSOR_NUMBER ideal{};
+    if (GetThreadIdealProcessorEx(GetCurrentThread(), &ideal)) ideal_number.store(ideal.Number);
+    // Reading a thread's mask means setting one: put back what it was.
+    const auto previous = SetThreadAffinityMask(GetCurrentThread(), process_mask);
+    mask_seen.store(previous);
+    return 0;
+  }, params);
+  assert(thread.start());
+  assert(thread.join(2000));
+  assert(ideal_number.load() == 1);
+  assert(mask_seen.load() == process_mask);
+  assert(thread.processor_affinity() == 0x2u);
+  std::cout << "  [PASS] guest affinity is a host preference, not a pin\n";
+}
+#endif
+
 }  // namespace
 
 int main() {
@@ -309,6 +352,9 @@ int main() {
   test_get_thread_ptr_is_non_owning();
   test_reap_finished_threads_removes_only_terminated_threads();
   test_self_reap_never_destroys_the_calling_thread();
+#if defined(_WIN32)
+  test_guest_affinity_is_a_host_preference_not_a_pin();
+#endif
 
   std::cout << "All KernelThread lifecycle tests passed!\n";
   return 0;

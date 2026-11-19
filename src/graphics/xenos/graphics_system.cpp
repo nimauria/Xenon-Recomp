@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cstdio>
+#include <cstdlib>
 #include <memory>
 #include <limits>
 #include <unordered_map>
@@ -10,6 +12,7 @@
 #include "xenon/gpu/resource_ir.hpp"
 #include "xenon/gpu/shader_ir.hpp"
 #include "xenon/gpu/texture.hpp"
+#include "xenon/logging/logger.hpp"
 #include "xenon/logging/probe_log.hpp"
 #include "xenon/memory/types.hpp"
 
@@ -133,18 +136,23 @@ void replay_shader_preamble(Backend& backend,
   const auto emit_program = [&](const std::optional<ShaderProgram>& program) {
     if (!program) return;
     const Type3Opcode opcode = Type3Opcode::ImLoadImmediate;
-    backend.consume(ir::ShaderLoad{opcode, true, 0u, *program,
-                                   ShaderDecoder::decode(*program), {}});
+    backend.consume(ir::ShaderLoad{
+        opcode, true, 0u, *program,
+        std::make_shared<const DecodedShader>(ShaderDecoder::decode(*program)), {}});
   };
   emit_program(capture.initial_vertex_program);
   emit_program(capture.initial_pixel_program);
 }
 
+// `edram_image`, when given, is the canonical EDRAM the commands start from,
+// taken earlier (a live recording's start); otherwise the backend's EDRAM is
+// made canonical and taken now.
 bool build_portable_capture(memory::AddressSpace& memory, Edram& edram,
                             Backend& backend,
                             FrontendSubmissionCapture&& frontend,
                             PortableSubmissionCapture& out,
-                            std::string* error) {
+                            std::string* error,
+                            std::vector<std::byte>* edram_image = nullptr) {
   auto capture = std::make_unique<PortableSubmissionCapture>();
   capture->frontend = std::move(frontend);
 
@@ -152,7 +160,7 @@ bool build_portable_capture(memory::AddressSpace& memory, Edram& edram,
   // native-authored memory. No IR is consumed by this maintenance submission.
   backend.begin_submission(memory, edram);
   const auto finish_backend = [&]() { backend.end_submission(); };
-  if (!backend.make_edram_canonical()) {
+  if (!edram_image && !backend.make_edram_canonical()) {
     finish_backend();
     set_error(error, "portable GPU capture could not canonicalize EDRAM");
     return false;
@@ -221,7 +229,7 @@ bool build_portable_capture(memory::AddressSpace& memory, Edram& edram,
       continue;
     }
     if (const auto* load = std::get_if<ir::ShaderLoad>(&command)) {
-      shaders.insert_or_assign(load->program.hash(), load->decoded);
+      if (load->decoded) shaders.insert_or_assign(load->program.hash(), *load->decoded);
       if (load->program.stage() == ShaderStage::Vertex) {
         active_vertex = load->program;
       } else {
@@ -424,7 +432,10 @@ bool build_portable_capture(memory::AddressSpace& memory, Edram& edram,
     }
     capture->physical_ranges.push_back(std::move(snapshot));
   }
-  capture->edram.assign(edram.bytes().begin(), edram.bytes().end());
+  if (edram_image)
+    capture->edram = std::move(*edram_image);
+  else
+    capture->edram.assign(edram.bytes().begin(), edram.bytes().end());
   capture->memory_epoch = memory.coherency().current_epoch();
   finish_backend();
   out = std::move(*capture);
@@ -434,11 +445,26 @@ bool build_portable_capture(memory::AddressSpace& memory, Edram& edram,
 }  // namespace
 
 GraphicsSystem::GraphicsSystem(memory::AddressSpace& memory)
-    : memory_(memory), command_processor_(memory_, registers_, stream_) {}
+    : memory_(memory), command_processor_(memory_, registers_, stream_) {
+  set_swap_callback({});
+}
+
+void GraphicsSystem::set_swap_callback(std::function<void(const FrontBufferSwap&)> callback) {
+  command_processor_.set_swap_callback(
+      [this, callback = std::move(callback)](const FrontBufferSwap& swap) {
+        // The swap shows the frame whose work has just executed (the command
+        // processor runs execute_ir() before it), so that frame ends here.
+        if (temporal_.active()) temporal_.end_frame();
+        if (callback) callback(swap);
+      });
+}
 
 void GraphicsSystem::reset() {
+  // The backend may still be playing IR that reads the EDRAM store.
+  executor_.wait_idle();
   command_processor_.reset();
   edram_.reset();
+  temporal_.reset();
 }
 
 void GraphicsSystem::submit_buffer(std::uint32_t physical_address,
@@ -459,18 +485,365 @@ std::uint32_t GraphicsSystem::submit_ring(Backend& backend, std::uint32_t physic
                                           std::uint32_t read_index,
                                           std::uint32_t write_index) {
   // Only a decoded draw (a resolve is one) can change what the guest
-  // observes; register writes alone wait for the next draw or the end.
+  // observes; register writes alone wait for the next draw or the end. The
+  // barrier executes that work but leaves it in the open batch: anything
+  // that needs its results (a resolve's readback, a wait) submits and waits
+  // itself, and the drain submits at its end. Submitting at every barrier
+  // made each of AC6's draws its own GPU batch - with three in flight, every
+  // draw waited a GPU round trip.
+  //
+  // Resolve readbacks are queued with the work and not waited for (see
+  // Backend::publish_gpu_writes()). Before the guest can observe that the
+  // GPU got past a point - a fence or memory write, an interrupt, a memory
+  // poll - every readback queued before it is waited for and written to
+  // guest memory, so a title that sees the fence also sees the resolve.
+  //
+  // GPU V3 (start_backend_thread()): a drain starts out executing its IR on
+  // this thread, as a short drain - AC6 runs hundreds a second, a few draws
+  // each, every one ending in a CPU handshake - is done before a hand-off
+  // would pay for itself. Once it has decoded kStreamAfterDraws draws it
+  // streams: draws go to the backend thread as they are decoded, and the
+  // guest memory writes the stream makes (fences, MEM_WRITE, scratch
+  // write-back, extents) become backend tasks behind the work before them,
+  // so decoding goes on. Interrupts, flips, waits and the frontend's own
+  // reads of guest memory still wait for everything before them; whichever
+  // thread executes it, the guest sees each effect only once the work before
+  // it is complete, as when one thread did both.
+  //
+  // Pipelined drains (pipelined_drains()): a drain's last work is handed over
+  // and not waited for, so the next drain decodes while it executes - as the
+  // Xenos command processor fetches ahead of the shader pipes. What the guest
+  // could observe of it is ordered behind it: its deferred writes, the read
+  // pointer (write_guest_after_work()), and the next drain's barriers.
+  drain_streaming_ = false;
+  drain_first_draw_ = command_processor_.draw_count();
   command_processor_.set_guest_visible_barrier([this, &backend] {
-    if (command_processor_.statistics().draws != draws_at_last_execute_) execute_ir(backend);
+    // Which kind of effect held the frontend, and for how long
+    // (perf_frame.log "barriers").
+    const bool held = executor_.running() && !executor_.idle();
+    const auto started = std::chrono::steady_clock::now();
+    note_hold(perf::Counter::HoldsBarrier);
+    run_ir_then(backend, /*all=*/false, /*submit=*/false, [&backend] {
+      if (!backend.publish_gpu_writes(/*wait=*/true)) {
+        logging::Logger::instance().log(logging::Level::Error, "gpu",
+                                        "resolve readback failed: " + backend.last_error());
+      }
+    });
+    if (!held) return;
+    using Kind = CommandProcessor::BarrierKind;
+    const auto kind = command_processor_.last_barrier_kind();
+    const auto [count, time] =
+        kind == Kind::Interrupt ? std::pair{perf::Counter::BarrierInterrupts,
+                                            perf::Counter::BarrierInterruptNs}
+        : kind == Kind::Swap    ? std::pair{perf::Counter::BarrierSwaps, perf::Counter::BarrierSwapNs}
+        : kind == Kind::Wait    ? std::pair{perf::Counter::BarrierWaits, perf::Counter::BarrierWaitNs}
+                                : std::pair{perf::Counter::BarrierWrites, perf::Counter::BarrierWriteNs};
+    perf::add(count, 1u);
+    perf::add(time, static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                                   std::chrono::steady_clock::now() - started)
+                                                   .count()));
   });
+  // A sync point captures guest memory as it stands now, for the commands
+  // after it (Backend::sync_guest_reads()): the CPU code it releases may
+  // rewrite what they read. So it runs now, on the frontend's timeline, once
+  // the commands before it - which read the previous point's memory - have
+  // executed.
+  command_processor_.set_sync_point_callback([this, &backend] {
+    note_hold(perf::Counter::HoldsSync);
+    run_ir_then(backend, /*all=*/false, /*submit=*/false,
+                [&backend] { backend.sync_guest_reads(); });
+  });
+  if (executor_.running()) {
+    // Streaming: hand draws over as they are decoded - at once when the
+    // backend has run dry, in small groups while it is busy - so its queue
+    // stays short (a barrier waits for all of it).
+    command_processor_.set_draw_emitted_callback([this, &backend] {
+      if (!streaming()) return;
+      constexpr std::uint32_t kDrawsPerHandOff = 8;
+      if (++draws_since_hand_off_ >= kDrawsPerHandOff || executor_.idle())
+        execute_ir(backend, /*submit=*/false);
+    });
+    command_processor_.set_guest_write_sink(
+        [this, &backend](std::uint32_t address, std::vector<std::byte> bytes,
+                         bool skip_if_unchanged) {
+          auto write = [this, &backend, address, bytes, skip_if_unchanged] {
+            if (!backend.publish_gpu_writes(/*wait=*/true)) {
+              logging::Logger::instance().log(logging::Level::Error, "gpu",
+                                              "resolve readback failed: " + backend.last_error());
+            }
+            make_guest_write(address, bytes, skip_if_unchanged);
+          };
+          if (!streaming() && executor_.idle()) {
+            // Nothing is pending (an earlier pipelined drain's writes and
+            // resolves included), so guest memory is current: a write that
+            // changes nothing is no barrier (AC6 issues one after nearly
+            // every draw; making each a barrier executed the draws one at a
+            // time).
+            if (skip_if_unchanged) {
+              std::vector<std::byte> current(bytes.size());
+              if (memory_.copy_physical_range(address, current) && current == bytes) {
+                command_processor_.note_deferred_extent_write(true);
+                return;
+              }
+            }
+            run_ir_then(backend, /*all=*/false, /*submit=*/false, write);
+            return;
+          }
+          if (command_processor_.draw_count() != draws_at_last_execute_)
+            execute_ir(backend, /*submit=*/false);
+          const auto size = static_cast<std::uint32_t>(bytes.size());
+          defer_guest_write(address, std::move(write), size);
+        });
+    // A read waits only for the latest pending deferred write to the bytes
+    // it reads: the deferred writes are fences and extents at a few small
+    // locations, and the reads mostly constants loaded from elsewhere -
+    // waiting on every pending write held AC6's cutscenes up once every two
+    // or three draws.
+    command_processor_.set_guest_read_fence([this](std::uint32_t address, std::uint32_t size) {
+      while (!deferred_writes_.empty() && executor_.done(deferred_writes_.front().sequence))
+        deferred_writes_.pop_front();
+      const std::uint64_t end = std::uint64_t{address} + size;
+      std::uint64_t wait = 0;
+      for (const auto& write : deferred_writes_)
+        if (write.begin < end && address < write.end) wait = write.sequence;
+      if (!wait || executor_.done(wait)) return;
+      perf::add(perf::Counter::HoldsRead, 1u);
+      executor_.wait_until_done(wait);
+    });
+  }
   struct ClearBarrier {
-    CommandProcessor& processor;
-    ~ClearBarrier() { processor.set_guest_visible_barrier({}); }
-  } clear{command_processor_};
+    GraphicsSystem& system;
+    Backend& backend;
+    ~ClearBarrier() {
+      system.command_processor_.set_guest_visible_barrier({});
+      system.command_processor_.set_sync_point_callback({});
+      system.command_processor_.set_draw_emitted_callback({});
+      system.command_processor_.set_guest_write_sink({});
+      system.command_processor_.set_guest_read_fence({});
+      if (system.pipelined_drains() && !system.executor_.idle()) {
+        // Behind the drain's work, which is still executing; its pending
+        // writes stay tracked for the next drain's reads.
+        system.executor_.post([&backend = backend] { backend.end_guest_read_sync(); });
+        return;
+      }
+      system.deferred_writes_.clear();
+      system.executor_.run([&backend = backend] { backend.end_guest_read_sync(); });
+    }
+  } clear{*this, backend};
+  // Work the guest just published starts from guest memory as it stands now;
+  // a drain resuming a parked wait continues from the sync point that wait
+  // reaches when it is satisfied.
+  //
+  // While an earlier pipelined drain still executes, the sync point takes its
+  // place behind that work, as a busy GPU reaches newly published work only
+  // once it is done with what came before.
+  if (!command_processor_.parked_on_wait()) {
+    if (pipelined_drains() && !executor_.idle()) {
+      executor_.post([&backend] { backend.sync_guest_reads(); });
+    } else {
+      note_hold(perf::Counter::HoldsSync);
+      executor_.run([&backend] { backend.sync_guest_reads(); });
+    }
+  }
+  if (frame_capture_ && !frame_capture_->started)
+    begin_frame_capture(backend, physical_address, capacity_dwords, read_index);
   const auto next_read_index =
       command_processor_.execute_ring(physical_address, capacity_dwords, read_index, write_index);
-  execute_ir(backend);
+  // A short drain with the backend idle finishes here, without a hand-off;
+  // readbacks the GPU has already finished land now, without waiting.
+  //
+  // Pipelined, the last work of a drain that streamed (or that finds the
+  // backend still busy) is handed over and left running. The caller writes
+  // the read pointer back at once - the decoded commands no longer need the
+  // ring words - unless a draw of the drain reads data out of command memory
+  // (D3D's resolve and clear rectangles, DrawPrimitiveUP vertices): then
+  // with write_guest_after_work(), so the guest reuses that memory only once
+  // the draw has read it (CommandProcessor::drain_reads_command_memory()).
+  const auto publish = [&backend] {
+    if (!backend.publish_gpu_writes(/*wait=*/false)) {
+      logging::Logger::instance().log(logging::Level::Error, "gpu",
+                                      "resolve readback failed: " + backend.last_error());
+    }
+  };
+  if (pipelined_drains() && (drain_streaming_ || !executor_.idle())) {
+    execute_ir(backend, /*submit=*/true);
+    executor_.post(publish);
+  } else {
+    note_hold(perf::Counter::HoldsDrain);
+    run_ir_then(backend, /*all=*/true, /*submit=*/true, publish);
+  }
+  report_backend_errors();
+  if (frame_capture_ && frame_capture_->started) end_frame_capture_if_done(backend, next_read_index);
   return next_read_index;
+}
+
+void GraphicsSystem::arm_frame_capture(std::filesystem::path path, std::uint32_t frames) {
+  frame_capture_ = std::make_unique<FrameCaptureRecording>();
+  frame_capture_->path = std::move(path);
+  frame_capture_->frames = (std::max)(frames, 1u);
+}
+
+void GraphicsSystem::begin_frame_capture(Backend& backend, std::uint32_t physical_address,
+                                         std::uint32_t capacity_dwords,
+                                         std::uint32_t read_index) {
+  auto& recording = *frame_capture_;
+  // Registers and shaders are the frontend's as decoded so far; they are
+  // the commands' starting state only when everything decoded has been
+  // handed over (a drain that failed may leave IR for the next one).
+  if (stream_.size() != 0u) return;
+  bool canonical = false;
+  executor_.run([&] {
+    backend.begin_submission(memory_, edram_);
+    canonical = backend.make_edram_canonical();
+    backend.end_submission();
+    if (canonical) recording.edram.assign(edram_.bytes().begin(), edram_.bytes().end());
+  });
+  if (!canonical) {
+    frame_capture_result_ = FrameCaptureResult{
+        false, recording.path, "the backend could not make EDRAM canonical: " + backend.last_error()};
+    frame_capture_.reset();
+    return;
+  }
+  auto& frontend = recording.frontend;
+  frontend.source = FrontendSubmissionCapture::Source::Ring;
+  frontend.physical_address = physical_address;
+  frontend.capacity_dwords = capacity_dwords;
+  frontend.read_index = read_index;
+  frontend.initial_registers = registers_.snapshot();
+  frontend.initial_vertex_program = command_processor_.active_vertex_program();
+  frontend.initial_pixel_program = command_processor_.active_pixel_program();
+  recording.swaps_at_start = command_processor_.statistics().front_buffer_swaps;
+  recording.started = true;
+}
+
+void GraphicsSystem::end_frame_capture_if_done(Backend& backend, std::uint32_t next_read_index) {
+  auto& recording = *frame_capture_;
+  ++recording.drains;
+  if (command_processor_.statistics().front_buffer_swaps - recording.swaps_at_start <
+      recording.frames)
+    return;
+  auto frontend = std::move(recording.frontend);
+  frontend.write_index = next_read_index;
+  frontend.resulting_read_index = next_read_index;
+  frontend.final_registers = registers_.snapshot();
+  FrameCaptureResult result{};
+  result.path = recording.path;
+  result.drains = recording.drains;
+  result.commands = frontend.commands.size();
+  result.draws = static_cast<std::uint64_t>(
+      std::count_if(frontend.commands.begin(), frontend.commands.end(), [](const ir::Command& c) {
+        return std::holds_alternative<ir::DrawPacket>(c);
+      }));
+  auto capture = std::make_unique<PortableSubmissionCapture>();
+  bool built = false;
+  // Behind the recorded work: the memory it reaches is copied once it has
+  // executed (and its GPU writes are visible).
+  executor_.run([&] {
+    built = build_portable_capture(memory_, edram_, backend, std::move(frontend), *capture,
+                                   &result.error, &recording.edram);
+  });
+  if (built) {
+    capture->complete = false;
+    capture->diagnostics.emplace_back(
+        "Recorded live across " + std::to_string(result.drains) +
+        " ring drains: guest memory was snapshotted when the recording ended, so bytes the CPU "
+        "rewrote during it hold their final values.");
+    result.physical_bytes = capture->physical_byte_count();
+    std::error_code ignored;
+    if (recording.path.has_parent_path())
+      std::filesystem::create_directories(recording.path.parent_path(), ignored);
+    result.ok = save_portable_capture(*capture, recording.path, &result.error);
+  }
+  frame_capture_result_ = std::move(result);
+  frame_capture_.reset();
+}
+
+bool GraphicsSystem::streaming() {
+  if (drain_streaming_) return true;
+  if (!executor_.running() ||
+      command_processor_.draw_count() - drain_first_draw_ < kStreamAfterDraws)
+    return false;
+  drain_streaming_ = true;
+  return true;
+}
+
+void GraphicsSystem::run_ir_then(Backend& backend, bool all, bool submit,
+                                 const std::function<void()>& then) {
+  std::vector<ir::Command> commands;
+  if (all || command_processor_.draw_count() != draws_at_last_execute_) {
+    draws_at_last_execute_ = command_processor_.draw_count();
+    draws_since_hand_off_ = 0;
+    commands = stream_.take();
+    record_for_capture(commands);
+    if (executor_.running()) backend.prefetch_shaders(commands);
+    if (temporal_.active())
+      for (const auto& command : commands) temporal_.observe(command);
+  }
+  // Behind everything handed over, and waited for: on this thread when the
+  // backend is idle, so a drain that never streamed costs no hand-off.
+  executor_.run([&] {
+    if (!commands.empty() || submit)
+      consume_commands(backend, commands, submit, /*observe_temporal=*/false);
+    if (then) then();
+  });
+}
+
+void GraphicsSystem::defer_guest_write(std::uint32_t address, std::function<void()> write,
+                                       std::uint32_t size) {
+  const auto sequence = executor_.post_sequenced(std::move(write));
+  deferred_writes_.push_back({address, std::uint64_t{address} + size, sequence});
+}
+
+void GraphicsSystem::write_guest_after_work(std::uint32_t address, std::vector<std::byte> bytes) {
+  // Finished writes need no tracking.
+  while (!deferred_writes_.empty() && executor_.done(deferred_writes_.front().sequence))
+    deferred_writes_.pop_front();
+  if (!executor_.running() || executor_.idle()) {
+    make_guest_write(address, bytes, /*skip_if_unchanged=*/false);
+    return;
+  }
+  const auto size = static_cast<std::uint32_t>(bytes.size());
+  defer_guest_write(
+      address,
+      [this, address, bytes = std::move(bytes)] {
+        make_guest_write(address, bytes, /*skip_if_unchanged=*/false);
+      },
+      size);
+}
+
+bool GraphicsSystem::write_guest_ahead_of_work(std::uint32_t address,
+                                               std::span<const std::byte> bytes) {
+  while (!deferred_writes_.empty() && executor_.done(deferred_writes_.front().sequence))
+    deferred_writes_.pop_front();
+  const std::uint64_t end = std::uint64_t{address} + bytes.size();
+  const bool behind_deferred =
+      std::any_of(deferred_writes_.begin(), deferred_writes_.end(),
+                  [&](const DeferredWrite& write) {
+                    return write.begin < end && address < write.end;
+                  });
+  if (behind_deferred) {
+    write_guest_after_work(address, std::vector<std::byte>(bytes.begin(), bytes.end()));
+    return false;
+  }
+  make_guest_write(address, bytes, /*skip_if_unchanged=*/false);
+  return true;
+}
+
+void GraphicsSystem::make_guest_write(std::uint32_t address, std::span<const std::byte> bytes,
+                                      bool skip_if_unchanged) {
+  if (skip_if_unchanged) {
+    std::vector<std::byte> current(bytes.size());
+    const bool unchanged = memory_.copy_physical_range(address, current) &&
+                           std::equal(current.begin(), current.end(), bytes.begin());
+    command_processor_.note_deferred_extent_write(unchanged);
+    if (unchanged) return;
+  }
+  if (!memory_.write_physical(address, bytes)) {
+    char text[96];
+    std::snprintf(text, sizeof(text), "GPU write to physical 0x%08X has no backing",
+                  static_cast<unsigned>(address));
+    logging::Logger::instance().log(logging::Level::Error, "gpu", text);
+  }
 }
 
 FrontendSubmissionCapture GraphicsSystem::capture_buffer(
@@ -515,9 +888,11 @@ bool GraphicsSystem::capture_portable_buffer(
     Backend& backend, std::uint32_t physical_address, std::uint32_t dword_count,
     PortableSubmissionCapture& out, std::string* error) {
   auto frontend = capture_buffer(physical_address, dword_count);
-  return build_portable_capture(memory_, edram_, backend,
-                                std::move(frontend),
-                                out, error);
+  bool result = false;
+  executor_.run([&] {
+    result = build_portable_capture(memory_, edram_, backend, std::move(frontend), out, error);
+  });
+  return result;
 }
 
 bool GraphicsSystem::capture_portable_ring(
@@ -525,26 +900,42 @@ bool GraphicsSystem::capture_portable_ring(
     std::uint32_t capacity_dwords, std::uint32_t read_index,
     std::uint32_t write_index, PortableSubmissionCapture& out,
     std::string* error) {
-  return build_portable_capture(
-      memory_, edram_, backend,
-      capture_ring(physical_address, capacity_dwords, read_index, write_index),
-      out, error);
+  auto frontend = capture_ring(physical_address, capacity_dwords, read_index, write_index);
+  bool result = false;
+  executor_.run([&] {
+    result = build_portable_capture(memory_, edram_, backend, std::move(frontend), out, error);
+  });
+  return result;
 }
 
 void GraphicsSystem::replay_capture(
     Backend& backend, const FrontendSubmissionCapture& capture) {
-  backend.begin_submission(memory_, edram_);
-  for (std::uint32_t i = 0; i < RegisterFile::kRegisterCount; ++i) {
-    backend.consume(ir::RegisterWrite{i, capture.initial_registers.values[i]});
-  }
-  replay_shader_preamble(backend, capture);
-  for (const auto& command : capture.commands) backend.consume(command);
-  backend.end_submission();
+  executor_.run([&] {
+    backend.begin_submission(memory_, edram_);
+    for (std::uint32_t i = 0; i < RegisterFile::kRegisterCount; ++i) {
+      backend.consume(ir::RegisterWrite{i, capture.initial_registers.values[i]});
+    }
+    replay_shader_preamble(backend, capture);
+    for (const auto& command : capture.commands) backend.consume(command);
+    backend.end_submission();
+  });
 }
 
 bool GraphicsSystem::replay_portable_capture(
     Backend& backend, const PortableSubmissionCapture& capture,
-    std::string* error) {
+    std::string* error, ReplayTiming* timing, bool restore_edram) {
+  bool result = false;
+  executor_.run([&] {
+    result = replay_portable_capture_now(backend, capture, error, timing, restore_edram);
+  });
+  return result;
+}
+
+bool GraphicsSystem::replay_portable_capture_now(
+    Backend& backend, const PortableSubmissionCapture& capture,
+    std::string* error, ReplayTiming* timing, bool restore_edram) {
+  using Clock = std::chrono::steady_clock;
+  const auto restore_start = Clock::now();
   if (capture.schema_version != PortableSubmissionCapture::kSchemaVersion ||
       capture.edram.size() != Edram::kSize) {
     set_error(error, "portable GPU capture schema or EDRAM image is invalid");
@@ -552,12 +943,14 @@ bool GraphicsSystem::replay_portable_capture(
   }
 
   backend.begin_submission(memory_, edram_);
-  if (!backend.invalidate_edram_native_state()) {
-    backend.end_submission();
-    set_error(error, "backend could not discard stale native EDRAM ownership");
-    return false;
+  if (restore_edram) {
+    if (!backend.invalidate_edram_native_state()) {
+      backend.end_submission();
+      set_error(error, "backend could not discard stale native EDRAM ownership");
+      return false;
+    }
+    edram_.write(0u, capture.edram);
   }
-  edram_.write(0u, capture.edram);
   for (const auto& range : capture.physical_ranges) {
     if (std::uint64_t(range.physical_address) + range.bytes.size() >
             memory::kPhysicalMemorySize ||
@@ -568,6 +961,7 @@ bool GraphicsSystem::replay_portable_capture(
     }
   }
 
+  const auto consume_start = Clock::now();
   for (std::uint32_t i = 0; i < RegisterFile::kRegisterCount; ++i) {
     backend.consume(
         ir::RegisterWrite{i, capture.frontend.initial_registers.values[i]});
@@ -575,11 +969,53 @@ bool GraphicsSystem::replay_portable_capture(
   replay_shader_preamble(backend, capture.frontend);
   for (const auto& command : capture.frontend.commands) backend.consume(command);
   backend.end_submission();
+  if (timing) {
+    const auto end = Clock::now();
+    timing->restore_ns = static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(consume_start - restore_start).count());
+    timing->consume_ns = static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(end - consume_start).count());
+  }
   return true;
 }
 
-void GraphicsSystem::execute_ir(Backend& backend) {
-  draws_at_last_execute_ = command_processor_.statistics().draws;
+void GraphicsSystem::execute_ir(Backend& backend, bool submit) {
+  draws_at_last_execute_ = command_processor_.draw_count();
+  draws_since_hand_off_ = 0;
+  record_for_capture(stream_.commands());
+  if (!executor_.running() || executor_.inside_task()) {
+    consume_commands(backend, stream_.commands(), submit, /*observe_temporal=*/true);
+    stream_.clear();
+    return;
+  }
+  auto commands = stream_.take();
+  // Shaders loaded in this stretch start compiling now, on workers, ahead of
+  // the backend reaching them.
+  backend.prefetch_shaders(commands);
+  // The temporal analyzer belongs to the frontend: it sees the commands as
+  // they are handed over, in order with the swaps that end its frames.
+  if (temporal_.active())
+    for (const auto& command : commands) temporal_.observe(command);
+  // Nothing to play: at most the open batch to submit, in order - here when
+  // the backend is idle, behind its work when a pipelined drain still runs.
+  if (commands.empty()) {
+    if (!submit) return;
+    if (executor_.idle())
+      executor_.run([&] { consume_commands(backend, {}, true, /*observe_temporal=*/false); });
+    else
+      executor_.post([this, &backend] {
+        consume_commands(backend, {}, true, /*observe_temporal=*/false);
+      });
+    return;
+  }
+  executor_.post([this, &backend, commands = std::move(commands), submit] {
+    consume_commands(backend, commands, submit, /*observe_temporal=*/false);
+  });
+}
+
+void GraphicsSystem::consume_commands(Backend& backend,
+                                      const std::vector<ir::Command>& commands, bool submit,
+                                      bool observe_temporal) {
   using Clock = std::chrono::steady_clock;
   const auto begin_start = Clock::now();
   backend.begin_submission(memory_, edram_);
@@ -589,10 +1025,21 @@ void GraphicsSystem::execute_ir(Backend& backend) {
   };
   if (const auto ms = elapsed_ms(begin_start); ms >= 50)
     logging::append_probe_log("ir_timing_diag.log", "begin_submission %lld ms\n", ms);
-  // The pump thread runs this between ring drains and vsync interrupts, so a
-  // slow command delays both; name the slow ones.
-  for (const auto& command : stream_.commands()) {
+  // A slow command delays the drain and vsync work behind it; with probe
+  // logs on, name the slow ones.
+  // Regression (AC6 missions at 20 fps): the two clock reads per command ran
+  // regardless - tens of thousands of register writes a frame made them 13%
+  // of the pump thread.
+  const bool temporal = observe_temporal && temporal_.active();
+  const bool timed = logging::probe_logs_enabled();
+  for (const auto& command : commands) {
+    if (!timed) {
+      if (temporal) temporal_.observe(command);
+      backend.consume(command);
+      continue;
+    }
     const auto start = Clock::now();
+    if (temporal) temporal_.observe(command);
     backend.consume(command);
     if (const auto ms = elapsed_ms(start); ms >= 50) {
       std::uint32_t detail = 0;
@@ -603,25 +1050,58 @@ void GraphicsSystem::execute_ir(Backend& backend) {
     }
   }
   const auto end_start = Clock::now();
-  backend.end_submission();
+  if (submit)
+    backend.end_submission();
+  else
+    backend.end_submission_deferred();
   if (const auto ms = elapsed_ms(end_start); ms >= 50)
     logging::append_probe_log("ir_timing_diag.log", "end_submission %lld ms\n", ms);
-  stream_.clear();
+}
+
+void GraphicsSystem::start_backend_thread() {
+  if (const char* value = std::getenv("XENON_GPU_PIPELINED_DRAINS");
+      value && value[0] == '0' && value[1] == '\0')
+    pipelined_drains_ = false;
+  executor_.start();
+}
+
+void GraphicsSystem::note_hold(perf::Counter cause) {
+  if (executor_.running() && !executor_.idle()) perf::add(cause, 1u);
+}
+
+void GraphicsSystem::stop_backend_thread() noexcept {
+  executor_.stop();
+  report_backend_errors();
+}
+
+void GraphicsSystem::report_backend_errors() {
+  // A task that threw was contained on the backend thread; say what it was
+  // (once per failure, not per drain).
+  const auto error = executor_.take_error();
+  if (!error.empty())
+    logging::Logger::instance().log(logging::Level::Error, "gpu", "IR execution failed: " + error);
 }
 
 bool GraphicsSystem::make_guest_memory_cpu_visible(
     Backend& backend, std::uint32_t physical_address, std::uint32_t size) {
-  return backend.make_guest_memory_cpu_visible(physical_address, size);
+  bool result = false;
+  executor_.run([&] { result = backend.make_guest_memory_cpu_visible(physical_address, size); });
+  return result;
 }
 
 bool GraphicsSystem::make_edram_canonical(Backend& backend) {
-  return backend.make_edram_canonical();
+  bool result = false;
+  executor_.run([&] { result = backend.make_edram_canonical(); });
+  return result;
 }
 
 PresentStatus GraphicsSystem::present(Backend& backend,
                                       const PresentationFrame& frame) {
-  command_processor_.notify_present();
-  return backend.present(frame);
+  // The guest-visible swap counter advances when the command processor
+  // executes a flip (CommandProcessor::set_swap_callback), not per host present.
+  auto status = PresentStatus::Error;
+  executor_.run([&] { status = backend.present(frame); });
+  return status;
 }
 
 }  // namespace xenon::gpu

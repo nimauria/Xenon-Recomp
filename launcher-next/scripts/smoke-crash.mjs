@@ -1,5 +1,13 @@
 import { chromium } from "playwright-core";
 import assert from "node:assert/strict";
+import {readFile} from "node:fs/promises";
+const language=process.argv[2]??"en";
+const catalogue=JSON.parse(await readFile(new URL("../contracts/localization.json",import.meta.url),"utf8"));
+const label=english=>{
+ const entries=Object.entries(catalogue.sources).filter(([,v])=>v.original===english);
+ const [key]=entries.find(([key])=>!key.startsWith("native."))??entries[0]??[];
+ return catalogue.translations[language]?.[key]??english;
+};
 const endpoint = process.env.CEF_DEBUG_URL || "http://127.0.0.1:9223";
 let browser = await chromium.connectOverCDP(endpoint);
 let page = browser
@@ -28,6 +36,9 @@ async function rpc(command, payload = {}) {
   assert.ok(result.ok, result.error?.message);
   return result.data;
 }
+await rpc("launcher.action",{action:"settings.set",data:{key:"general/language",value:language}});
+await page.reload();
+await page.getByRole("navigation",{name:label("Main navigation")}).waitFor();
 await rpc("profiles.create", {
   name: "Crash survivor",
   description: "Native data must survive a renderer failure",
@@ -56,7 +67,7 @@ await crash();
 await reconnect(
   async (p) =>
     p.url() === "xenon://app/" &&
-    (await p.getByRole("navigation", { name: "Main navigation" }).isVisible()),
+    (await p.getByRole("navigation", { name: label("Main navigation") }).isVisible()),
 );
 assert.ok(
   (await rpc("application.snapshot")).profiles.some(
@@ -68,7 +79,7 @@ await reconnect(
   async (p) =>
     p.url().startsWith("data:") &&
     (await p
-      .getByRole("link", { name: "Restart in safe mode", exact: true })
+      .getByRole("link", { name: label("Restart in safe mode"), exact: true })
       .isVisible()),
 );
 const rejected = await page.evaluate(
@@ -93,13 +104,13 @@ assert.equal(
 );
 await page.screenshot({ path: "build/renderer-recovery.png" });
 await page
-  .getByRole("link", { name: "Restart in safe mode", exact: true })
+  .getByRole("link", { name: label("Restart in safe mode"), exact: true })
   .click();
 await browser.close();
 await reconnect(
   async (p) =>
     p.url() === "xenon://app/" &&
-    (await p.getByRole("navigation", { name: "Main navigation" }).isVisible()),
+    (await p.getByRole("navigation", { name: label("Main navigation") }).isVisible()),
 );
 const state = await rpc("application.snapshot");
 assert.equal(state.recovery.safeMode, true);

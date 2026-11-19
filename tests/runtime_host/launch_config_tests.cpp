@@ -6,6 +6,8 @@
 // process-spawning dependency.
 
 #include "launch_config.hpp"
+#include "host_setup.hpp"
+#include "xenon/logging/logger.hpp"
 
 #include <cassert>
 #include <chrono>
@@ -145,6 +147,11 @@ int main() {
     assert(config.save_path == "C:/Xenon/saves/halo3");
     assert(config.screenshots_path == "C:/Xenon/screenshots/halo3");
     assert(config.offline == false);
+
+    // Regression: savePath was parsed but never handed to the session, so
+    // game saves went to a new temporary folder each run and were lost.
+    const auto session_config = xenon::runtime_host::build_session_config(config);
+    assert(session_config.save_root_path == std::filesystem::path("C:/Xenon/saves/halo3"));
   }
   std::cout << "  [PASS] Valid config round-trips every field\n";
 
@@ -366,7 +373,7 @@ int main() {
     file.write(R"json({
       "sessionDir": "C:/sessions/x",
       "contentPath": "C:/Games/X",
-      "memoryWatch": ["0x829DDEBC", "2191220416", 2191220420],
+      "memoryWatch": ["0x829DDEBC", "2191220416", 2191220420, "0x8293B930->0x8->0x0"],
       "memoryWatchHistory": 128,
       "memoryWatchPollMs": 5
     })json");
@@ -375,10 +382,22 @@ int main() {
     std::string error;
     const bool ok = LaunchConfig::load_from_file(file.string(), config, error);
     assert(ok);
-    assert(config.memory_watch_addresses.size() == 3u);
-    assert(config.memory_watch_addresses[0] == 0x829DDEBCu);
-    assert(config.memory_watch_addresses[1] == 2191220416u);
-    assert(config.memory_watch_addresses[2] == 2191220420u);
+    assert(config.memory_watch_targets.size() == 4u);
+    assert(config.memory_watch_targets[0] == xenon::core::WatchTarget{0x829DDEBCu});
+    assert(config.memory_watch_targets[1] == xenon::core::WatchTarget{2191220416u});
+    assert(config.memory_watch_targets[2] == xenon::core::WatchTarget{2191220420u});
+    assert((config.memory_watch_targets[3] ==
+            xenon::core::WatchTarget{0x8293B930u, {0x8u, 0x0u}}));
+
+    TempFile bad("watch_bad.json");
+    bad.write(R"json({
+      "sessionDir": "C:/sessions/x",
+      "contentPath": "C:/Games/X",
+      "memoryWatch": ["0x8293B930->"]
+    })json");
+    LaunchConfig rejected{};
+    assert(!LaunchConfig::load_from_file(bad.string(), rejected, error));
+    assert(error.find("0x8293B930->") != std::string::npos);
     assert(config.memory_watch_history == 128u);
     assert(config.memory_watch_poll_ms == 5u);
 
@@ -386,7 +405,7 @@ int main() {
     absent.write(R"json({"sessionDir": "C:/sessions/x", "contentPath": "C:/Games/X"})json");
     LaunchConfig defaults{};
     assert(LaunchConfig::load_from_file(absent.string(), defaults, error));
-    assert(defaults.memory_watch_addresses.empty());
+    assert(defaults.memory_watch_targets.empty());
     assert(defaults.memory_watch_history == 4096u);
     assert(defaults.memory_watch_poll_ms == 1u);
   }
@@ -407,6 +426,79 @@ int main() {
     assert(error.find("memoryWatch") != std::string::npos);
   }
   std::cout << "  [PASS] Invalid memoryWatch entries are rejected\n";
+
+  // Test 15: temporalProbeFrames arms the temporal probe, defaults to off and
+  // rejects values that are not a whole number of frames.
+  {
+    TempFile file("probe.json");
+    file.write(R"json({"sessionDir": "C:/sessions/x", "contentPath": "C:/Games/X",
+                      "temporalProbeFrames": 60})json");
+    LaunchConfig config{};
+    std::string error;
+    assert(LaunchConfig::load_from_file(file.string(), config, error));
+    assert(config.temporal_probe_frames == 60u);
+
+    TempFile absent("probe_absent.json");
+    absent.write(R"json({"sessionDir": "C:/sessions/x", "contentPath": "C:/Games/X"})json");
+    LaunchConfig defaults{};
+    assert(LaunchConfig::load_from_file(absent.string(), defaults, error));
+    assert(defaults.temporal_probe_frames == 0u);
+
+    for (const char* bad : {"-1", "2.5", "1000001"}) {
+      TempFile invalid("probe_bad.json");
+      invalid.write(std::string(R"json({"sessionDir": "C:/sessions/x", "contentPath": "C:/Games/X", "temporalProbeFrames": )json") +
+                    bad + "}");
+      LaunchConfig rejected{};
+      assert(!LaunchConfig::load_from_file(invalid.string(), rejected, error));
+      assert(error.find("temporalProbeFrames") != std::string::npos);
+    }
+  }
+  std::cout << "  [PASS] temporalProbeFrames parses, defaults to off and rejects bad values\n";
+
+  // Per-run error logs: a folder per run named by its start time, the newest
+  // kept, one file per subsystem.
+  {
+    std::tm when{};
+    when.tm_year = 2026 - 1900; when.tm_mon = 9; when.tm_mday = 30;
+    when.tm_hour = 20; when.tm_min = 5; when.tm_sec = 9;
+    assert(xenon::runtime_host::error_log_run_name(when) == "2026-10-30_20-05-09");
+
+    const auto session = std::filesystem::temp_directory_path() / "xenon_error_log_runs_test";
+    std::filesystem::remove_all(session);
+    const auto errors = session / "errors";
+    std::filesystem::create_directories(errors);
+    const char* existing[] = {"2026-10-29_10-00-00", "2026-10-29_10-00-00-2",
+                              "2026-10-30_09-00-00", "2026-10-28_23-59-59"};
+    for (const auto* name : existing) std::filesystem::create_directories(errors / name);
+    std::filesystem::create_directories(errors / "keep-me");  // not a run folder
+    std::ofstream(errors / "notes.txt") << "x";
+
+    // Keeping two removes the two oldest runs only.
+    xenon::runtime_host::prune_error_log_runs(errors, 2);
+    assert(!std::filesystem::exists(errors / "2026-10-28_23-59-59"));
+    assert(!std::filesystem::exists(errors / "2026-10-29_10-00-00"));
+    assert(std::filesystem::exists(errors / "2026-10-29_10-00-00-2"));
+    assert(std::filesystem::exists(errors / "2026-10-30_09-00-00"));
+    assert(std::filesystem::exists(errors / "keep-me") && std::filesystem::exists(errors / "notes.txt"));
+
+    // Opening keeps `keep_runs` including the new one and routes the logger there.
+    const auto run = xenon::runtime_host::open_error_logs(session.string(), 2);
+    assert(!run.empty() && std::filesystem::is_directory(run));
+    assert(run.parent_path() == errors);
+    assert(!std::filesystem::exists(errors / "2026-10-29_10-00-00-2"));
+    assert(std::filesystem::exists(errors / "2026-10-30_09-00-00"));
+    auto& logger = xenon::logging::Logger::instance();
+    logger.set_sink([](xenon::logging::Level, std::string_view, std::string_view) {});
+    logger.log(xenon::logging::Level::Error, "filesystem", "game:\\missing.bin was not found");
+    assert(std::filesystem::exists(run / "filesystem.log"));
+    // A second run in the same second gets its own folder.
+    const auto again = xenon::runtime_host::open_error_logs(session.string(), 5);
+    assert(again != run && again.parent_path() == errors);
+    logger.set_error_directory("");
+    logger.set_sink({});
+    std::filesystem::remove_all(session);
+  }
+  std::cout << "  [PASS] Error logs get a timestamped folder per run, oldest pruned\n";
 
   std::cout << "All LaunchConfig tests passed!\n";
   return 0;

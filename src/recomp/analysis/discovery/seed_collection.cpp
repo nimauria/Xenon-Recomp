@@ -17,6 +17,18 @@ bool stronger_seed_source(DiscoverySource lhs, DiscoverySource rhs) {
   return discovery_source_base_confidence(lhs) > discovery_source_base_confidence(rhs);
 }
 
+// True when the instruction at `site` is an I-form (b) or B-form (bc) branch:
+// its target is encoded in the instruction, so it is never an indirect target.
+bool is_direct_branch_site(const ExecutableRangeIndex& range_index, GuestAddress site) {
+  const auto* section = executable_section(range_index, site);
+  if (!section || site < section->virtual_address ||
+      static_cast<std::uint64_t>(site - section->virtual_address) + 4u > section->bytes.size())
+    return false;
+  const auto word = be32(section->bytes, static_cast<std::size_t>(site - section->virtual_address));
+  const auto primary = word >> 26u;
+  return primary == 18u || primary == 16u;
+}
+
 }  // namespace
 
 bool in_non_code_hint_region(const analysis::AnalysisHintSetV2* hint_set_v2, GuestAddress address) {
@@ -183,6 +195,16 @@ void collect_seeds(const DriverOptions& effective, AnalysisReport& report,
       continue;
     }
     ++adaptive_observations_consumed;
+    // A "branch target" recorded at a DIRECT branch (b / bc) is not evidence of
+    // a function: the interpreter looked the target up as it executed a jump
+    // inside code it was running, and static analysis already sees that edge.
+    // Seeding it made a function start at a loop head - AC6's 0x82382F3C,
+    // inside the copy routine 0x82382F18 - whose own loop branches back before
+    // its start, which generation (correctly) refused. Such a target still
+    // becomes an alternate entry when an owner contains it as a block.
+    if (observation.kind == AdaptiveObservationKind::IndirectBranchTarget &&
+        is_direct_branch_site(range_index, observation.site))
+      continue;
     add_seed(observation.address, DiscoverySource::RuntimeObservation);
     // A runtime-observed CALL target is stronger than a generic executed or
     // branch entry: the guest actually used the address as a callable ABI

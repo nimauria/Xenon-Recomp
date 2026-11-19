@@ -53,8 +53,30 @@ class EdramOwnershipTracker {
   [[nodiscard]] EdramOwnerId owner(std::uint32_t tile) const noexcept;
   [[nodiscard]] std::size_t owned_tile_count(EdramOwnerId owner) const noexcept;
 
+  // Changes on every change of any tile's owner.
+  [[nodiscard]] std::uint64_t generation() const noexcept { return generation_; }
+  // Whether `owner` is known to hold every tile `surface` covers: it did when
+  // note_holds() was last called for this owner and surface, and no tile has
+  // changed owner since. A draw that keeps rendering to the same target skips
+  // planning (building the covered tile list and the changes) entirely.
+  [[nodiscard]] bool known_to_hold(EdramOwnerId owner,
+                                   const EdramSurfaceLayout& surface) const noexcept;
+  // Records that `owner` holds every tile of `surface` now (after a commit, or
+  // a plan with no changes).
+  void note_holds(EdramOwnerId owner, const EdramSurfaceLayout& surface) noexcept;
+
  private:
+  void changed() noexcept { ++generation_; }
+
   std::array<EdramOwnerId, Edram::kTileCount> owners_{};
+  std::uint64_t generation_{1};
+  // The latest confirmed holdings: (owner and surface key, generation).
+  struct Holding {
+    std::uint64_t key{};
+    std::uint64_t generation{};
+  };
+  std::array<Holding, 16> holdings_{};
+  std::size_t next_holding_{};
 };
 
 }  // namespace xenon::gpu

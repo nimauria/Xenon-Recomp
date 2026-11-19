@@ -78,7 +78,7 @@ cpu::ExecutionResult save_gpr_lr_v2(cpu::ExecutionContext& context) {
   auto& state = context.state;
   const auto r1 = state.gpr[1];
   for (std::uint32_t reg = RegisterStart; reg <= 31u; ++reg) {
-    context.memory.write64_be(
+    context.memory_access.write64_be(
         effective_address(r1, kGprLrBaseOffset + static_cast<std::int32_t>((reg - 14u) * 8u)),
         state.gpr[reg]);
   }
@@ -99,7 +99,7 @@ cpu::ExecutionResult save_gpr_lr_v2(cpu::ExecutionContext& context) {
   // r1-4 instead of r1-8, so any call chain that reaches the shared
   // restore trailer via raw guest bytes (rather than through this same
   // native helper) would read back 0 instead of the real return address.
-  context.memory.write32_be(effective_address(r1, kGprLrLrOffset),
+  context.memory_access.write32_be(effective_address(r1, kGprLrLrOffset),
                             static_cast<std::uint32_t>(state.gpr[12]));
   return {cpu::FlowReason::Return, static_cast<cpu::GuestAddress>(state.lr & ~3ull), 0u};
 }
@@ -110,7 +110,7 @@ cpu::ExecutionResult restore_gpr_lr_v2(cpu::ExecutionContext& context) {
   auto& state = context.state;
   const auto r1 = state.gpr[1];
   for (std::uint32_t reg = RegisterStart; reg <= 31u; ++reg) {
-    state.gpr[reg] = context.memory.read64_be(
+    state.gpr[reg] = context.memory_access.read64_be(
         effective_address(r1, kGprLrBaseOffset + static_cast<std::int32_t>((reg - 14u) * 8u)));
   }
   // Restores the LR value the paired save_gpr_lr_v2 stashed (not whatever
@@ -121,7 +121,7 @@ cpu::ExecutionResult restore_gpr_lr_v2(cpu::ExecutionContext& context) {
   //
   // 32-bit read, matching the real `lwz r12,-8(r1)` trailer instruction -
   // see the matching comment in save_gpr_lr_v2 above.
-  state.lr = context.memory.read32_be(effective_address(r1, kGprLrLrOffset));
+  state.lr = context.memory_access.read32_be(effective_address(r1, kGprLrLrOffset));
   return {cpu::FlowReason::Return, static_cast<cpu::GuestAddress>(state.lr & ~3ull), 0u};
 }
 
@@ -131,7 +131,7 @@ cpu::ExecutionResult save_fpr_v2(cpu::ExecutionContext& context) {
   auto& state = context.state;
   const auto r1 = state.gpr[1];
   for (std::uint32_t reg = RegisterStart; reg <= 31u; ++reg) {
-    context.memory.write64_be(
+    context.memory_access.write64_be(
         effective_address(r1, kFprBaseOffset + static_cast<std::int32_t>((reg - 14u) * 8u)),
         state.fpr_bits[reg]);
   }
@@ -144,7 +144,7 @@ cpu::ExecutionResult restore_fpr_v2(cpu::ExecutionContext& context) {
   auto& state = context.state;
   const auto r1 = state.gpr[1];
   for (std::uint32_t reg = RegisterStart; reg <= 31u; ++reg) {
-    state.fpr_bits[reg] = context.memory.read64_be(
+    state.fpr_bits[reg] = context.memory_access.read64_be(
         effective_address(r1, kFprBaseOffset + static_cast<std::int32_t>((reg - 14u) * 8u)));
   }
   return {cpu::FlowReason::Return, static_cast<cpu::GuestAddress>(state.lr & ~3ull), 0u};
@@ -156,7 +156,7 @@ cpu::ExecutionResult save_vmx_v2(cpu::ExecutionContext& context) {
   auto& state = context.state;
   const auto r12 = state.gpr[12];
   for (std::uint32_t reg = RegisterStart; reg <= 31u; ++reg) {
-    context.memory.write128(
+    context.memory_access.write128(
         effective_address(r12, kVmxBaseOffset + static_cast<std::int32_t>((reg - 14u) * 16u)),
         state.vr[reg]);
   }
@@ -169,7 +169,7 @@ cpu::ExecutionResult restore_vmx_v2(cpu::ExecutionContext& context) {
   auto& state = context.state;
   const auto r12 = state.gpr[12];
   for (std::uint32_t reg = RegisterStart; reg <= 31u; ++reg) {
-    state.vr[reg] = context.memory.read128(
+    state.vr[reg] = context.memory_access.read128(
         effective_address(r12, kVmxBaseOffset + static_cast<std::int32_t>((reg - 14u) * 16u)));
   }
   return {cpu::FlowReason::Return, static_cast<cpu::GuestAddress>(state.lr & ~3ull), 0u};
@@ -181,7 +181,7 @@ cpu::ExecutionResult save_vmx128_v2(cpu::ExecutionContext& context) {
   auto& state = context.state;
   const auto r12 = state.gpr[12];
   for (std::uint32_t reg = RegisterStart; reg <= 127u; ++reg) {
-    context.memory.write128(
+    context.memory_access.write128(
         effective_address(r12, kVmx128BaseOffset + static_cast<std::int32_t>((reg - 64u) * 16u)),
         state.vr[reg]);
   }
@@ -194,7 +194,7 @@ cpu::ExecutionResult restore_vmx128_v2(cpu::ExecutionContext& context) {
   auto& state = context.state;
   const auto r12 = state.gpr[12];
   for (std::uint32_t reg = RegisterStart; reg <= 127u; ++reg) {
-    state.vr[reg] = context.memory.read128(
+    state.vr[reg] = context.memory_access.read128(
         effective_address(r12, kVmx128BaseOffset + static_cast<std::int32_t>((reg - 64u) * 16u)));
   }
   return {cpu::FlowReason::Return, static_cast<cpu::GuestAddress>(state.lr & ~3ull), 0u};

@@ -30,11 +30,14 @@
 #endif
 
 #include "content_source.hpp"
+#include "crash_report.hpp"
 #include "launch_config.hpp"
 #include "presentation_host.hpp"
 #include "status_writer.hpp"
 #include "xenon/core/session.hpp"
+#include "xenon/logging/activity_trace.hpp"
 #include "xenon/logging/diagnostic_events.hpp"
+#include "xenon/logging/logger.hpp"
 #include "xenon/logging/probe_log.hpp"
 #if defined(XENON_RUNTIME_HAS_MEMORY) && XENON_RUNTIME_HAS_MEMORY
 #include "xenon/memory/host_vm.hpp"
@@ -65,13 +68,25 @@ int main(int argc, char** argv) {
   redirect_log(launch.session_dir);
   std::cout << "[runtime_host] Starting session '" << launch.session_id << "' for game '"
             << launch.game_id << "' (" << launch.title << ")" << std::endl;
+  if (const auto error_logs = open_error_logs(launch.session_dir); !error_logs.empty()) {
+    std::cout << "[runtime_host] Error logs (one file per subsystem): " << error_logs.string()
+              << std::endl;
+    // A host crash ends the process before any of the above can report it;
+    // probes (when on) belong to the same run.
+    install_crash_report(error_logs);
+    xenon::logging::set_probe_log_directory((error_logs / "probes").string());
+  } else {
+    std::cout << "[runtime_host] Error logs could not be created under " << launch.session_dir
+              << std::endl;
+  }
   // Opt-in diagnostics; XENON_DIAG_EVENTS / XENON_PROBE_LOGS turn them on too.
   if (launch.diagnostic_events) xenon::logging::events::set_enabled(true);
   if (launch.probe_logs) xenon::logging::set_probe_logs_enabled(true);
   std::cout << "[runtime_host] Diagnostic events: "
             << (xenon::logging::events::enabled() ? "on" : "off")
             << ", probe logs: " << (xenon::logging::probe_logs_enabled() ? "on" : "off")
-            << std::endl;
+            << ", activity trace: "
+            << (xenon::logging::activity_trace_enabled() ? "on" : "off") << std::endl;
   log_host_capabilities();
 
   StatusWriter status(launch.session_dir, launch);
@@ -254,6 +269,8 @@ int main(int argc, char** argv) {
 #if defined(XENON_HAS_PRESENTATION_HOST)
   xenon::runtime_host::PresentationHost presentation;
   bool presentation_active = false;
+  // A new window takes focus; focus events keep this current.
+  bool window_focused = true;
   if (session.gpu() != nullptr) {
     std::string presentation_error;
     presentation_active = presentation.create(launch.display_width, launch.display_height,
@@ -272,6 +289,7 @@ int main(int argc, char** argv) {
     } else {
       std::cout << "[runtime_host] Presentation window created (" << launch.display_width << "x"
                 << launch.display_height << ")" << std::endl;
+      session.set_presentation_window(presentation.native_window());
     }
   }
 #endif
@@ -325,6 +343,8 @@ int main(int argc, char** argv) {
     }
     if (now >= next_capability_report) {
       status.write_capability_report(session);
+      // The activity summary so far, so a run that dies still leaves one.
+      xenon::logging::write_activity_summary();
       next_capability_report = now + kCapabilityReportInterval;
     }
 
@@ -353,6 +373,20 @@ int main(int argc, char** argv) {
       }
       if (events.focus_changed) {
         session.set_focused(events.focused);
+        window_focused = events.focused;
+      }
+      // A context that steers with the mouse needs the cursor captured; it is
+      // released while the window is in the background so the desktop works.
+      presentation.set_mouse_capture(window_focused && session.wants_mouse_capture());
+      for (const auto& input : events.input) {
+        using Kind = xenon::runtime_host::PresentationInput::Kind;
+        switch (input.kind) {
+          case Kind::Key: session.input_key(input.code, input.pressed); break;
+          case Kind::MouseButton:
+            session.input_mouse_button(static_cast<std::uint8_t>(input.code), input.pressed);
+            break;
+          case Kind::MouseMotion: session.input_mouse_motion(input.dx, input.dy); break;
+        }
       }
       if (events.resized) {
         std::scoped_lock console_log_lock(xenon::core::XenonSession::console_log_mutex());
@@ -401,6 +435,10 @@ int main(int argc, char** argv) {
     // concurrently with this final write.
     std::scoped_lock console_log_lock(xenon::core::XenonSession::console_log_mutex());
     std::cout << "[runtime_host] Session ended: " << session.last_error() << std::endl;
+  }
+  if (session.state() == xenon::core::SessionState::Failed) {
+    xenon::logging::Logger::instance().record(xenon::logging::Level::Error, "runtime",
+                                              "session failed: " + session.last_error());
   }
   return session.state() == xenon::core::SessionState::Failed ? 1 : 0;
 }

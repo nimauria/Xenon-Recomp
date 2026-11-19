@@ -57,6 +57,13 @@ bool parse_security_info(std::span<const std::byte> bytes, XexFormat format, std
   const std::size_t base = security_offset;
   out.header_size = read_be32(bytes, base + 0x0u);
   out.image_size = read_be32(bytes, base + 0x4u);
+  // Every decompression path sizes its output from image_size before
+  // decoding a byte; an image larger than the console's memory cannot
+  // exist and must not become a multi-gigabyte host allocation.
+  if (out.image_size > kMaxReasonableImageBytes) {
+    if (error) *error = "XEX image size exceeds the Xbox 360's memory.";
+    return false;
+  }
 
   if (format == XexFormat::Xex1) {
     // xex1::SecurityInfo (0x168 bytes): a genuinely different field order/

@@ -1,5 +1,6 @@
 #include "launcher_service.hpp"
 #include "core/archive.hpp"
+#include "core/launcher_paths.hpp"
 #include <algorithm>
 #include <chrono>
 #include <map>
@@ -18,6 +19,8 @@ bool active(const Json &job) {
 std::string operation_title(const std::string &command) {
   static const std::map<std::string, std::string> titles = {
       {"modules.rescan", "Rescan installed modules"},
+      {"modules.uninstall", "Uninstall owned module files"},
+      {"cache.relocate", "Relocate managed cache"},
       {"filesystem.mount", "Mount filesystem source"},
       {"filesystem.unmount", "Unmount filesystem source"},
       {"filesystem.link", "Register guest link"},
@@ -43,24 +46,31 @@ std::string operation_title(const std::string &command) {
 }
 } // namespace
 void LauncherService::enqueue_service(Json &next, const std::string &command, Json data) {
-  const bool local = command == "modules.rescan";
+  const bool local =
+      command == "modules.rescan" || command == "modules.uninstall" || command == "cache.relocate";
   if (!local && !host_service_command(command))
     throw std::runtime_error("Unknown runtime-service command");
   const auto group = command.substr(0, command.find('.'));
   const auto snapshot = host_services_->snapshot();
   if (!local && !snapshot.at("capabilities").value(group, false))
     throw std::runtime_error("The corresponding Xenon service adapter is not connected");
-  if (local) {
+  if (command == "modules.uninstall")
+    data = prepare_module_uninstall(next, data.at("id").get<std::string>());
+  if (command == "cache.relocate")
+    data = prepare_cache_relocation(
+        next, data.contains("target")
+                  ? Json{{"path", data.at("target").value("configuredPath", "")}}
+                  : data);
+  if (command == "modules.rescan") {
     for (const auto &job : next["jobs"])
-      if (active(job) && job.value("_command", "") == command)
-        throw std::runtime_error("A module scan is already active");
+      if (active(job) && (job.value("_command", "") == command ||
+                          job.value("_command", "") == "modules.uninstall"))
+        throw std::runtime_error("Wait for the current module scan or uninstall to finish");
     const auto configured = next["settings"].value("paths/modules", "");
-    data = {{"configuredRoot", configured},
-            {"root", path_string(std::filesystem::absolute(
-                                     configured.empty() ? storage_ / "modules"
-                                                        : std::filesystem::u8path(configured))
-                                     .lexically_normal())},
-            {"known", Json::array()}};
+    data = {
+        {"configuredRoot", configured},
+        {"root", path_string(launcher_destination(storage_, next["settings"], "paths/modules"))},
+        {"known", Json::array()}};
     for (const auto &module : next["modules"])
       data["known"].push_back({{"id", module.at("id")}, {"path", module.at("path")}});
   }
@@ -104,6 +114,14 @@ void LauncherService::run_service(const Json &job,
   const auto id = job.at("id").get<std::string>(), command = job.at("_command").get<std::string>();
   if (command == "modules.rescan") {
     run_module_scan(job, cancel);
+    return;
+  }
+  if (command == "modules.uninstall") {
+    run_module_uninstall(job, cancel);
+    return;
+  }
+  if (command == "cache.relocate") {
+    run_cache_relocation(job, cancel);
     return;
   }
   update_job(id, {{"phase", "Waiting for host service"}, {"progress", 20}});

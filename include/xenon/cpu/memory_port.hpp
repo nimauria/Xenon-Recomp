@@ -15,6 +15,18 @@
 #include "xenon/cpu/memory_ordering.hpp"
 #include "xenon/cpu/types.hpp"
 
+// Generated functions are large enough that MSVC declines to inline even a
+// short accessor into them, so every guest load and store became a call.
+// The native RAM fast path is forced inline; the checked path behind it is
+// kept out of line so it does not bloat every access site.
+#if defined(_MSC_VER) && !defined(__clang__)
+#define XENON_CPU_FORCEINLINE __forceinline
+#define XENON_CPU_NOINLINE __declspec(noinline)
+#else
+#define XENON_CPU_FORCEINLINE inline __attribute__((always_inline))
+#define XENON_CPU_NOINLINE __attribute__((noinline))
+#endif
+
 namespace xenon::cpu {
 
 class MemoryPort;
@@ -33,11 +45,15 @@ inline std::atomic<std::uint32_t> trap_count{0};
 inline std::array<std::atomic<GuestAddress>, kMaxWriteTraps> trap_addresses{};
 }  // namespace write_trap_detail
 
-[[nodiscard]] inline bool is_write_trapped(GuestAddress address) noexcept {
+// True when a store of `size` bytes at `address` changes any byte of a
+// trapped 32-bit word. Any width: a trapped word written by a 64-bit or
+// 16-bit store was missed when only 32-bit stores at its address were checked.
+[[nodiscard]] inline bool is_write_trapped(GuestAddress address, std::uint32_t size = 4u) noexcept {
   const auto count = write_trap_detail::trap_count.load(std::memory_order_relaxed);
   for (std::uint32_t i = 0; i < count; ++i) {
-    if (write_trap_detail::trap_addresses[i].load(std::memory_order_relaxed) == address)
-      return true;
+    const auto trapped = write_trap_detail::trap_addresses[i].load(std::memory_order_relaxed);
+    // [address, address + size) and [trapped, trapped + 4) overlap.
+    if (trapped - address < size || address - trapped < 4u) return true;
   }
   return false;
 }
@@ -48,6 +64,81 @@ void set_write_traps(std::span<const GuestAddress> addresses) noexcept;
 // Reports one trapped store. Defined out of line (memory_port.cpp) to keep
 // <windows.h> and file I/O out of this header.
 void debug_signal_write_trap(GuestAddress address, std::uint64_t value);
+
+// Opt-in physical write watch for investigations.
+// XENON_WRITE_WATCH=<physical hex>[:<length hex>] (length 16 if omitted)
+// reports every guest store that overlaps the range - any width, vector
+// stores, block writes and fills included, through whichever virtual alias
+// the guest used - in the probe log write_watch_diag.log (with the guest
+// cia/lr and the host stack, which names the translated function), up to
+// XENON_WRITE_WATCH_REPORTS (decimal, default kMaxWriteWatchReports) of them;
+// the log goes beside the probe logs, which need not be enabled. With no
+// watch set, a store pays one relaxed load.
+inline constexpr std::uint32_t kMaxWriteWatchReports = 256;
+
+// The report limit: XENON_WRITE_WATCH_REPORTS, read once, or the default.
+[[nodiscard]] std::uint32_t write_watch_report_limit() noexcept;
+
+namespace write_watch_detail {
+inline std::atomic<std::uint32_t> length{0};
+inline std::atomic<std::uint32_t> base{0};
+}  // namespace write_watch_detail
+
+[[nodiscard]] inline bool write_watch_hit(std::uint32_t physical, std::uint32_t size) noexcept {
+  const auto length = write_watch_detail::length.load(std::memory_order_relaxed);
+  if (length == 0u) [[likely]] return false;
+  const auto base = write_watch_detail::base.load(std::memory_order_relaxed);
+  return std::uint64_t(physical) < std::uint64_t(base) + length &&
+         std::uint64_t(base) < std::uint64_t(physical) + size;
+}
+
+// Replaces the watched range; a zero length turns the watch off.
+void set_write_watch(std::uint32_t physical, std::uint32_t length) noexcept;
+
+// Extends the watch to stores the accessors above never see - those of
+// separately compiled game code, which inlines them - by write-protecting the
+// watched pages in the host physical view and the guest aperture's physical
+// aliases (Windows). Called once guest memory exists; without a watch it only
+// records where guest memory is, for arm_write_watch().
+void guard_write_watch_pages(std::byte* physical_base, std::byte* aperture_base) noexcept;
+
+// The guest page table (fast_memory page entries) a report reads the storing
+// thread's guest stack through: each report walks the r1 back chain and lists
+// the saved return addresses - the guest call stack, which names the caller
+// that the guest cia/lr alone do not. Set once guest memory exists.
+void set_write_watch_page_table(std::byte* physical_base,
+                                const std::atomic<std::uint64_t>* page_table,
+                                std::uint32_t page_count, std::uint32_t page_shift) noexcept;
+
+// Forgets `page_table` if it is the one set (its address space is going).
+void release_write_watch_page_table(const std::atomic<std::uint64_t>* page_table) noexcept;
+
+// One big-endian guest word read through that page table without faulting;
+// false when the page is not mapped readable RAM or no table is set.
+[[nodiscard]] bool write_watch_read_guest32(GuestAddress address, std::uint32_t& value) noexcept;
+
+// The guest call stack from `r1`: the return address saved in each frame
+// along the back chain (the Xbox ABI saves LR at -8 from the caller's stack
+// pointer), innermost first, at most `capacity` of them.
+[[nodiscard]] std::size_t write_watch_guest_backtrace(GuestAddress r1, GuestAddress* out,
+                                                      std::size_t capacity) noexcept;
+
+// Sets the watch while the title runs, on a range found only then - the
+// buffer a traced call points to (XENON_CALL_TRACE "@watch[...]") - and, once
+// guest memory exists, guards its pages as guard_write_watch_pages() does.
+// `alias` is the guest address the range was found at: when it is a virtual
+// mapping (below 0xA0000000) its pages are guarded too, since the title's
+// stores through it reach neither the physical view nor the physical aliases.
+// The guarded range is kept for the rest of the run: returns false, changing
+// nothing, when a guarded watch is already set or `length` is zero.
+[[nodiscard]] bool arm_write_watch(std::uint32_t physical, std::uint32_t length,
+                                   GuestAddress alias = 0) noexcept;
+
+// Reports one watched store: `data` is what was stored, in guest byte order
+// (at most its first 16 bytes are shown); a fill passes its one byte with
+// `fill` set.
+void debug_signal_write_watch(GuestAddress address, std::uint32_t physical, std::uint32_t size,
+                              const void* data, std::uint32_t data_size, bool fill = false);
 
 // The guest registers of the thread the calling host thread is running, so a
 // trapped store also reports the guest cia/lr (the host stack alone cannot
@@ -224,7 +315,7 @@ class MemoryAccessContext {
  public:
   explicit MemoryAccessContext(MemoryPort& slow,
                                FastMemoryView fast = {}) noexcept
-      : slow_(&slow), fast_(fast) {
+      : slow_(&slow), fast_(fast), native_inline_(native_inline_eligible(fast)) {
     acquire_read_guard();
   }
   ~MemoryAccessContext() noexcept { release_read_guard(); }
@@ -233,34 +324,40 @@ class MemoryAccessContext {
   MemoryAccessContext(MemoryAccessContext&& other) noexcept
       : slow_(std::exchange(other.slow_, nullptr)),
         fast_(other.fast_),
-        read_guard_active_(std::exchange(other.read_guard_active_, false)) {}
+        read_guard_active_(std::exchange(other.read_guard_active_, false)),
+        native_inline_(other.native_inline_) {}
   MemoryAccessContext& operator=(MemoryAccessContext&& other) noexcept {
     if (this == &other) return *this;
     release_read_guard();
     slow_ = std::exchange(other.slow_, nullptr);
     fast_ = other.fast_;
     read_guard_active_ = std::exchange(other.read_guard_active_, false);
+    native_inline_ = other.native_inline_;
     return *this;
   }
 
-  [[nodiscard]] std::uint8_t read8(GuestAddress address);
-  [[nodiscard]] std::uint16_t read16_be(GuestAddress address);
-  [[nodiscard]] std::uint32_t read32_be(GuestAddress address);
-  [[nodiscard]] std::uint64_t read64_be(GuestAddress address);
-  [[nodiscard]] Vector128 read128(GuestAddress address);
+  // True when this context's accessors translate native guest RAM inline
+  // (see native_inline_eligible). Exposed for tests and diagnostics.
+  [[nodiscard]] bool native_inline() const noexcept { return native_inline_; }
 
-  void write8(GuestAddress address, std::uint8_t value);
-  void write16_be(GuestAddress address, std::uint16_t value);
-  void write32_be(GuestAddress address, std::uint32_t value);
-  void write64_be(GuestAddress address, std::uint64_t value);
-  void write128(GuestAddress address, const Vector128& value);
+  [[nodiscard]] XENON_CPU_FORCEINLINE std::uint8_t read8(GuestAddress address);
+  [[nodiscard]] XENON_CPU_FORCEINLINE std::uint16_t read16_be(GuestAddress address);
+  [[nodiscard]] XENON_CPU_FORCEINLINE std::uint32_t read32_be(GuestAddress address);
+  [[nodiscard]] XENON_CPU_FORCEINLINE std::uint64_t read64_be(GuestAddress address);
+  [[nodiscard]] XENON_CPU_FORCEINLINE Vector128 read128(GuestAddress address);
 
-  [[nodiscard]] std::uint16_t read16_le(GuestAddress address);
-  [[nodiscard]] std::uint32_t read32_le(GuestAddress address);
-  [[nodiscard]] std::uint64_t read64_le(GuestAddress address);
-  void write16_le(GuestAddress address, std::uint16_t value);
-  void write32_le(GuestAddress address, std::uint32_t value);
-  void write64_le(GuestAddress address, std::uint64_t value);
+  XENON_CPU_FORCEINLINE void write8(GuestAddress address, std::uint8_t value);
+  XENON_CPU_FORCEINLINE void write16_be(GuestAddress address, std::uint16_t value);
+  XENON_CPU_FORCEINLINE void write32_be(GuestAddress address, std::uint32_t value);
+  XENON_CPU_FORCEINLINE void write64_be(GuestAddress address, std::uint64_t value);
+  XENON_CPU_FORCEINLINE void write128(GuestAddress address, const Vector128& value);
+
+  [[nodiscard]] XENON_CPU_FORCEINLINE std::uint16_t read16_le(GuestAddress address);
+  [[nodiscard]] XENON_CPU_FORCEINLINE std::uint32_t read32_le(GuestAddress address);
+  [[nodiscard]] XENON_CPU_FORCEINLINE std::uint64_t read64_le(GuestAddress address);
+  XENON_CPU_FORCEINLINE void write16_le(GuestAddress address, std::uint16_t value);
+  XENON_CPU_FORCEINLINE void write32_le(GuestAddress address, std::uint32_t value);
+  XENON_CPU_FORCEINLINE void write64_le(GuestAddress address, std::uint64_t value);
 
   // Range-oriented access used by PPC string/vector-partial operations and
   // cache-block operations. Common RAM is translated page-by-page and performs
@@ -270,6 +367,15 @@ class MemoryAccessContext {
   void read_bytes(GuestAddress address, std::span<std::byte> destination);
   void write_bytes(GuestAddress address, std::span<const std::byte> source);
   void fill_bytes(GuestAddress address, std::uint32_t size, std::uint8_t value);
+  // read_bytes()/write_bytes() of a range inside one aligned 16-byte block
+  // (the VMX partial loads and stores): an aligned block never crosses a
+  // page, so native RAM takes one page-table lookup and the bytes are copied
+  // as they are - no other byte of the block is touched - with a store's
+  // write watch and dirty-page publication as write128() has them.
+  XENON_CPU_FORCEINLINE void read_quadword_part(GuestAddress address,
+                                                std::span<std::byte> destination);
+  XENON_CPU_FORCEINLINE void write_quadword_part(GuestAddress address,
+                                                 std::span<const std::byte> source);
   void zero_cache_block(GuestAddress address, std::uint32_t bytes);
 
   // Reservation operations use the same Memory V2 fast view as ordinary RAM.
@@ -370,10 +476,74 @@ class MemoryAccessContext {
                       bool reservation_participant,
                       MemoryOrderingDomain ordering_domain) const noexcept;
 
+  // The native RAM fast path. A native view (AddressSpace::set_native_access)
+  // with the production geometry - 4 KiB pages covering the whole 32-bit
+  // space, 512 MiB of page-aligned physical RAM, no aperture, reclaim latch
+  // or reader guard - translates a naturally aligned access with one page
+  // table load. Anything else (another geometry, a strict view, an unaligned
+  // or page-crossing access, MMIO, a slow or unmapped page) takes the checked
+  // path below, which is the complete implementation.
+  static constexpr std::uint32_t kNativePageShift = 12u;
+  static constexpr std::uint32_t kNativePageMask = (1u << kNativePageShift) - 1u;
+  [[nodiscard]] static bool native_inline_eligible(const FastMemoryView& fast) noexcept {
+    constexpr std::uint64_t kPhysicalPages = fast_memory::kPhysicalPageMask + 1u;
+    return fast.native_access && fast.physical_base && fast.page_table &&
+           fast.page_shift == kNativePageShift &&
+           fast.page_count == (1u << (32u - kNativePageShift)) &&
+           !fast.guest_aperture_base && !fast.reclaim_pending &&
+           !fast.active_fast_readers &&
+           std::uint64_t{fast.physical_size} >= (kPhysicalPages << kNativePageShift) &&
+           fast.physical_page_count >= kPhysicalPages && fast.cpu_dirty_page_bits &&
+           fast.executable_page_generations &&
+           (reinterpret_cast<std::uintptr_t>(fast.physical_base) & kNativePageMask) == 0u;
+  }
+  template <std::uint32_t Width, std::uint32_t Align>
+  [[nodiscard]] XENON_CPU_FORCEINLINE std::byte* native_ram(
+      GuestAddress address, std::uint64_t permission,
+      std::uint32_t& physical_page) const noexcept {
+    static_assert(Align != 0u && (Align & (Align - 1u)) == 0u && Width <= 16u);
+    if (!native_inline_) return nullptr;
+    if ((address & (Align - 1u)) != 0u) return nullptr;
+    if constexpr (Width > Align) {
+      if ((address & kNativePageMask) > (kNativePageMask + 1u) - Width) return nullptr;
+    }
+    const auto entry =
+        fast_.page_table[address >> kNativePageShift].load(std::memory_order_acquire);
+    if ((entry & (fast_memory::kMapped | permission | fast_memory::kSlow)) !=
+        (fast_memory::kMapped | permission)) {
+      return nullptr;
+    }
+    physical_page = static_cast<std::uint32_t>(entry & fast_memory::kPhysicalPageMask);
+    return fast_.physical_base + (std::size_t{physical_page} << kNativePageShift) +
+           (address & kNativePageMask);
+  }
+  // What a native store publishes (publish_write_metadata): its page's CPU
+  // dirty bit, and a new generation when the page holds executable code.
+  // Both are a load in the common case of a dirty data page.
+  XENON_CPU_FORCEINLINE void native_note_store(std::uint32_t physical_page) const noexcept {
+    const auto bit = std::uint64_t{1} << (physical_page & 63u);
+    if ((fast_.cpu_dirty_page_bits[physical_page >> 6u].load(std::memory_order_relaxed) & bit) ==
+            0u ||
+        fast_.executable_page_generations[physical_page].load(std::memory_order_relaxed) !=
+            0u) [[unlikely]] {
+      native_publish_store(physical_page);
+    }
+  }
+  XENON_CPU_NOINLINE void native_publish_store(std::uint32_t physical_page) const noexcept;
   template <typename T>
-  [[nodiscard]] T read_integer(GuestAddress address, bool little_endian);
+  [[nodiscard]] XENON_CPU_FORCEINLINE T read_value(GuestAddress address, bool little_endian);
   template <typename T>
-  void write_integer(GuestAddress address, T value, bool little_endian);
+  XENON_CPU_FORCEINLINE void write_value(GuestAddress address, T value, bool little_endian);
+
+  // The checked path: the full Memory V2 implementation for every access.
+  template <typename T>
+  [[nodiscard]] XENON_CPU_NOINLINE T read_integer(GuestAddress address, bool little_endian);
+  template <typename T>
+  XENON_CPU_NOINLINE void write_integer(GuestAddress address, T value, bool little_endian);
+  [[nodiscard]] XENON_CPU_NOINLINE std::uint8_t read8_checked(GuestAddress address);
+  XENON_CPU_NOINLINE void write8_checked(GuestAddress address, std::uint8_t value);
+  [[nodiscard]] XENON_CPU_NOINLINE Vector128 read128_checked(GuestAddress address);
+  XENON_CPU_NOINLINE void write128_checked(GuestAddress address, const Vector128& value);
   template <typename T>
   [[nodiscard]] bool native_store_conditional(GuestAddress address,
                                               std::uint64_t token, T value);
@@ -395,6 +565,9 @@ class MemoryAccessContext {
   MemoryPort* slow_{};
   FastMemoryView fast_{};
   bool read_guard_active_{};
+  // Sits in read_guard_active_'s tail padding, so ExecutionContext, which
+  // embeds this class ahead of fields game modules read, keeps its layout.
+  bool native_inline_{};
 };
 
 // Deliberately tiny CPU-facing contract. This is NOT the RAM subsystem.
@@ -777,6 +950,14 @@ enum class SlotStatus : std::uint64_t {
          (std::uint64_t{physical_address} & kPhysicalAddressMask);
 }
 
+// Reservation <-> plain-store ordering (XEN-005). A reserve publishes its
+// claim (seen bit, slot) and then reads the in-flight writer count; a plain
+// writer publishes itself in that count and then reads the seen bits and
+// slots. That is the store-buffering pattern: with acquire/release alone both
+// sides may read the other's old value, so the reserve keeps a reservation a
+// writer never invalidated. These operations are sequentially consistent so
+// at least one side sees the other (the same instructions as acq_rel on x86-64
+// and ARMv8, whose acquire/release are already RCsc).
 [[nodiscard]] inline bool reservation_seen(const FastMemoryView& fast,
                                            std::uint32_t granule) noexcept {
   if (!fast.reservation_seen_bitmap || !fast.reservation_seen_word_count) {
@@ -785,7 +966,7 @@ enum class SlotStatus : std::uint64_t {
   const auto word = granule >> 6u;
   if (word >= fast.reservation_seen_word_count) return false;
   const auto bit = std::uint64_t{1} << (granule & 63u);
-  return (fast.reservation_seen_bitmap[word].load(std::memory_order_acquire) &
+  return (fast.reservation_seen_bitmap[word].load(std::memory_order_seq_cst) &
           bit) != 0u;
 }
 
@@ -831,7 +1012,7 @@ inline void invalidate_range(const FastMemoryView& fast,
   for (std::uint32_t slot_index = 0; slot_index < fast.reservation_slot_count;
        ++slot_index) {
     auto& slot = fast.reservation_slots[slot_index];
-    auto descriptor = slot.load(std::memory_order_acquire);
+    auto descriptor = slot.load(std::memory_order_seq_cst);
     for (;;) {
       if (slot_status(descriptor) != SlotStatus::Active) break;
       const auto slot_granule =
@@ -880,7 +1061,7 @@ inline void end_reservation_operation(const FastMemoryView& fast) noexcept {
   const auto word = granule >> 6u;
   if (word >= fast.reservation_seen_word_count) return 0u;
   const auto bit = std::uint64_t{1} << (granule & 63u);
-  fast.reservation_seen_bitmap[word].fetch_or(bit, std::memory_order_release);
+  fast.reservation_seen_bitmap[word].fetch_or(bit, std::memory_order_seq_cst);
 
   auto generation = fast.reservation_next_generation->fetch_add(
       1u, std::memory_order_acq_rel);
@@ -896,7 +1077,7 @@ inline void end_reservation_operation(const FastMemoryView& fast) noexcept {
        ++slot_index) {
     auto expected = std::uint64_t{0};
     if (fast.reservation_slots[slot_index].compare_exchange_strong(
-            expected, descriptor, std::memory_order_acq_rel,
+            expected, descriptor, std::memory_order_seq_cst,
             std::memory_order_acquire)) {
       return make_token(slot_index, generation);
     }
@@ -1003,7 +1184,7 @@ inline void mark_cpu_dirty_pages(const FastMemoryView& fast,
     }
     if (fast.active_coherency_writers) {
       fast.active_coherency_writers->fetch_add(1u,
-                                                std::memory_order_acq_rel);
+                                                std::memory_order_seq_cst);
     }
     reservation_participant =
         range_has_seen_reservation(fast, physical_address, width) &&
@@ -1176,10 +1357,8 @@ inline T MemoryAccessContext::read_integer(GuestAddress address,
 template <typename T>
 inline void MemoryAccessContext::write_integer(GuestAddress address, T value,
                                                bool little_endian) {
-  if constexpr (sizeof(T) == 4u) {
-    if (is_write_trapped(address)) {
-      debug_signal_write_trap(address, static_cast<std::uint64_t>(value));
-    }
+  if (is_write_trapped(address, sizeof(T))) [[unlikely]] {
+    debug_signal_write_trap(address, static_cast<std::uint64_t>(value));
   }
   ScopedReadGuard guard(*this);
   Resolved resolved{};
@@ -1198,6 +1377,10 @@ inline void MemoryAccessContext::write_integer(GuestAddress address, T value,
   }
   const bool host_little = std::endian::native == std::endian::little;
   const bool swap = little_endian ? !host_little : host_little;
+  if (write_watch_hit(resolved.physical_address, sizeof(T))) [[unlikely]] {
+    const auto stored = byteswap_if(value, swap);
+    debug_signal_write_watch(address, resolved.physical_address, sizeof(T), &stored, sizeof(T));
+  }
   const bool reservation_participant =
       begin_write(resolved.physical_address, sizeof(T));
   detail::atomic_store_relaxed<T>(resolved.ptr, byteswap_if(value, swap));
@@ -1205,22 +1388,79 @@ inline void MemoryAccessContext::write_integer(GuestAddress address, T value,
                  reservation_participant, resolved.ordering_domain);
 }
 
+inline void MemoryAccessContext::native_publish_store(
+    std::uint32_t physical_page) const noexcept {
+  reservation_monitor_detail::publish_write_metadata(
+      fast_, physical_page << kNativePageShift, 1u, MemoryOrderingDomain::Normal);
+}
+
+template <typename T>
+XENON_CPU_FORCEINLINE T MemoryAccessContext::read_value(GuestAddress address,
+                                                        bool little_endian) {
+  std::uint32_t physical_page{};
+  if (auto* ptr = native_ram<sizeof(T), sizeof(T)>(address, fast_memory::kRead,
+                                                   physical_page)) [[likely]] {
+    const bool host_little = std::endian::native == std::endian::little;
+    return byteswap_if(detail::atomic_load_relaxed<T>(ptr),
+                       little_endian ? !host_little : host_little);
+  }
+  return read_integer<T>(address, little_endian);
+}
+
+template <typename T>
+XENON_CPU_FORCEINLINE void MemoryAccessContext::write_value(GuestAddress address, T value,
+                                                            bool little_endian) {
+  std::uint32_t physical_page{};
+  auto* ptr = native_ram<sizeof(T), sizeof(T)>(address, fast_memory::kWrite, physical_page);
+  if (is_write_trapped(address, sizeof(T))) [[unlikely]] ptr = nullptr;
+  if (ptr) [[likely]] {
+    const bool host_little = std::endian::native == std::endian::little;
+    const auto stored = byteswap_if(value, little_endian ? !host_little : host_little);
+    const auto physical = (physical_page << kNativePageShift) | (address & kNativePageMask);
+    if (write_watch_hit(physical, sizeof(T))) [[unlikely]]
+      debug_signal_write_watch(address, physical, sizeof(T), &stored, sizeof(T));
+    detail::atomic_store_relaxed<T>(ptr, stored);
+    native_note_store(physical_page);
+    return;
+  }
+  write_integer(address, value, little_endian);
+}
+
 inline std::uint8_t MemoryAccessContext::read8(GuestAddress address) {
+  std::uint32_t physical_page{};
+  if (auto* ptr = native_ram<1u, 1u>(address, fast_memory::kRead, physical_page)) [[likely]]
+    return detail::atomic_load_relaxed<std::uint8_t>(ptr);
+  return read8_checked(address);
+}
+inline std::uint8_t MemoryAccessContext::read8_checked(GuestAddress address) {
   ScopedReadGuard guard(*this);
   Resolved resolved{};
   if (!resolve_fast(address, 1, false, 1, resolved)) return slow_->read8(address);
   return detail::atomic_load_relaxed<std::uint8_t>(resolved.ptr);
 }
 inline std::uint16_t MemoryAccessContext::read16_be(GuestAddress address) {
-  return read_integer<std::uint16_t>(address, false);
+  return read_value<std::uint16_t>(address, false);
 }
 inline std::uint32_t MemoryAccessContext::read32_be(GuestAddress address) {
-  return read_integer<std::uint32_t>(address, false);
+  return read_value<std::uint32_t>(address, false);
 }
 inline std::uint64_t MemoryAccessContext::read64_be(GuestAddress address) {
-  return read_integer<std::uint64_t>(address, false);
+  return read_value<std::uint64_t>(address, false);
 }
 inline Vector128 MemoryAccessContext::read128(GuestAddress address) {
+  std::uint32_t physical_page{};
+  if (auto* ptr = native_ram<16u, alignof(std::uint64_t)>(address, fast_memory::kRead,
+                                                          physical_page)) [[likely]] {
+    Vector128 value{};
+    const auto lo = detail::atomic_load_relaxed<std::uint64_t>(ptr);
+    const auto hi = detail::atomic_load_relaxed<std::uint64_t>(ptr + 8u);
+    std::memcpy(value.bytes.data(), &lo, sizeof(lo));
+    std::memcpy(value.bytes.data() + 8u, &hi, sizeof(hi));
+    return value;
+  }
+  return read128_checked(address);
+}
+inline Vector128 MemoryAccessContext::read128_checked(GuestAddress address) {
   ScopedReadGuard guard(*this);
   Resolved resolved{};
   if (!resolve_fast(address, 16, false, alignof(std::uint64_t), resolved)) {
@@ -1236,12 +1476,27 @@ inline Vector128 MemoryAccessContext::read128(GuestAddress address) {
 
 inline void MemoryAccessContext::write8(GuestAddress address,
                                         std::uint8_t value) {
+  std::uint32_t physical_page{};
+  if (auto* ptr = native_ram<1u, 1u>(address, fast_memory::kWrite, physical_page)) [[likely]] {
+    const auto physical = (physical_page << kNativePageShift) | (address & kNativePageMask);
+    if (write_watch_hit(physical, 1u)) [[unlikely]]
+      debug_signal_write_watch(address, physical, 1u, &value, 1u);
+    detail::atomic_store_relaxed<std::uint8_t>(ptr, value);
+    native_note_store(physical_page);
+    return;
+  }
+  write8_checked(address, value);
+}
+inline void MemoryAccessContext::write8_checked(GuestAddress address,
+                                                std::uint8_t value) {
   ScopedReadGuard guard(*this);
   Resolved resolved{};
   if (!resolve_fast(address, 1, true, 1, resolved)) {
     slow_->write8(address, value);
     return;
   }
+  if (write_watch_hit(resolved.physical_address, 1u)) [[unlikely]]
+    debug_signal_write_watch(address, resolved.physical_address, 1u, &value, 1u);
   const bool reservation_participant = begin_write(resolved.physical_address, 1);
   detail::atomic_store_relaxed<std::uint8_t>(resolved.ptr, value);
   complete_write(resolved.physical_address, 1, reservation_participant,
@@ -1249,18 +1504,36 @@ inline void MemoryAccessContext::write8(GuestAddress address,
 }
 inline void MemoryAccessContext::write16_be(GuestAddress address,
                                             std::uint16_t value) {
-  write_integer(address, value, false);
+  write_value(address, value, false);
 }
 inline void MemoryAccessContext::write32_be(GuestAddress address,
                                             std::uint32_t value) {
-  write_integer(address, value, false);
+  write_value(address, value, false);
 }
 inline void MemoryAccessContext::write64_be(GuestAddress address,
                                             std::uint64_t value) {
-  write_integer(address, value, false);
+  write_value(address, value, false);
 }
 inline void MemoryAccessContext::write128(GuestAddress address,
                                           const Vector128& value) {
+  std::uint32_t physical_page{};
+  if (auto* ptr = native_ram<16u, alignof(std::uint64_t)>(address, fast_memory::kWrite,
+                                                          physical_page)) [[likely]] {
+    std::uint64_t lo{}, hi{};
+    std::memcpy(&lo, value.bytes.data(), sizeof(lo));
+    std::memcpy(&hi, value.bytes.data() + 8u, sizeof(hi));
+    const auto physical = (physical_page << kNativePageShift) | (address & kNativePageMask);
+    if (write_watch_hit(physical, 16u)) [[unlikely]]
+      debug_signal_write_watch(address, physical, 16u, value.bytes.data(), 16u);
+    detail::atomic_store_relaxed<std::uint64_t>(ptr, lo);
+    detail::atomic_store_relaxed<std::uint64_t>(ptr + 8u, hi);
+    native_note_store(physical_page);
+    return;
+  }
+  write128_checked(address, value);
+}
+inline void MemoryAccessContext::write128_checked(GuestAddress address,
+                                                  const Vector128& value) {
   ScopedReadGuard guard(*this);
   Resolved resolved{};
   if (!resolve_fast(address, 16, true, alignof(std::uint64_t), resolved)) {
@@ -1270,6 +1543,8 @@ inline void MemoryAccessContext::write128(GuestAddress address,
   std::uint64_t lo{}, hi{};
   std::memcpy(&lo, value.bytes.data(), sizeof(lo));
   std::memcpy(&hi, value.bytes.data() + 8u, sizeof(hi));
+  if (write_watch_hit(resolved.physical_address, 16u)) [[unlikely]]
+    debug_signal_write_watch(address, resolved.physical_address, 16u, value.bytes.data(), 16u);
   const bool reservation_participant = begin_write(resolved.physical_address, 16);
   detail::atomic_store_relaxed<std::uint64_t>(resolved.ptr, lo);
   detail::atomic_store_relaxed<std::uint64_t>(resolved.ptr + 8u, hi);
@@ -1278,25 +1553,25 @@ inline void MemoryAccessContext::write128(GuestAddress address,
 }
 
 inline std::uint16_t MemoryAccessContext::read16_le(GuestAddress address) {
-  return read_integer<std::uint16_t>(address, true);
+  return read_value<std::uint16_t>(address, true);
 }
 inline std::uint32_t MemoryAccessContext::read32_le(GuestAddress address) {
-  return read_integer<std::uint32_t>(address, true);
+  return read_value<std::uint32_t>(address, true);
 }
 inline std::uint64_t MemoryAccessContext::read64_le(GuestAddress address) {
-  return read_integer<std::uint64_t>(address, true);
+  return read_value<std::uint64_t>(address, true);
 }
 inline void MemoryAccessContext::write16_le(GuestAddress address,
                                             std::uint16_t value) {
-  write_integer(address, value, true);
+  write_value(address, value, true);
 }
 inline void MemoryAccessContext::write32_le(GuestAddress address,
                                             std::uint32_t value) {
-  write_integer(address, value, true);
+  write_value(address, value, true);
 }
 inline void MemoryAccessContext::write64_le(GuestAddress address,
                                             std::uint64_t value) {
-  write_integer(address, value, true);
+  write_value(address, value, true);
 }
 
 inline void MemoryAccessContext::read_bytes(
@@ -1321,6 +1596,39 @@ inline void MemoryAccessContext::read_bytes(
   }
 }
 
+inline void MemoryAccessContext::read_quadword_part(GuestAddress address,
+                                                    std::span<std::byte> destination) {
+  if (destination.empty()) return;
+  if ((address & 15u) + destination.size() <= 16u) {
+    std::uint32_t physical_page{};
+    if (auto* block = native_ram<16u, 16u>(GuestAddress(address & ~GuestAddress{15}),
+                                           fast_memory::kRead, physical_page)) [[likely]] {
+      detail::atomic_copy_from_guest(block + (address & 15u), destination);
+      return;
+    }
+  }
+  read_bytes(address, destination);
+}
+
+inline void MemoryAccessContext::write_quadword_part(GuestAddress address,
+                                                     std::span<const std::byte> source) {
+  if (source.empty()) return;
+  if ((address & 15u) + source.size() <= 16u) {
+    std::uint32_t physical_page{};
+    if (auto* block = native_ram<16u, 16u>(GuestAddress(address & ~GuestAddress{15}),
+                                           fast_memory::kWrite, physical_page)) [[likely]] {
+      const auto size = static_cast<std::uint32_t>(source.size());
+      const auto physical = (physical_page << kNativePageShift) | (address & kNativePageMask);
+      if (write_watch_hit(physical, size)) [[unlikely]]
+        debug_signal_write_watch(address, physical, size, source.data(), size);
+      detail::atomic_copy_to_guest(block + (address & 15u), source);
+      native_note_store(physical_page);
+      return;
+    }
+  }
+  write_bytes(address, source);
+}
+
 inline void MemoryAccessContext::write_bytes(
     GuestAddress address, std::span<const std::byte> source) {
   ScopedReadGuard guard(*this);
@@ -1334,6 +1642,11 @@ inline void MemoryAccessContext::write_bytes(
     const auto chunk = std::min<std::size_t>(remaining.size(), page_remaining);
     Resolved resolved{};
     if (resolve_fast(cursor, chunk, true, 1u, resolved)) {
+      if (write_watch_hit(resolved.physical_address, static_cast<std::uint32_t>(chunk)))
+          [[unlikely]]
+        debug_signal_write_watch(cursor, resolved.physical_address,
+                                 static_cast<std::uint32_t>(chunk), remaining.data(),
+                                 static_cast<std::uint32_t>(chunk));
       const bool reservation_participant =
           begin_write(resolved.physical_address, static_cast<std::uint32_t>(chunk));
       detail::atomic_copy_to_guest(resolved.ptr, remaining.first(chunk));
@@ -1361,6 +1674,8 @@ inline void MemoryAccessContext::fill_bytes(GuestAddress address,
     const auto chunk = (std::min)(remaining, page_remaining);
     Resolved resolved{};
     if (resolve_fast(cursor, chunk, true, 1u, resolved)) {
+      if (write_watch_hit(resolved.physical_address, chunk)) [[unlikely]]
+        debug_signal_write_watch(cursor, resolved.physical_address, chunk, &value, 1u, true);
       const bool reservation_participant =
           begin_write(resolved.physical_address, chunk);
       detail::atomic_fill_guest(resolved.ptr, chunk, value);
@@ -1476,10 +1791,15 @@ inline std::uint64_t MemoryAccessContext::reserve32(
       fast_, resolved.physical_address, sizeof(value));
   const auto raw = detail::atomic_load_relaxed<std::uint32_t>(resolved.ptr);
   value = byteswap_if(raw, std::endian::native == std::endian::little);
+  // The writer count first, then the epoch: a writer in flight at the claim
+  // is either still counted here or has finished, and then its epoch bump
+  // (made before its release of the count) is visible below. Read the other
+  // way round, a store that completed between the two loads went unseen and
+  // the conditional store later overwrote it.
+  const auto writers =
+      fast_.active_coherency_writers->load(std::memory_order_seq_cst);
   const auto epoch_after =
       fast_.global_write_epoch->load(std::memory_order_acquire);
-  const auto writers =
-      fast_.active_coherency_writers->load(std::memory_order_acquire);
   if (token && (epoch_before != epoch_after || writers != 0u)) {
     reservation_monitor_detail::cancel_reservation(fast_, token);
     token = 0u;
@@ -1519,10 +1839,15 @@ inline std::uint64_t MemoryAccessContext::reserve64(
       fast_, resolved.physical_address, sizeof(value));
   const auto raw = detail::atomic_load_relaxed<std::uint64_t>(resolved.ptr);
   value = byteswap_if(raw, std::endian::native == std::endian::little);
+  // The writer count first, then the epoch: a writer in flight at the claim
+  // is either still counted here or has finished, and then its epoch bump
+  // (made before its release of the count) is visible below. Read the other
+  // way round, a store that completed between the two loads went unseen and
+  // the conditional store later overwrote it.
+  const auto writers =
+      fast_.active_coherency_writers->load(std::memory_order_seq_cst);
   const auto epoch_after =
       fast_.global_write_epoch->load(std::memory_order_acquire);
-  const auto writers =
-      fast_.active_coherency_writers->load(std::memory_order_acquire);
   if (token && (epoch_before != epoch_after || writers != 0u)) {
     reservation_monitor_detail::cancel_reservation(fast_, token);
     token = 0u;

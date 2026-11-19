@@ -302,7 +302,7 @@ bool DepthTargetImage::readback_native_sample(
 #else
   const auto copy_width = right - left, copy_height = bottom - top;
   row_pitch = copy_width * 4u;
-  DxcShaderCompiler compiler;
+  UtilityShaderCompiler compiler;
   ShaderCompileOptions options{}; options.format = ShaderBinaryFormat::Spirv;
   const auto vs = compiler.compile(make_transfer_fullscreen_vertex_shader(), options);
   const auto ps = compiler.compile(make_depth_sample_read_shader(host_msaa_), options);
@@ -344,10 +344,12 @@ bool DepthTargetImage::readback_native_sample(
           VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) ||
       !depth_readback.initialize(physical_device_, device_,
           std::uint64_t(row_pitch) * copy_height, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-          VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) ||
+          VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+          Buffer::kCpuReadback) ||
       !stencil_readback.initialize(physical_device_, device_,
           std::uint64_t(copy_width) * copy_height, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-          VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)) {
+          VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+          Buffer::kCpuReadback)) {
     error_ = "Vulkan depth readback buffers could not be created"; cleanup(); return false;
   }
   std::span<std::byte> mapped;
@@ -441,7 +443,7 @@ bool DepthTargetImage::upload_sample(
 #ifndef XENON_HAS_DXC
   error_="Vulkan selected depth-sample upload requires DXC";return false;
 #else
-  DxcShaderCompiler compiler;ShaderCompileOptions options{};
+  UtilityShaderCompiler compiler;ShaderCompileOptions options{};
   options.format=ShaderBinaryFormat::Spirv;
   const auto vs=compiler.compile(make_transfer_fullscreen_vertex_shader(),options);
   const auto ps=compiler.compile(make_depth_only_sample_write_shader(),options);
@@ -459,7 +461,7 @@ bool DepthTargetImage::upload_sample(
   VkPhysicalDeviceProperties properties{};vkGetPhysicalDeviceProperties(physical_device_,&properties);const auto alignment=(std::max)(VkDeviceSize(16),properties.limits.minUniformBufferOffsetAlignment);const auto constant_stride=(VkDeviceSize(16)+alignment-1)/alignment*alignment;
   if(!depth_upload.initialize(physical_device_,device_,std::uint64_t(w)*h*4,VK_BUFFER_USAGE_TRANSFER_SRC_BIT,VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT|VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)||!stencil_upload.initialize(physical_device_,device_,std::uint64_t(w)*h,VK_BUFFER_USAGE_TRANSFER_SRC_BIT,VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT|VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)||!constants.initialize(physical_device_,device_,constant_stride*257,VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT|VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)){error_="Vulkan depth upload buffers could not be created";cleanup();return false;}
   std::span<std::byte> db,sb,cb;if(!depth_upload.map(db)||!stencil_upload.map(sb)||!constants.map(cb)){cleanup();return false;}
-  for(std::uint32_t y=0;y<h;++y)for(std::uint32_t x=0;x<w;++x){const auto packed=source[(std::uint64_t(y)*row_pitch)/4+x];const auto value=depth_stencil_to_host(guest_format_,packed);std::memcpy(db.data()+(std::size_t(y)*w+x)*4,&value.depth,4);sb[std::size_t(y)*w+x]=std::byte(value.stencil);}
+  for(std::uint32_t y=0;y<h;++y)for(std::uint32_t x=0;x<w;++x){const auto packed=source[(std::uint64_t(y)*row_pitch)/4+x];const auto value=depth_stencil_to_host(guest_format_,packed,unorm24_write_);std::memcpy(db.data()+(std::size_t(y)*w+x)*4,&value.depth,4);sb[std::size_t(y)*w+x]=std::byte(value.stencil);}
   struct Constants{std::uint32_t origin[2],sample,pad;};const Constants values{{left,top},mapping->sample,0};std::memcpy(cb.data(),&values,16);for(std::uint32_t value=0;value<256;++value){const Constants sv{{left,top},mapping->sample,value};std::memcpy(cb.data()+constant_stride*(value+1),&sv,16);}depth_upload.unmap();stencil_upload.unmap();constants.unmap();
   const std::array bindings{VkDescriptorSetLayoutBinding{0,VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC,1,VK_SHADER_STAGE_FRAGMENT_BIT,nullptr},VkDescriptorSetLayoutBinding{16,VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,1,VK_SHADER_STAGE_FRAGMENT_BIT,nullptr},VkDescriptorSetLayoutBinding{17,VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,1,VK_SHADER_STAGE_FRAGMENT_BIT,nullptr}};
   VkDescriptorSetLayoutCreateInfo si{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};si.bindingCount=3;si.pBindings=bindings.data();if(vkCreateDescriptorSetLayout(device_,&si,nullptr,&set_layout)!=VK_SUCCESS){cleanup();return false;}
@@ -494,7 +496,75 @@ bool DepthTargetImage::upload_sample(
 #endif
 }
 
+void DepthTargetImage::transition_to_sampled(VkCommandBuffer command) noexcept {
+  if (!command || !image_ || layout_ == VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL) return;
+  VkImageMemoryBarrier2 barrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2};
+  barrier.srcStageMask = layout_ == VK_IMAGE_LAYOUT_UNDEFINED
+                             ? VK_PIPELINE_STAGE_2_NONE
+                             : VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+  barrier.srcAccessMask = layout_ == VK_IMAGE_LAYOUT_UNDEFINED ? 0 : VK_ACCESS_2_MEMORY_WRITE_BIT;
+  // Read by transfer fragment shaders and GPU depth resolves (compute).
+  barrier.dstStageMask =
+      VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+  barrier.dstAccessMask = VK_ACCESS_2_SHADER_SAMPLED_READ_BIT;
+  barrier.oldLayout = layout_;
+  barrier.newLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
+  barrier.image = image_;
+  barrier.subresourceRange = {VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT, 0, 1, 0,
+                              1};
+  VkDependencyInfo dependency{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+  dependency.imageMemoryBarrierCount = 1;
+  dependency.pImageMemoryBarriers = &barrier;
+  vkCmdPipelineBarrier2(command, &dependency);
+  layout_ = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
+}
+
+VkDescriptorSet DepthTargetImage::sampled_descriptor_set(VkDescriptorSetLayout set_layout) {
+  if (sampled_set_) return sampled_set_;
+  if (!device_ || !depth_view_ || !stencil_view_ || !set_layout) {
+    error_ = "Vulkan depth target has no views to sample";
+    return VK_NULL_HANDLE;
+  }
+  const VkDescriptorPoolSize pool_size{VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 2};
+  VkDescriptorPoolCreateInfo pool_info{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+  pool_info.maxSets = 1;
+  pool_info.poolSizeCount = 1;
+  pool_info.pPoolSizes = &pool_size;
+  if (vkCreateDescriptorPool(device_, &pool_info, nullptr, &sampled_pool_) != VK_SUCCESS) {
+    error_ = "Vulkan depth target descriptor pool creation failed";
+    sampled_pool_ = VK_NULL_HANDLE;
+    return VK_NULL_HANDLE;
+  }
+  VkDescriptorSetAllocateInfo allocate{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+  allocate.descriptorPool = sampled_pool_;
+  allocate.descriptorSetCount = 1;
+  allocate.pSetLayouts = &set_layout;
+  if (vkAllocateDescriptorSets(device_, &allocate, &sampled_set_) != VK_SUCCESS) {
+    error_ = "Vulkan depth target descriptor allocation failed";
+    vkDestroyDescriptorPool(device_, sampled_pool_, nullptr);
+    sampled_pool_ = VK_NULL_HANDLE;
+    sampled_set_ = VK_NULL_HANDLE;
+    return VK_NULL_HANDLE;
+  }
+  VkDescriptorImageInfo depth_info{};
+  depth_info.imageView = depth_view_;
+  depth_info.imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
+  VkDescriptorImageInfo stencil_info = depth_info;
+  stencil_info.imageView = stencil_view_;
+  const std::array writes{
+      VkWriteDescriptorSet{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, sampled_set_, 16, 0,
+                           1, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, &depth_info, nullptr, nullptr},
+      VkWriteDescriptorSet{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, sampled_set_, 17, 0,
+                           1, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, &stencil_info, nullptr, nullptr}};
+  vkUpdateDescriptorSets(device_, static_cast<std::uint32_t>(writes.size()), writes.data(), 0,
+                         nullptr);
+  return sampled_set_;
+}
+
 void DepthTargetImage::reset() noexcept {
+  if (device_ && sampled_pool_) vkDestroyDescriptorPool(device_, sampled_pool_, nullptr);
+  sampled_pool_ = VK_NULL_HANDLE;
+  sampled_set_ = VK_NULL_HANDLE;
   if (device_ && stencil_view_) vkDestroyImageView(device_, stencil_view_, nullptr);
   if (device_ && depth_view_) vkDestroyImageView(device_, depth_view_, nullptr);
   if (device_ && view_) vkDestroyImageView(device_, view_, nullptr);

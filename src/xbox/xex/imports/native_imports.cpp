@@ -40,8 +40,12 @@ void parse_native_import_libraries(std::span<const std::byte> header_bytes, std:
 
   // The string table is a sequence of `string_table_count` NUL-terminated,
   // 4-byte-aligned library-name strings.
+  // Each name takes at least four bytes of the table (its NUL, padded to a
+  // multiple of four), so the table bounds how many there can be; the
+  // header's count alone is untrusted (XEN-008: a 265 KiB file reserved
+  // 10 GB here).
   std::vector<std::string> library_names;
-  library_names.reserve(string_table_count);
+  library_names.reserve(std::min<std::size_t>(string_table_count, string_table_size / 4u));
   {
     std::size_t cursor = string_table_offset;
     const auto end = string_table_offset + string_table_size;

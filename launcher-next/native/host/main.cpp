@@ -1,6 +1,10 @@
 #include "application/launcher_service.hpp"
 #include "core/launcher_update.hpp"
+#include "core/localization.hpp"
+#include "platform/file_path.hpp"
 #include "include/cef_app.h"
+#include "include/cef_image.h"
+#include "include/base/cef_compiler_specific.h"
 #include "include/cef_browser.h"
 #include "include/cef_command_line.h"
 #include "include/cef_parser.h"
@@ -34,6 +38,9 @@ bool restart_requested = false;
 bool restart_safe = false;
 fs::path update_receipt;
 std::string update_token;
+#ifdef __APPLE__
+CefRefPtr<CefBrowser> primary_browser;
+#endif
 bool trusted(CefRefPtr<CefFrame> frame) {
   return frame && frame->IsMain() && frame->GetURL().ToString() == "xenon://app/";
 }
@@ -76,6 +83,25 @@ fs::path executable_directory() {
   CefString path;
   CefGetPath(PK_DIR_EXE, path);
   return fs::u8path(path.ToString());
+}
+fs::path resource_directory() {
+  auto path=executable_directory();
+#ifdef __APPLE__
+  path=path.parent_path()/"Resources";
+#endif
+  return path;
+}
+std::string html_text(const std::string &value);
+CefRefPtr<CefImage> window_icon(unsigned logical_size) {
+  auto image=CefImage::CreateImage();
+  for(const auto size:{16u,32u,48u,64u,128u,256u}) {
+    if(size<logical_size || size%logical_size)continue;
+    const auto path=resource_directory()/"web/branding"/("xenon-app-icon-"+std::to_string(size)+".png");
+    std::ifstream input(xenon::launcher_next::io_path(path),std::ios::binary);
+    std::vector<char> bytes((std::istreambuf_iterator<char>(input)),{});
+    if(!bytes.empty())image->AddPNG(float(size)/logical_size,bytes.data(),bytes.size());
+  }
+  return image;
 }
 class ReplyTask : public CefTask {
 public:
@@ -157,9 +183,9 @@ public:
     }
     const auto within = file.lexically_relative(web_);
     if (error || (!image_asset && (within.empty() || *within.begin() == "..")) ||
-        !fs::is_regular_file(file, error))
+        !fs::is_regular_file(xenon::launcher_next::io_path(file), error))
       return nullptr;
-    auto stream = CefStreamReader::CreateForFile(xenon::launcher_next::path_string(file));
+    auto stream = CefStreamReader::CreateForFile(xenon::launcher_next::path_string(xenon::launcher_next::io_path(file)));
     if (!stream)
       return nullptr;
     auto ext = file.extension().string();
@@ -271,18 +297,25 @@ public:
   CefRefPtr<CefRequestHandler> GetRequestHandler() override { return this; }
   CefRefPtr<CefDisplayHandler> GetDisplayHandler() override { return this; }
   CefRefPtr<CefLoadHandler> GetLoadHandler() override { return this; }
-  void OnAfterCreated(CefRefPtr<CefBrowser> browser) override { state_signal_->browser = browser; }
+  void OnAfterCreated(CefRefPtr<CefBrowser> browser) override {
+    state_signal_->browser = browser;
+    browser->GetHost()->SetAccessibilityState(STATE_ENABLED);
+#ifdef __APPLE__
+    primary_browser = browser;
+#endif
+  }
   void show_failure(CefRefPtr<CefFrame> frame, const std::string &description) {
+    const xenon::launcher_next::NativeCopy copy(resource_directory()/"web/localization.json",service_->storage()/"state.json");
+    const auto text=[&](const std::string &english){return html_text(copy.original(english));};
     fallback_ =
         "data:text/html;charset=utf-8," +
         CefURIEncode(
-            "<!doctype html><html><body style='background:#07131d;color:#f4f8fa;font:16px "
-            "system-ui;padding:48px'><h1>Xenon could not load the interface</h1><p>" +
-                description +
-                "</p><p>Your launcher data has been preserved. Check renderer.log in the launcher "
-                "data directory.</p><p><a style='color:#35d7ea' "
-                "href='xenon://app/'>Retry</a></p><p><a style='color:#35d7ea' "
-                "href='xenon://recovery/restart-safe'>Restart in safe mode</a></p></body></html>",
+            "<!doctype html><html lang='"+copy.language()+"'><body style='background:#07131d;color:#f4f8fa;font:16px "
+            "system-ui;padding:48px'><h1>"+text("Xenon could not load the interface")+"</h1><p>" +
+                text(description) +
+                "</p><p>"+text("Your launcher data has been preserved. Check renderer.log in the launcher data directory.")+"</p><p><a style='color:#35d7ea' "
+                "href='xenon://app/'>"+text("Retry")+"</a></p><p><a style='color:#35d7ea' "
+                "href='xenon://recovery/restart-safe'>"+text("Restart in safe mode")+"</a></p></body></html>",
             false)
             .ToString();
     frame->LoadURL(fallback_);
@@ -318,6 +351,9 @@ public:
     return false;
   }
   void OnBeforeClose(CefRefPtr<CefBrowser> browser) override {
+#ifdef __APPLE__
+    primary_browser = nullptr;
+#endif
     state_signal_->browser = nullptr;
     service_->observe_changes({});
     router_->OnBeforeClose(browser);
@@ -464,6 +500,8 @@ public:
   void OnWindowCreated(CefRefPtr<CefWindow> window) override {
     window->AddChildView(view_);
     window->SetTitle("Xenon Launcher");
+    window->SetWindowIcon(window_icon(16));
+    window->SetWindowAppIcon(window_icon(32));
     window->Show();
   }
   void OnWindowDestroyed(CefRefPtr<CefWindow>) override {
@@ -585,22 +623,23 @@ private:
   IMPLEMENT_REFCOUNTING(StartupFailure);
 };
 void show_startup_failure(const std::string &message, const fs::path &storage) {
+  const xenon::launcher_next::NativeCopy copy(resource_directory()/"web/localization.json",storage/"state.json",
+      CefCommandLine::GetGlobalCommandLine()->GetSwitchValue("lang").ToString());
+  const auto text=[&](const std::string &english){return html_text(copy.original(english));};
   const auto document =
-      std::string("<!doctype html><html><head><meta charset='utf-8'>") +
+      std::string("<!doctype html><html lang='")+copy.language()+"'><head><meta charset='utf-8'>" +
       "<meta http-equiv='Content-Security-Policy' content=\"default-src 'none'; style-src "
       "'unsafe-inline'\">" +
-      "<title>Xenon Launcher startup problem</title></head>" +
+      "<title>"+text("Xenon Launcher startup problem")+"</title></head>" +
       "<body style='background:#0d1114;color:#eef4f8;font:17px "
       "system-ui;padding:36px;line-height:1.6'>" +
-      "<h1>The launcher could not start</h1><p>Saved data has been kept. Close another launcher "
-      "using this data folder, or review the startup log and any saved-data backup before trying "
-      "again.</p>" +
-      "<pre style='white-space:pre-wrap;overflow-wrap:anywhere'>" + html_text(message) + "</pre>" +
-      "<p>Data folder: <code>" + html_text(xenon::launcher_next::path_string(storage)) +
+      "<h1>"+text("The launcher could not start")+"</h1><p>"+text("Saved data has been kept. Close another launcher using this data folder, or review the startup log and any saved-data backup before trying again.")+"</p>" +
+      "<pre style='white-space:pre-wrap;overflow-wrap:anywhere'>" + text(message) + "</pre>" +
+      "<p>"+text("Data folder:")+" <code>" + html_text(xenon::launcher_next::path_string(storage)) +
       "</code></p>" +
-      "<p><a style='color:#19d2c0' href='xenon://startup/retry'>Retry startup</a> &nbsp; " +
-      "<a style='color:#19d2c0' href='xenon://startup/retry-safe'>Restart in safe mode</a></p>" +
-      "<p>Safe mode does not reset or replace saved data.</p></body></html>";
+      "<p><a style='color:#19d2c0' href='xenon://startup/retry'>"+text("Retry startup")+"</a> &nbsp; " +
+      "<a style='color:#19d2c0' href='xenon://startup/retry-safe'>"+text("Restart in safe mode")+"</a></p>" +
+      "<p>"+text("Safe mode does not reset or replace saved data.")+"</p></body></html>";
   const auto url = "data:text/html;charset=utf-8," + CefURIEncode(document, false).ToString();
   CefBrowserSettings settings;
   settings.background_color = CefColorSetARGB(255, 13, 17, 20);
@@ -634,7 +673,7 @@ public:
   void OnContextInitialized() override {
     fs::path startup_storage;
     try {
-      auto directory = executable_directory();
+      auto directory = resource_directory();
       auto storage = xenon::launcher_next::default_storage();
       auto args = CefCommandLine::GetGlobalCommandLine();
       if (args->HasSwitch("data-dir"))
@@ -657,6 +696,8 @@ public:
                     fs::u8path(args->GetSwitchValue("fixture-network").ToString()))
               : xenon::launcher_next::platform_http());
       service->configure_update_installation(directory);
+      service->configure_runtime(executable_directory(), args->HasSwitch("runtime-host")
+          ? fs::u8path(args->GetSwitchValue("runtime-host").ToString()) : fs::path{});
       CefRegisterSchemeHandlerFactory("xenon", "app", new Assets(directory / "web", service));
       auto client = CefRefPtr<Client>(new Client(service));
       CefBrowserSettings browser_settings;
@@ -678,12 +719,20 @@ private:
   CefRefPtr<CefMessageRouterRendererSide> renderer_;
   IMPLEMENT_REFCOUNTING(App);
 };
+// Linux zygotes rotate the stack guard inside CefExecuteProcess. Its callers
+// must follow CEF's entry-point annotation, while other functions stay protected.
+#if defined(OS_LINUX)
+NO_STACK_PROTECTOR
+#endif
 int run(CefMainArgs args, void *sandbox) {
   CefRefPtr<App> app(new App);
   const auto result = CefExecuteProcess(args, app, sandbox);
   if (result >= 0)
     return result;
   CefSettings settings;
+#ifdef _WIN32
+  settings.chrome_app_icon_id = 1;
+#endif
   auto args_line = CefCommandLine::CreateCommandLine();
 #ifdef _WIN32
   args_line->InitFromString(GetCommandLineW());
@@ -701,6 +750,7 @@ int run(CefMainArgs args, void *sandbox) {
   const bool offline = args_line->HasSwitch("offline");
   const auto network_fixture = args_line->GetSwitchValue("fixture-network").ToString();
   const auto runtime_fixture = args_line->GetSwitchValue("fixture-host").ToString();
+  const auto production_runtime = args_line->GetSwitchValue("runtime-host").ToString();
   const auto cache = storage / "cef-cache";
   CefString(&settings.root_cache_path) = xenon::launcher_next::path_string(cache);
   settings.log_severity = LOGSEVERITY_WARNING;
@@ -735,6 +785,8 @@ int run(CefMainArgs args, void *sandbox) {
       arguments.push_back("--fixture-network=" + network_fixture);
     if (!runtime_fixture.empty())
       arguments.push_back("--fixture-host=" + runtime_fixture);
+    if (!production_runtime.empty())
+      arguments.push_back("--runtime-host=" + production_runtime);
     if (!xenon::launcher_next::launch_detached(fs::u8path(executable_path.ToString()), arguments))
       return 1;
   }
@@ -752,6 +804,23 @@ CEF_BOOTSTRAP_EXPORT int RunWinMain(HINSTANCE instance, LPWSTR, int, void *sandb
     return 1;
   }
 }
+#elif defined(__APPLE__)
+int xenon_launcher_main(int argc, char **argv) { return run(CefMainArgs(argc, argv), nullptr); }
+void xenon_launcher_quit() {
+  if (primary_browser) primary_browser->GetHost()->CloseBrowser(false);
+}
+void xenon_launcher_reopen() {
+  if (!primary_browser) return;
+  const auto view = CefBrowserView::GetForBrowser(primary_browser);
+  if (view && view->GetWindow()) {
+    view->GetWindow()->Show();
+    view->GetWindow()->Restore();
+    view->GetWindow()->Activate();
+  }
+}
 #else
+#if defined(OS_LINUX)
+NO_STACK_PROTECTOR
+#endif
 int main(int argc, char **argv) { return run(CefMainArgs(argc, argv), nullptr); }
 #endif

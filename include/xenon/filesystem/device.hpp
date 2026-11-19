@@ -24,6 +24,14 @@ class Device {
     return mount_point_;
   }
   [[nodiscard]] bool read_only() const noexcept { return read_only_; }
+  // Whether an existing file may be opened with write access. Writable
+  // devices always allow it. A read-only device normally refuses, but an
+  // installed marketplace package lets the title open its files for write
+  // (AC6 opens DLC data with GENERIC_READ|GENERIC_WRITE) and only the
+  // writes themselves fail.
+  [[nodiscard]] virtual bool opens_existing_for_write() const noexcept {
+    return !read_only_;
+  }
   // Xbox FILE_FS_* queries expect filesystem/device geometry even for virtual
   // devices. Backends may override these when a format has more specific
   // semantics; defaults match the values used by Xenia/ReXGlue for generic

@@ -10,6 +10,8 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <chrono>
+#include <thread>
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
@@ -184,22 +186,27 @@ Output main() {
   return shader;
 }
 
-// Host APIs may round a float-to-UNORM24 depth write to either neighbouring
-// integer when the scaled value is not exact (Vulkan "Conversion from
-// Floating-Point to Normalized Fixed-Point"; Mesa llvmpipe rounds 0.875 up to
-// 0xE00000). D24S8 depth therefore allows one unit of error; stencil and
-// D24FS8, which is stored as host float32, must match exactly.
+// Host APIs may round a float-to-UNORM24 depth conversion to either
+// neighbouring integer when the scaled value is not exact (Vulkan "Conversion
+// from Floating-Point to Normalized Fixed-Point"; Mesa llvmpipe rounds 0.875
+// up to 0xE00000). Depth Xenon writes uses the device's calibrated encoding
+// and must come back exact; only a host clear to an arbitrary float
+// (`unorm24_clear_tolerance`) may land a code either side. Stencil and
+// D24FS8, which is stored as host float32, always match exactly.
 bool depth_samples_match(xenon::gpu::DepthRenderTargetFormat format,
                          const std::vector<std::uint32_t>& actual,
                          const std::vector<std::uint32_t>& expected,
-                         std::string_view backend_label, std::uint32_t sample) {
+                         std::string_view backend_label, std::uint32_t sample,
+                         bool unorm24_clear_tolerance = false) {
   const bool unorm24 = format == xenon::gpu::DepthRenderTargetFormat::D24S8;
   bool match = actual.size() == expected.size();
   for (std::size_t pixel = 0; match && pixel < actual.size(); ++pixel) {
     const auto a = actual[pixel], e = expected[pixel];
-    const auto a_depth = a & 0x00FFFFFFu, e_depth = e & 0x00FFFFFFu;
+    const auto a_depth = a >> 8u, e_depth = e >> 8u;
     const auto depth_error = a_depth > e_depth ? a_depth - e_depth : e_depth - a_depth;
-    if ((a >> 24u) == (e >> 24u) && depth_error <= (unorm24 ? 1u : 0u)) continue;
+    if ((a & 0xFFu) == (e & 0xFFu) &&
+        depth_error <= (unorm24 && unorm24_clear_tolerance ? 1u : 0u))
+      continue;
     std::cerr << backend_label << " depth mismatch: format="
               << static_cast<unsigned>(format) << " sample=" << sample
               << " pixel=" << pixel << " expected=0x" << std::hex << e
@@ -210,6 +217,66 @@ bool depth_samples_match(xenon::gpu::DepthRenderTargetFormat format,
     std::cerr << backend_label << " depth readback returned " << actual.size()
               << " pixels, expected " << expected.size() << '\n';
   return match;
+}
+
+// Regression (CI: WARP and llvmpipe stored a post-resolve depth clear of
+// 0x556677 one code low): the device must have a D24 depth-write encoding
+// under which every calibration code is stored exactly - what the backends
+// measure at initialize() - and it is the one returned.
+template <typename DepthTarget, typename Queue, typename Create>
+xenon::gpu::Unorm24DepthWrite exact_unorm24_depth_write(Queue& queue, Create&& create,
+                                                        std::string_view backend_label) {
+  constexpr std::uint32_t kWidth = 320u, kHeight = 208u;
+  DepthTarget probe;
+  assert(create(probe, xenon::gpu::EdramSurfaceLayout{0u, kWidth, kHeight,
+                                                      xenon::gpu::MsaaSamples::X1, false, true}));
+  const auto words = xenon::gpu::unorm24_depth_calibration_words(kWidth * kHeight);
+  const auto measured = xenon::gpu::calibrate_unorm24_depth_write(
+      words, [&](xenon::gpu::Unorm24DepthWrite write, std::span<const std::uint32_t> source,
+                 std::vector<std::uint32_t>& stored) {
+        probe.set_unorm24_depth_write(write);
+        std::uint32_t pitch{};
+        return probe.upload_sample(queue, 0u, 0u, 0u, kWidth, kHeight, source, kWidth * 4u) &&
+               probe.readback_sample(queue, 0u, 0u, 0u, kWidth, kHeight, stored, pitch);
+      });
+  assert(measured);
+  const auto name = xenon::gpu::unorm24_depth_write_name(measured->write);
+  std::cout << backend_label << " D24 depth writes: " << name;
+  if (!measured->exact) {
+    std::cout << " leaves " << measured->mismatches << " codes wrong (0x" << std::hex
+              << (measured->first_expected >> 8u) << " stored as 0x"
+              << (measured->first_stored >> 8u) << std::dec << ")\n";
+    // What this device does instead, per encoding: how many codes go wrong
+    // in each sixteenth of the range, by how much, and the first few.
+    for (const auto write : xenon::gpu::kUnorm24DepthWrites) {
+      probe.set_unorm24_depth_write(write);
+      std::vector<std::uint32_t> stored;
+      std::uint32_t pitch{};
+      if (!probe.upload_sample(queue, 0u, 0u, 0u, kWidth, kHeight, words, kWidth * 4u) ||
+          !probe.readback_sample(queue, 0u, 0u, 0u, kWidth, kHeight, stored, pitch))
+        continue;
+      std::array<std::uint32_t, 16> by_range{};
+      std::array<std::uint32_t, 3> by_delta{};  // -1, +1, other
+      std::uint32_t shown = 0;
+      std::cout << "  " << xenon::gpu::unorm24_depth_write_name(write) << ":";
+      for (std::size_t i = 0; i < words.size(); ++i) {
+        const auto want = words[i] >> 8u, got = stored[i] >> 8u;
+        if (want == got) continue;
+        ++by_range[want >> 20u];
+        ++by_delta[got + 1u == want ? 0 : got == want + 1u ? 1 : 2];
+        if (shown++ < 12u)
+          std::cout << std::hex << " 0x" << want << "->0x" << got << std::dec;
+      }
+      std::cout << "\n    by sixteenth:";
+      for (const auto count : by_range) std::cout << ' ' << count;
+      std::cout << "\n    one low " << by_delta[0] << ", one high " << by_delta[1] << ", other "
+                << by_delta[2] << '\n';
+    }
+  } else {
+    std::cout << '\n';
+  }
+  assert(measured->exact);
+  return measured->write;
 }
 
 template <typename DepthTarget, typename Queue>
@@ -263,14 +330,15 @@ void validate_depth_sample_transfer_matrix(
   }
 
   const auto read_native = [&](std::uint32_t host_sample,
-                               const std::vector<std::uint32_t>& wanted) {
+                               const std::vector<std::uint32_t>& wanted,
+                               bool host_clear = false) {
     std::vector<std::uint32_t> returned;
     std::uint32_t pitch{};
     assert(target.readback_native_sample(
         queue, host_sample, 0, 0, kWidth, kHeight, returned, pitch));
     assert(pitch == kWidth * 4u);
     assert(depth_samples_match(depth_format, returned, wanted, backend_label,
-                               host_sample));
+                               host_sample, host_clear));
   };
 
   if (guest_msaa == xenon::gpu::MsaaSamples::X1) {
@@ -298,8 +366,8 @@ void validate_depth_sample_transfer_matrix(
       const auto clear_word = xenon::gpu::host_to_depth_stencil(
           depth_format, kClearHostDepth, kClearStencil);
       const std::vector<std::uint32_t> untouched(kWidth * kHeight, clear_word);
-      read_native(1, untouched);
-      read_native(2, untouched);
+      read_native(1, untouched, true);
+      read_native(2, untouched, true);
     }
   }
 }
@@ -472,6 +540,20 @@ int main() {
   assert(vulkan_resources.initialize(vulkan_context.physical_device(),
                                      vulkan_context.device()));
   assert(vulkan_resources.ready());
+  // XEN-001: under the Vulkan-minimum storage range (the _vulkan_128mib run)
+  // guest memory is bound as eight 64 MiB segments; otherwise as one.
+  {
+    const char* forced = std::getenv("XENON_VULKAN_MAX_STORAGE_BUFFER_RANGE");
+    const auto& segments = vulkan_resources.segmentation();
+    if (forced && std::strtoull(forced, nullptr, 0) == 134217728ull) {
+      assert(segments.segmented() && segments.count == 8u && segments.shift == 26u);
+    } else {
+      VkPhysicalDeviceProperties properties{};
+      vkGetPhysicalDeviceProperties(vulkan_context.physical_device(), &properties);
+      if (properties.limits.maxStorageBufferRange >= xenon::memory::kPhysicalMemorySize)
+        assert(!segments.segmented() && segments.count == 1u);
+    }
+  }
   assert(vulkan_resources.bind_guest_memory(
       vulkan_mirror.buffer(), xenon::memory::kPhysicalMemorySize));
   xenon::gpu::TextureDescriptor vulkan_texture_descriptor{};
@@ -497,8 +579,89 @@ int main() {
   assert(vulkan_texture.initialize(vulkan_context.physical_device(),
                                    vulkan_context.device(), vulkan_queue,
                                    vulkan_decoded));
+  // XEN-004: Vulkan samplers come from the sampling state the draw binds
+  // (the fetch constant with the shader's per-fetch filter overrides, or a
+  // texture mod's mip range), as D3D12's do - not from the state the texture
+  // image was created with.
+  xenon::gpu::vulkan::SamplerCache vulkan_samplers;
+  assert(vulkan_samplers.initialize(vulkan_context.physical_device(), vulkan_context.device()));
+  const auto vulkan_sampler = vulkan_samplers.get(vulkan_texture_descriptor);
+  assert(vulkan_sampler != VK_NULL_HANDLE);
+  assert(vulkan_samplers.get(vulkan_texture_descriptor) == vulkan_sampler);
+  {
+    auto overridden = vulkan_texture_descriptor;
+    overridden.mag_filter = overridden.mag_filter ? 0u : 1u;  // a tfetch filter override
+    const auto other = vulkan_samplers.get(overridden);
+    assert(other != VK_NULL_HANDLE && other != vulkan_sampler && vulkan_samplers.size() == 2u);
+    std::uint64_t unsupported = 0;
+    const auto info = xenon::gpu::vulkan::describe_sampler(overridden, true, unsupported);
+    assert(info.magFilter == (overridden.mag_filter ? VK_FILTER_LINEAR : VK_FILTER_NEAREST));
+    // Base-map mip filtering samples only the fetch's minimum level.
+    auto base_map = vulkan_texture_descriptor;
+    base_map.mip_filter = 2u;
+    base_map.mip_min_level = 1u;
+    base_map.mip_max_level = 4u;
+    const auto base_info = xenon::gpu::vulkan::describe_sampler(base_map, true, unsupported);
+    assert(base_info.minLod == 1.0f && base_info.maxLod == 1.0f);
+    assert(base_info.mipmapMode == VK_SAMPLER_MIPMAP_MODE_NEAREST);
+    base_map.mip_filter = 1u;
+    const auto linear_info = xenon::gpu::vulkan::describe_sampler(base_map, true, unsupported);
+    assert(linear_info.minLod == 1.0f && linear_info.maxLod == 4.0f);
+    assert(linear_info.mipmapMode == VK_SAMPLER_MIPMAP_MODE_LINEAR);
+    assert(unsupported == 0u);
+  }
   assert(vulkan_resources.bind_texture(0, xenon::gpu::TextureDimension::TwoDOrStacked,
-                                       vulkan_texture.view(), vulkan_texture.sampler()));
+                                       vulkan_texture.view(), vulkan_sampler));
+  // Regression (AC6 on Vulkan ran its menus at 17 fps): resolve readbacks
+  // were read by the CPU from uncached host-visible memory, ~40 ms each. A
+  // buffer the CPU reads back takes cached memory wherever the device has it.
+  {
+    VkPhysicalDeviceMemoryProperties memory_properties{};
+    vkGetPhysicalDeviceMemoryProperties(vulkan_context.physical_device(), &memory_properties);
+    constexpr VkMemoryPropertyFlags kCachedCoherent = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                                                      VK_MEMORY_PROPERTY_HOST_COHERENT_BIT |
+                                                      VK_MEMORY_PROPERTY_HOST_CACHED_BIT;
+    bool device_has_cached = false;
+    for (std::uint32_t i = 0; i < memory_properties.memoryTypeCount; ++i)
+      device_has_cached |=
+          (memory_properties.memoryTypes[i].propertyFlags & kCachedCoherent) == kCachedCoherent;
+    xenon::gpu::vulkan::Buffer readback;
+    assert(readback.initialize(vulkan_context.physical_device(), vulkan_context.device(), 65536,
+                               VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                               VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                                   VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                               xenon::gpu::vulkan::Buffer::kCpuReadback));
+    assert((readback.memory_properties() & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) != 0u);
+    if (device_has_cached)
+      assert((readback.memory_properties() & VK_MEMORY_PROPERTY_HOST_CACHED_BIT) != 0u);
+    std::cout << "Vulkan readback memory cached: "
+              << ((readback.memory_properties() & VK_MEMORY_PROPERTY_HOST_CACHED_BIT) ? "yes" : "no")
+              << std::endl;
+  }
+  // GPU V3: draw constants live in one dynamic uniform buffer per frame; a
+  // draw with nothing rebound since an earlier draw of the same batch reuses
+  // that draw's descriptor set with its own constants offset.
+  {
+    const auto written_before = vulkan_resources.sets_written();
+    const auto first = vulkan_resources.prepare_draw(1, 0);
+    const auto second = vulkan_resources.prepare_draw(1, 1);
+    assert(first.set != VK_NULL_HANDLE && second.set == first.set);
+    assert(second.constants_offset > first.constants_offset);
+    assert(vulkan_resources.bind_texture(0, xenon::gpu::TextureDimension::TwoDOrStacked,
+                                         vulkan_texture.view(), vulkan_sampler));
+    const auto third = vulkan_resources.prepare_draw(1, 2);
+    assert(third.set == first.set);
+    assert(vulkan_resources.bind_texture(1, xenon::gpu::TextureDimension::TwoDOrStacked,
+                                         vulkan_texture.view(), vulkan_sampler));
+    const auto fourth = vulkan_resources.prepare_draw(1, 3);
+    assert(fourth.set != VK_NULL_HANDLE && fourth.set != first.set);
+    assert(vulkan_resources.prepare_draw(1, 4).set == fourth.set);
+    // A new batch on frame 1 starts again at slot 0 and writes its own set.
+    const auto restarted = vulkan_resources.prepare_draw(1, 0);
+    assert(restarted.set == first.set && restarted.constants_offset == first.constants_offset);
+    assert(vulkan_resources.prepare_draw(2, 5).set != fourth.set);
+    assert(vulkan_resources.sets_written() == written_before + 4u);
+  }
   xenon::gpu::EdramSurfaceLayout vulkan_surface{
       0, 64, 64, xenon::gpu::MsaaSamples::X1, false, false};
   xenon::gpu::vulkan::RenderTargetImage vulkan_target;
@@ -549,6 +712,13 @@ int main() {
                          xenon::gpu::DepthRenderTargetFormat::D24S8,
                          1.0f, 0));
 #if defined(XENON_TEST_DXC)
+  const auto vulkan_unorm24_write = exact_unorm24_depth_write<xenon::gpu::vulkan::DepthTargetImage>(
+      vulkan_queue,
+      [&](xenon::gpu::vulkan::DepthTargetImage& image, const xenon::gpu::EdramSurfaceLayout& surface) {
+        return image.initialize(vulkan_context.physical_device(), vulkan_context.device(), surface,
+                                xenon::gpu::DepthRenderTargetFormat::D24S8);
+      },
+      "Vulkan");
   for (const auto depth_format : {
            xenon::gpu::DepthRenderTargetFormat::D24S8,
            xenon::gpu::DepthRenderTargetFormat::D24FS8}) {
@@ -573,6 +743,7 @@ int main() {
       assert(transfer_target.initialize(
           vulkan_context.physical_device(), vulkan_context.device(),
           transfer_surface, depth_format, test_case.native_2x));
+      transfer_target.set_unorm24_depth_write(vulkan_unorm24_write);
       validate_depth_sample_transfer_matrix(
           transfer_target, vulkan_queue, depth_format, test_case.msaa,
           test_case.force_x2_on_x4, "Vulkan");
@@ -963,6 +1134,84 @@ int main() {
     assert(resources.bind_texture(0, xenon::gpu::TextureDimension::TwoDOrStacked,
                                   texture.resource(), texture.format(), 1,
                                   texture_descriptor));
+    // GPU V3: a frame's descriptor tables live in one heap pair, bound once
+    // per command list. A draw with nothing rebound since an earlier draw of
+    // the same batch reuses that draw's tables; a rebinding gets a fresh copy
+    // in the next free region of the batch; a new batch on the frame never
+    // reuses the previous batch's tables; another frame uses its own heaps.
+    {
+      constexpr std::uint64_t kBatch = 100, kNextBatch = 101, kOtherFrameBatch = 102;
+      const auto copied_before = resources.tables_copied();
+      const auto reused_before = resources.tables_reused();
+      const auto first = resources.prepare_draw(1, 0, kBatch);
+      const auto second = resources.prepare_draw(1, 1, kBatch);
+      assert(first.valid && second.valid && !first.exhausted);
+      assert(first.resources.ptr && first.samplers.ptr && first.constants);
+      assert(second.resources.ptr == first.resources.ptr);
+      assert(second.samplers.ptr == first.samplers.ptr);
+      assert(second.constants != first.constants);
+      // Binding the same view and sampler again changes nothing.
+      assert(resources.bind_texture(0, xenon::gpu::TextureDimension::TwoDOrStacked,
+                                    texture.resource(), texture.format(), 1,
+                                    texture_descriptor));
+      const auto third = resources.prepare_draw(1, 2, kBatch);
+      assert(third.resources.ptr == first.resources.ptr);
+      // A new binding (slot 1's view and sampler) is copied into the batch's
+      // next region.
+      assert(resources.bind_texture(1, xenon::gpu::TextureDimension::TwoDOrStacked,
+                                    texture.resource(), texture.format(), 1,
+                                    texture_descriptor));
+      const auto fourth = resources.prepare_draw(1, 3, kBatch);
+      const auto resource_stride = std::uint64_t(xenon::gpu::d3d12::ResourceLayout::kResourceCount) *
+                                   context.device()->GetDescriptorHandleIncrementSize(
+                                       D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+      assert(fourth.resources.ptr == first.resources.ptr + resource_stride);
+      assert(fourth.samplers.ptr != first.samplers.ptr);
+      assert(fourth.memory_export.ptr > fourth.resources.ptr);
+      // Each draw slot keeps its own constants.
+      assert(fourth.constants == first.constants + 3u * xenon::gpu::kShaderConstantBufferBytes);
+      const auto fifth = resources.prepare_draw(1, 4, kBatch);
+      assert(fifth.resources.ptr == fourth.resources.ptr);
+      // A new batch on frame 1 copies its tables again, from the first region.
+      const auto restarted = resources.prepare_draw(1, 0, kNextBatch);
+      assert(restarted.resources.ptr == first.resources.ptr);
+      // Even at a later slot, a new batch never reuses the last batch's
+      // tables: the regions they lived in are being rewritten.
+      const auto copied_at_restart = resources.tables_copied();
+      const auto late = resources.prepare_draw(1, 9, kNextBatch + 10u);
+      assert(late.valid && resources.tables_copied() == copied_at_restart + 1u);
+      const auto other = resources.prepare_draw(2, 5, kOtherFrameBatch);
+      assert(other.resources.ptr ==
+             resources.resource_heap(2)->GetGPUDescriptorHandleForHeapStart().ptr);
+      assert(resources.resource_heap(1) != resources.resource_heap(2));
+      assert(resources.tables_copied() == copied_before + 5u);
+      assert(resources.tables_reused() == reused_before + 3u);
+
+      // A batch holds at most kSamplerRegions distinct sampler tables (the
+      // shader-visible sampler heap's 2048 descriptors): the next draw that
+      // needs one is refused as exhausted - its batch must be submitted - and
+      // the next batch has room again.
+      constexpr std::uint64_t kFullBatch = 200;
+      auto varied = texture_descriptor;
+      std::uint32_t slot = 0;
+      bool exhausted = false;
+      for (std::uint32_t draw = 0;
+           draw <= xenon::gpu::d3d12::ResourceLayout::kSamplerRegions; ++draw) {
+        varied.lod_bias = static_cast<std::int16_t>(draw + 1);  // a new sampler state
+        assert(resources.bind_texture(0, xenon::gpu::TextureDimension::TwoDOrStacked,
+                                      texture.resource(), texture.format(), 1, varied));
+        const auto tables = resources.prepare_draw(0, slot++, kFullBatch);
+        if (draw < xenon::gpu::d3d12::ResourceLayout::kSamplerRegions) {
+          assert(tables.valid && !tables.exhausted);
+        } else {
+          assert(!tables.valid && tables.exhausted);
+          exhausted = true;
+        }
+      }
+      assert(exhausted);
+      const auto next = resources.prepare_draw(0, 0, kFullBatch + 1u);
+      assert(next.valid && !next.exhausted);
+    }
     xenon::gpu::EdramSurfaceLayout d3d_surface{
         0, 64, 64, xenon::gpu::MsaaSamples::X1, false, false};
     xenon::gpu::d3d12::RenderTargetImage d3d_target;
@@ -998,6 +1247,14 @@ int main() {
                                  xenon::gpu::DepthRenderTargetFormat::D24S8));
     assert(d3d_depth.clear(queue, 1.0f, 0));
 #if defined(XENON_TEST_DXC)
+    const auto d3d12_unorm24_write = exact_unorm24_depth_write<xenon::gpu::d3d12::DepthTargetImage>(
+        queue,
+        [&](xenon::gpu::d3d12::DepthTargetImage& image,
+            const xenon::gpu::EdramSurfaceLayout& surface) {
+          return image.initialize(context.device(), surface,
+                                  xenon::gpu::DepthRenderTargetFormat::D24S8);
+        },
+        "D3D12");
     for (const auto depth_format : {
              xenon::gpu::DepthRenderTargetFormat::D24S8,
              xenon::gpu::DepthRenderTargetFormat::D24FS8}) {
@@ -1021,6 +1278,7 @@ int main() {
         xenon::gpu::d3d12::DepthTargetImage transfer_target;
         assert(transfer_target.initialize(context.device(), transfer_surface,
                                           depth_format, test_case.native_2x));
+        transfer_target.set_unorm24_depth_write(d3d12_unorm24_write);
         validate_depth_sample_transfer_matrix(
             transfer_target, queue, depth_format, test_case.msaa,
             test_case.force_x2_on_x4, "D3D12");
@@ -1135,19 +1393,16 @@ int main() {
       std::cerr << "D3D12 pipeline: " << d3d_pipeline.error() << '\n';
     assert(d3d_pipeline_ready);
     std::cout << "D3D12 pipeline ready\n";
-    resources.prepare_draw(0, 0);
+    const auto d3d_tables = resources.prepare_draw(0, 0, 1);
+    assert(d3d_tables.resources.ptr && d3d_tables.samplers.ptr && d3d_tables.constants);
     assert(queue.execute([&](ID3D12GraphicsCommandList* list) {
       list->SetPipelineState(d3d_pipeline.pipeline());
       list->SetGraphicsRootSignature(resources.root_signature());
-      ID3D12DescriptorHeap* heaps[]{resources.resource_heap(0, 0),
-                                    resources.sampler_heap(0, 0)};
+      ID3D12DescriptorHeap* heaps[]{resources.resource_heap(0), resources.sampler_heap(0)};
       list->SetDescriptorHeaps(2, heaps);
-      list->SetGraphicsRootConstantBufferView(
-          0, resources.constants_resource(0, 0)->GetGPUVirtualAddress());
-      list->SetGraphicsRootDescriptorTable(
-          1, resources.resource_heap(0, 0)->GetGPUDescriptorHandleForHeapStart());
-      list->SetGraphicsRootDescriptorTable(
-          2, resources.sampler_heap(0, 0)->GetGPUDescriptorHandleForHeapStart());
+      list->SetGraphicsRootConstantBufferView(0, d3d_tables.constants);
+      list->SetGraphicsRootDescriptorTable(1, d3d_tables.resources);
+      list->SetGraphicsRootDescriptorTable(2, d3d_tables.samplers);
       const D3D12_VIEWPORT viewport{0.0f, 0.0f, float(d3d_target.width()),
                                     float(d3d_target.height()), 0.0f, 1.0f};
       const D3D12_RECT scissor{0, 0, static_cast<LONG>(d3d_target.width()),
@@ -1312,6 +1567,26 @@ int main() {
       assert(acceptable_present_status(backend.present(frame)));
       std::cout << "D3D12 presentation: resized present\n";
       report_debug_layer_messages("D3D12 presentation: resize and present");
+      // Regression (AC6 crashed in the driver on going fullscreen): the
+      // window thread resizes while the GPU thread presents. Resizes from
+      // another thread are applied by the presents, never under them.
+      {
+        std::atomic<bool> resizing{true};
+        std::thread window_thread([&] {
+          for (int i = 0; i < 40; ++i) {
+            const std::uint32_t width = (i & 1) ? 160u : 128u;
+            const std::uint32_t height = (i & 1) ? 90u : 72u;
+            assert(backend.resize_presentation(width, height));
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+          }
+          resizing = false;
+        });
+        while (resizing) assert(acceptable_present_status(backend.present(frame)));
+        window_thread.join();
+        assert(acceptable_present_status(backend.present(frame)));
+      }
+      std::cout << "D3D12 presentation: resized from another thread while presenting\n";
+      report_debug_layer_messages("D3D12 presentation: concurrent resize");
     }
     report_debug_layer_messages("D3D12 presentation: backend teardown");
     DestroyWindow(window);

@@ -55,17 +55,22 @@ int main(){
     for(unsigned i=0;i<16;++i){ const auto expected=i<n?pattern.bytes[16-n+i]:0xEEu; assert(mem.read8(base+i)==expected); }
   }
 
-  // Element loads select the destination element from EA[0:3]. Other lanes
-  // are architecturally undefined; Xenon deterministically preserves them.
+  // Element loads: the addressed element lands in the lane EA[0:3] selects,
+  // and, as on the Xbox 360 (xenia-project/xenia PPC test instr_lvexx), every
+  // other lane holds the rest of the aligned quadword - not the register's
+  // old contents.
+  const auto quadword_loaded = [&](const Vector128& v) {
+    for (unsigned i = 0; i < 16; ++i)
+      if (v.bytes[i] != mem.read8(base + i)) return false;
+    return true;
+  };
   for (unsigned n = 0; n < 16; ++n) {
     s.vr[1] = pattern;
     mem.write8(base + n, static_cast<std::uint8_t>(0xE0u + n));
     s.gpr[3] = base + n;
     vmem_lvebx(s, mem, rt);
-    for (unsigned i = 0; i < 16; ++i) {
-      const auto expected = i == n ? static_cast<std::uint8_t>(0xE0u + n) : pattern.bytes[i];
-      assert(s.vr[1].bytes[i] == expected);
-    }
+    assert(s.vr[1].bytes[n] == static_cast<std::uint8_t>(0xE0u + n));
+    assert(quadword_loaded(s.vr[1]));
   }
   for (unsigned n = 0; n < 16; n += 2) {
     s.vr[1] = pattern;
@@ -73,9 +78,7 @@ int main(){
     s.gpr[3] = base + n + 1;
     vmem_lvehx(s, mem, rt);
     assert(s.vr[1].u16_be(n / 2) == static_cast<std::uint16_t>(0xA100u + n));
-    for (unsigned lane = 0; lane < 8; ++lane) {
-      if (lane != n / 2) assert(s.vr[1].u16_be(lane) == pattern.u16_be(lane));
-    }
+    assert(quadword_loaded(s.vr[1]));
   }
   for (unsigned n = 0; n < 16; n += 4) {
     s.vr[1] = pattern;
@@ -83,17 +86,15 @@ int main(){
     s.gpr[3] = base + n + 3;
     vmem_lvewx(s, mem, rt);
     assert(s.vr[1].u32_be(n / 4) == 0xA1B20000u + n);
-    for (unsigned lane = 0; lane < 4; ++lane) {
-      if (lane != n / 4) assert(s.vr[1].u32_be(lane) == pattern.u32_be(lane));
-    }
+    assert(quadword_loaded(s.vr[1]));
   }
-  // VMX128 word-element form has the same element semantics with extended VD.
+  // The VMX128 word-element form, with its extended VD.
   s.vr[1] = pattern;
   mem.write32_be(base + 12, 0xDEADBEEFu);
   s.gpr[3] = base + 15;
   vmem_lvewx128(s, mem, rt);
   assert(s.vr[1].u32_be(3) == 0xDEADBEEFu);
-  for (unsigned lane = 0; lane < 3; ++lane) assert(s.vr[1].u32_be(lane) == pattern.u32_be(lane));
+  assert(quadword_loaded(s.vr[1]));
 
   // Element stores select the vector element from EA[0:3] and align memory
   // to the element width.

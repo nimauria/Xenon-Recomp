@@ -1,3 +1,4 @@
+import { t } from "../localization";
 import { useEffect, useState } from "react";
 import type { Dlc, Game } from "../../contracts/launcher";
 import { useLauncher } from "./context";
@@ -47,13 +48,7 @@ export function GameAddons({ game }: { game: Game }) {
     folder = false,
     replacing = false,
   ) {
-    if (
-      replacing &&
-      !window.confirm(
-        "Replace this add-on's managed copy? Originals are kept, and the previous managed copy is retained until you delete this add-on's managed files.",
-      )
-    )
-      return;
+    if (replacing && !window.confirm(t("ui.be947aefcca2"))) return;
     const paths = await pick(folder ? "folder" : "multiple");
     if (paths.length)
       await action("dlc.import", {
@@ -66,22 +61,18 @@ export function GameAddons({ game }: { game: Game }) {
     if (
       window.confirm(
         dlc.managed
-          ? `Permanently delete all managed copies of “${dlc.name}”? Original source files are kept.`
-          : `Remove the reference to “${dlc.name}”? Original files are kept.`,
+          ? t("ui.7ce0ef93e717", { arg0: dlc.name })
+          : t("ui.543ca167c932", { arg0: dlc.name }),
       )
     )
       void action("dlc.remove", { id: game.id, dlcId: dlc.id });
   }
   return (
-    <section aria-label="Game add-ons">
-      <h3>Add-ons</h3>
-      <p>
-        Supply your own content. Selecting a catalogue entry records your
-        choice; content identity and compatibility still require the Xenon
-        adapter.
-      </p>
+    <section aria-label={t("ui.6b478486ef01")}>
+      <h3>{t("ui.ccfc53fcbd49")}</h3>
+      <p>{t("ui.4746843e3ae2")}</p>
       <label>
-        Search add-ons
+        {t("ui.eb005f7b45f6")}
         <input
           type="search"
           value={query}
@@ -92,7 +83,7 @@ export function GameAddons({ game }: { game: Game }) {
         />
       </label>
       <div className="dlc-list">
-        {!rows.length && <p>No add-ons match this view.</p>}
+        {!rows.length && <p>{t("ui.04c3d0e1cc24")}</p>}
         {rows.slice(0, limit).map((row) => (
           <article
             className="addon-row"
@@ -109,9 +100,9 @@ export function GameAddons({ game }: { game: Game }) {
             <small>
               {row.local
                 ? row.local.receiptVerified
-                  ? "Import receipt matched at last check"
-                  : "Imported · content identity not verified"
-                : "Not imported"}
+                  ? t("ui.808fdc6c3383")
+                  : t("ui.c4833139620e")
+                : t("ui.a37f7e6bfe00")}
             </small>
             <div className="actions">
               {row.catalogId && (
@@ -126,7 +117,7 @@ export function GameAddons({ game }: { game: Game }) {
                       )
                     }
                   >
-                    {row.local ? "Replace files" : "Import files"}
+                    {row.local ? t("ui.69d8c38cfb86") : t("ui.824ca255db35")}
                   </button>
                   <button
                     disabled={busy || state.mode !== "native"}
@@ -138,7 +129,7 @@ export function GameAddons({ game }: { game: Game }) {
                       )
                     }
                   >
-                    {row.local ? "Replace folder" : "Import folder"}
+                    {row.local ? t("ui.499d403c8a3a") : t("ui.b849e38fdb56")}
                   </button>
                 </>
               )}
@@ -154,7 +145,7 @@ export function GameAddons({ game }: { game: Game }) {
                       })
                     }
                   >
-                    Open folder
+                    {t("ui.6a9084025c4b")}
                   </button>
                   <button
                     disabled={busy || state.mode !== "native"}
@@ -165,15 +156,17 @@ export function GameAddons({ game }: { game: Game }) {
                       })
                     }
                   >
-                    {row.local.managed ? "Check copy" : "Check source"}
+                    {row.local.managed
+                      ? t("ui.530ed4fd16b8")
+                      : t("ui.9256cd68ef7e")}
                   </button>
                   <button
                     disabled={busy || state.mode !== "native"}
                     onClick={() => remove(row.local!)}
                   >
                     {row.local.managed
-                      ? "Delete managed copy"
-                      : "Remove reference"}
+                      ? t("ui.dfe8945029b7")
+                      : t("ui.cbeda6a6baa8")}
                   </button>
                 </>
               )}
@@ -183,7 +176,7 @@ export function GameAddons({ game }: { game: Game }) {
       </div>
       {rows.length > limit && (
         <button onClick={() => setLimit((value) => value + 32)}>
-          Show more add-ons
+          {t("ui.7bdd6b182da3")}
         </button>
       )}
       <div className="actions">
@@ -191,13 +184,13 @@ export function GameAddons({ game }: { game: Game }) {
           disabled={busy || state.mode !== "native"}
           onClick={() => void importContent()}
         >
-          Copy local DLC
+          {t("ui.eef80523f9c0")}
         </button>
         <button
           disabled={busy || state.mode !== "native"}
           onClick={() => void importContent(undefined, true)}
         >
-          Copy local DLC folder
+          {t("ui.3dd48064b639")}
         </button>
       </div>
     </section>

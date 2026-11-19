@@ -3,6 +3,7 @@
 #include "xenon/kernel/completion_port.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <memory>
@@ -459,9 +460,27 @@ bool nt_resume_thread_export(kernel::KernelProcess& process, ExportCallContext& 
 
   auto& thread = static_cast<kernel::KernelThread&>(*view.object);
   const auto previous = thread.suspend_count();
+  // Probe logs only: which step of a slow resume held its caller up. On the
+  // console a resume takes microseconds; AC6's main thread took 27-83 ms over
+  // three, long enough for a worker it resumed to reach a critical section
+  // the main thread had not initialized yet.
+  using Clock = std::chrono::steady_clock;
+  const auto resume_start = Clock::now();
   static_cast<void>(thread.resume());
+  const auto resumed = Clock::now();
   if (previous_count_ptr != 0u) {
     context.memory.write32_be(previous_count_ptr, previous);
+  }
+  const auto written = Clock::now();
+  const auto us = [](Clock::duration d) {
+    return static_cast<long long>(std::chrono::duration_cast<std::chrono::microseconds>(d).count());
+  };
+  if (written - resume_start > std::chrono::milliseconds(1)) {
+    logging::append_probe_log("slow_resume_diag.log",
+                              "NtResumeThread handle=0x%X thread=%u: resume %lld us, "
+                              "previous-count write %lld us\n",
+                              static_cast<unsigned>(handle), thread.thread_id(),
+                              us(resumed - resume_start), us(written - resumed));
   }
   context.cpu.gpr[3] = status::Success;
   return true;
@@ -477,14 +496,10 @@ bool nt_resume_thread_export(kernel::KernelProcess& process, ExportCallContext& 
 // authoritative over any in-flight register state, and already runs whether
 // termination happened via a preemptive safepoint OR (this export's own
 // case) the thread calling into a kernel export that terminates itself -
-// this only needs to flip that state; the dispatch loop and thread
-// trampoline that observe it, unwind cleanly, and report exit_code already
-// exist and need no changes. Xenon's dispatch loop observes termination at
-// its own safepoints rather than truly never returning to this call's own
-// C++ frame (documented latency, not a bug - see KernelThread::terminate()'s
-// comment) - guest code after this call may still execute a few more
-// instructions before the loop notices, matching how any other external
-// termination request already behaves.
+// this only needs to flip that state. The session's export boundary
+// (XenonSession::leave_guest_code_if_terminated()) sees the terminated
+// caller as this handler returns and unwinds it out of compiled code, so no
+// guest instruction after the call runs - titles place nothing valid there.
 bool ex_terminate_thread_export(kernel::KernelProcess& process, ExportCallContext& context) {
   const auto exit_code = static_cast<std::uint32_t>(context.cpu.gpr[3]);
   auto thread = process.thread_manager().current_thread();
@@ -731,11 +746,14 @@ bool nt_set_timer_ex_export(kernel::KernelProcess& process, ExportCallContext& c
 }
 
 // NtSignalAndWaitForSingleObjectEx (ordinal 0xFB / 251)
-// Guest ABI (verified against rexglue-sdk's
-// NtSignalAndWaitForSingleObjectEx_entry register mapping): r3 = signal
-// handle, r4 = wait handle, r5 = alertable (user APCs run,
-// STATUS_USER_APC), r6 = unused by that same reference
-// implementation, r7 = PLARGE_INTEGER timeout (nullable) -> r3 = NTSTATUS.
+// Guest ABI: r3 = signal handle, r4 = wait handle, r5 = wait mode, r6 =
+// alertable (user APCs run, STATUS_USER_APC), r7 = PLARGE_INTEGER timeout
+// (nullable) -> r3 = NTSTATUS. The same order as NtWaitForSingleObjectEx's
+// mode-then-alertable, and what XAPI's SignalObjectAndWait passes (AC6
+// 0x821F5868: r5 = 1, UserMode, always; r6 = the caller's bAlertable).
+// xenia and rexglue-sdk read alertable from r5, which makes every such wait
+// alertable: AC6's main thread then ran a queued XOVERLAPPED completion
+// APC whose routine field the title never set.
 // Signals signal_handle (Event -> Set, Semaphore -> Release(1), Mutant ->
 // Release) then waits on wait_handle. As on NT, the signal and the start of
 // the wait are one dispatcher operation (kernel::signal_and_wait_for_object):
@@ -749,7 +767,7 @@ bool nt_signal_and_wait_for_single_object_ex_export(kernel::KernelProcess& proce
                                                      ExportCallContext& context) {
   const auto signal_handle = static_cast<Handle>(context.cpu.gpr[3]);
   const auto wait_handle = static_cast<Handle>(context.cpu.gpr[4]);
-  const bool alertable = static_cast<std::uint32_t>(context.cpu.gpr[5]) != 0u;
+  const bool alertable = static_cast<std::uint32_t>(context.cpu.gpr[6]) != 0u;
   const auto timeout_ptr = static_cast<cpu::GuestAddress>(context.cpu.gpr[7]);
 
   HandleView signal_view{};

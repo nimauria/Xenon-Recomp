@@ -212,6 +212,10 @@ bool GraphicsPipeline::initialize(VkDevice device, VkPipelineLayout layout,
                                 ? VK_FRONT_FACE_CLOCKWISE
                                 : VK_FRONT_FACE_COUNTER_CLOCKWISE;
   rasterization.lineWidth = 1.0f;
+  // With PA_CL_CLIP_CNTL.CLIP_DISABLE nothing is clipped against Z either;
+  // depth is clamped to the viewport range instead (depthClamp is a required
+  // device feature).
+  rasterization.depthClampEnable = raster.clip_disabled ? VK_TRUE : VK_FALSE;
   const auto polygon_offset = preferred_polygon_offset(raster, topology);
   rasterization.depthBiasEnable = polygon_offset.enabled;
   rasterization.depthBiasConstantFactor = scaled_polygon_offset_constant(
@@ -283,8 +287,23 @@ bool GraphicsPipeline::initialize(VkDevice device, VkPipelineLayout layout,
   info.pColorBlendState = &blend;
   info.pDynamicState = &dynamic;
   info.layout = layout;
-  const auto result = vkCreateGraphicsPipelines(device_, VK_NULL_HANDLE, 1, &info,
+  // Whether the persistent cache supplied the pipeline (statistics).
+  VkPipelineCreationFeedback creation_feedback{};
+  std::array<VkPipelineCreationFeedback, 3> stage_feedback{};
+  VkPipelineCreationFeedbackCreateInfo feedback_info{
+      VK_STRUCTURE_TYPE_PIPELINE_CREATION_FEEDBACK_CREATE_INFO};
+  feedback_info.pPipelineCreationFeedback = &creation_feedback;
+  feedback_info.pipelineStageCreationFeedbackCount = info.stageCount;
+  feedback_info.pPipelineStageCreationFeedbacks = stage_feedback.data();
+  rendering.pNext = &feedback_info;
+  loaded_from_library_ = false;
+  const auto result = vkCreateGraphicsPipelines(device_, cache_, 1, &info,
                                                 nullptr, &pipeline_);
+  constexpr VkPipelineCreationFeedbackFlags kCacheHit =
+      VK_PIPELINE_CREATION_FEEDBACK_VALID_BIT |
+      VK_PIPELINE_CREATION_FEEDBACK_APPLICATION_PIPELINE_CACHE_HIT_BIT;
+  loaded_from_library_ = result == VK_SUCCESS && cache_ != VK_NULL_HANDLE &&
+                         (creation_feedback.flags & kCacheHit) == kCacheHit;
   if (geometry_module) vkDestroyShaderModule(device_, geometry_module, nullptr);
   vkDestroyShaderModule(device_, pixel_module, nullptr);
   vkDestroyShaderModule(device_, vertex_module, nullptr);

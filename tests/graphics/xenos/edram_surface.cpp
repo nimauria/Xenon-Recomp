@@ -191,10 +191,105 @@ void test_direct_transfer_reads_the_sample_holding_the_same_word() {
   assert(!edram_direct_transfer_supported(full, wide_even, first_tile));
 }
 
+// The converting transfer takes exactly the 32bpp views whose host value
+// carries every EDRAM word bit for bit: unorm and 32-bit float color stored
+// as their own encoding, 16-bit float through its integer view (GPUs
+// canonicalize a half NaN through a float view, so 0xFF00 would come back
+// 0x7FFF), and both depth formats. Views stored at another precision (gamma
+// in 16-bit unorm, 16-bit fixed, 7e3 float) and 64bpp are refused and keep
+// the exact CPU path.
+void test_converting_transfer_formats() {
+  const auto color = [](ColorRenderTargetFormat f) {
+    return EdramTransferEndpoint{false, std::uint8_t(f)};
+  };
+  const auto depth = [](DepthRenderTargetFormat f) {
+    return EdramTransferEndpoint{true, std::uint8_t(f)};
+  };
+  const std::array accepted{color(ColorRenderTargetFormat::R8G8B8A8),
+                            color(ColorRenderTargetFormat::R10G10B10A2),
+                            color(ColorRenderTargetFormat::R10G10B10A2As10),
+                            color(ColorRenderTargetFormat::R16G16Float),
+                            color(ColorRenderTargetFormat::R32Float),
+                            depth(DepthRenderTargetFormat::D24S8),
+                            depth(DepthRenderTargetFormat::D24FS8)};
+  for (const auto& a : accepted)
+    for (const auto& b : accepted) assert(edram_converting_transfer_supported(a, b));
+  for (const auto refused : {ColorRenderTargetFormat::R8G8B8A8Gamma,
+                             ColorRenderTargetFormat::R16G16Fixed,
+                             ColorRenderTargetFormat::R10G10B10A2Float,
+                             ColorRenderTargetFormat::R16G16B16A16Float,
+                             ColorRenderTargetFormat::R32G32Float}) {
+    assert(!edram_converting_transfer_supported(color(refused), accepted.front()));
+    assert(!edram_converting_transfer_supported(accepted.back(), color(refused)));
+  }
+  // Which host storages transfer through an integer view: the 16-bit float
+  // ones, whatever guest format they hold.
+  assert(color_host_transfers_as_integer(ColorRenderTargetFormat::R16G16Float));
+  assert(color_host_transfers_as_integer(ColorRenderTargetFormat::R16G16B16A16Float));
+  assert(color_host_transfers_as_integer(ColorRenderTargetFormat::R16G16Fixed));
+  assert(!color_host_transfers_as_integer(ColorRenderTargetFormat::R8G8B8A8));
+  assert(!color_host_transfers_as_integer(ColorRenderTargetFormat::R32Float));
+  assert(!color_host_transfers_as_integer(ColorRenderTargetFormat::R8G8B8A8Gamma));
+}
+
+// Native images are sized to whole tile rows, so an image holds every tile it
+// owns whole and hands them to another view on the GPU. AC6's 640x360 scene
+// ends half way down a tile row; its 1280x720 view of the same tiles took them
+// through a CPU readback every frame.
+void test_whole_tile_heights() {
+  // 16 sample rows per tile: 16 pixel rows unsampled, 8 with 2x or 4x MSAA.
+  assert(whole_tile_height_pixels({0, 640, 360, MsaaSamples::X1, false, false}) == 368u);
+  assert(whole_tile_height_pixels({0, 640, 368, MsaaSamples::X1, false, false}) == 368u);
+  assert(whole_tile_height_pixels({0, 640, 1, MsaaSamples::X1, false, false}) == 16u);
+  assert(whole_tile_height_pixels({0, 640, 361, MsaaSamples::X2, false, true}) == 368u);
+  assert(whole_tile_height_pixels({0, 640, 360, MsaaSamples::X4, false, false}) == 360u);
+  // A 640x368 image holds the partial tile row 640x360 owns, so the move to
+  // the 1280x720 view of the same tiles is a direct (GPU) transfer.
+  const EdramSurfaceLayout scene{0, 640, 368, MsaaSamples::X1, false, false};
+  const EdramSurfaceLayout view{0, 1280, 720, MsaaSamples::X1, false, false};
+  const auto tiles =
+      covered_edram_tiles({0, 640, 360, MsaaSamples::X1, false, false}, {0, 0, 640, 360});
+  assert(edram_direct_transfer_supported(scene, view, tiles));
+  assert(!edram_direct_transfer_supported({0, 640, 360, MsaaSamples::X1, false, false}, view,
+                                          tiles));
+}
+
+// Regression: a 16_16_FLOAT (and 16_16_16_16_FLOAT) word lost bits on its
+// way through the CPU - float_to_half() shifted half denormals 13 bits short
+// (0x0005 came back 0xA000) and turned every NaN into 0x7E00 - so importing
+// or repacking such a surface changed EDRAM words the Xbox keeps. Every
+// 16-bit pattern, in both halves, must come back unchanged through the
+// guest-word codec and through the host storage.
+void test_half_float_words_round_trip() {
+  for (const auto format :
+       {ColorRenderTargetFormat::R16G16Float, ColorRenderTargetFormat::R16G16B16A16Float}) {
+    const bool wide = format == ColorRenderTargetFormat::R16G16B16A16Float;
+    for (std::uint32_t h = 0; h < 0x10000u; ++h) {
+      const std::array<std::uint32_t, 2> word{h | ((h ^ 0x8001u) << 16u),
+                                              wide ? ((h ^ 0x7C00u) | (h << 16u)) : 0u};
+      const auto sample = unpack_color_sample(format, word);
+      const auto packed = pack_color_sample(format, sample);
+      if (packed != word) {
+        std::cerr << "half word 0x" << std::hex << word[0] << ' ' << word[1] << " came back 0x"
+                  << packed[0] << ' ' << packed[1] << std::dec << '\n';
+        assert(false);
+      }
+      std::array<std::byte, 8> host{};
+      assert(encode_host_color_sample(format, sample, host));
+      ColorSample decoded{};
+      assert(decode_host_color_sample(format, host, decoded));
+      assert(pack_color_sample(format, decoded) == word);
+    }
+  }
+}
+
 }  // namespace
 
 int main() {
+  test_half_float_words_round_trip();
+  test_whole_tile_heights();
   test_direct_transfer_reads_the_sample_holding_the_same_word();
+  test_converting_transfer_formats();
   test_bound_surfaces_do_not_overlap();
   test_covered_tiles_match_the_per_sample_definition();
   test_tile_regions_cover_exactly_the_tiles();
@@ -215,6 +310,27 @@ int main() {
   assert(single.hash() != shorter.hash());
   shorter.base_tile++;
   assert(single.identity_hash() != shorter.identity_hash());
+  // Keys are exact: surfaces that differ in any identity field never share
+  // one, and the height only enters hash().
+  {
+    std::vector<std::uint64_t> keys;
+    for (std::uint32_t base : {0u, 1u, 720u, 2047u})
+      for (std::uint32_t pitch : {80u, 640u, 1280u, 8192u})
+        for (auto msaa : {MsaaSamples::X1, MsaaSamples::X2, MsaaSamples::X4})
+          for (bool wide : {false, true})
+            for (bool depth : {false, true}) {
+              const EdramSurfaceLayout surface{base, pitch, 368u, msaa, wide, depth};
+              keys.push_back(surface.identity_hash());
+              auto taller = surface;
+              taller.height_pixels = 720u;
+              assert(taller.identity_hash() == surface.identity_hash());
+              assert(taller.hash() != surface.hash());
+              // Callers tag bits 56 and up; the identity never reaches them.
+              assert((surface.identity_hash() >> 56u) == 0u);
+            }
+    std::sort(keys.begin(), keys.end());
+    assert(std::adjacent_find(keys.begin(), keys.end()) == keys.end());
+  }
 
   EdramSurfaceLayout msaa2{1008, 1120, 720, MsaaSamples::X2, false, true};
   assert(msaa2.sample_width() == 1120 && msaa2.sample_height() == 1440);

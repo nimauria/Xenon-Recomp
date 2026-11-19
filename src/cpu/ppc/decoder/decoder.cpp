@@ -23,9 +23,17 @@ struct RawOpcodeInfo {
   RawOpcodeInfo{PATTERN, mask_for_format(InstructionFormat::FORMAT), NAME, \
                 InstructionFormat::FORMAT, InstructionGroup::GROUP, \
                 InstructionType::TYPE},
+// XM(pattern, extra mask, mnemonic, format, group, type): an encoding that
+// also fixes operand bits its format leaves free (vupkhsh128 is vupkhsb128
+// with VA128 = 0x60), so it decodes ahead of the general form.
+#define XM(PATTERN, EXTRA, NAME, FORMAT, GROUP, TYPE) \
+  RawOpcodeInfo{PATTERN, mask_for_format(InstructionFormat::FORMAT) | (EXTRA), NAME, \
+                InstructionFormat::FORMAT, InstructionGroup::GROUP, \
+                InstructionType::TYPE},
 static constexpr RawOpcodeInfo kRawCatalog[] = {
 #include "opcode_catalog.inc"
 };
+#undef XM
 #undef X
 
 constexpr std::size_t kCatalogSize = std::size(kRawCatalog);

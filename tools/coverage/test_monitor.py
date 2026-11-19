@@ -443,7 +443,8 @@ def git_env(name="dev", email="dev@example.com"):
 
 
 def sh(cwd, *args, env=None):
-    return subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True, text=True,
+    command = ["git", *(["--git-dir", "."] if cwd.name.endswith(".git") else []), *args]
+    return subprocess.run(command, cwd=cwd, check=True, capture_output=True, text=True,
                           env=env or git_env()).stdout.strip()
 
 

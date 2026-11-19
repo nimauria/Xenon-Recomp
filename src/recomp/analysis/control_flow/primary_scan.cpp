@@ -7,6 +7,49 @@
 
 namespace xenon::recomp::detail {
 
+void CandidateScan::note_address_taken_code(const cpu::DecodedInstruction& instruction,
+                                            const value_analysis::PpcValueTracker& values) {
+  const auto mnemonic = instruction.mnemonic();
+  std::uint32_t destination = 0u;
+  if (mnemonic == "addi") destination = instruction.rt();
+  else if (mnemonic == "ori") destination = instruction.ra();
+  else return;
+  const auto& value = values.gpr(destination);
+  if (value.kind != value_analysis::AbstractValueKind::Address &&
+      value.kind != value_analysis::AbstractValueKind::AddressPlusOffset)
+    return;
+  const auto target = value.exact_u32();
+  if (!target || !ExecutableRangeIndex::is_aligned_ppc_address(*target) ||
+      !ctx.range_index.is_executable_address(*target))
+    return;
+  // This function's own code, already scanned: an internal address.
+  if (*target >= function.guest_start && *target <= instruction.address) return;
+  const auto* code = executable_section(ctx.range_index, *target);
+  if (!code || *target < code->virtual_address) return;
+  const auto target_offset = static_cast<std::size_t>(*target - code->virtual_address);
+  if (target_offset + 4u > code->bytes.size() || !decoder.decode(*target, be32(code->bytes, target_offset)).valid())
+    return;
+  // A function boundary: the section start, or - past any zero alignment
+  // padding - an unconditional return (blr) or tail branch (b). A bctr is
+  // excluded: compilers place switch tables right after it.
+  if (target_offset == 0u) {
+    result.discovered.push_back({*target, DiscoverySource::AddressTakenCode});
+    return;
+  }
+  constexpr std::size_t kMaxPaddingWords = 16u;
+  for (std::size_t before = target_offset, words_back = 0; before >= 4u && words_back <= kMaxPaddingWords;
+       ++words_back) {
+    before -= 4u;
+    const auto word = be32(code->bytes, before);
+    if (word == 0u) continue;
+    const auto previous = decoder.decode(code->virtual_address + static_cast<GuestAddress>(before), word);
+    if (previous.valid() && is_terminal(previous) &&
+        (previous.mnemonic() == "bclrx" || previous.info->format == cpu::InstructionFormat::I))
+      result.discovered.push_back({*target, DiscoverySource::AddressTakenCode});
+    return;
+  }
+}
+
 // Linear decode of the candidate's primary range: records calls, branches and
 // indirect-flow resolutions, and stops at a terminal branch, a hinted
 // non-code region, an instruction-pattern match, an undecodable word, or the
@@ -63,6 +106,22 @@ void scan_primary_range(CandidateScan& scan) {
     }
     const auto instruction = decoder.decode(address, word);
     if (!instruction.valid()) {
+      // A function may end in a call that never returns (ExitThread, an
+      // assert or abort helper), followed by padding. Then the undecodable
+      // word after the final `bl` is past the function, not inside it - unless
+      // one of the function's own branches reaches it or beyond. AC6's audio
+      // worker thread 0x82379938 ends `bl 0x82380B18; .long 0`; rejecting it
+      // left the thread's whole loop to the interpreter.
+      const bool after_final_call =
+          !words.empty() && (words.back() >> 26u) == 18u && (words.back() & 1u) != 0u &&
+          std::none_of(pending_direct_branch_targets.begin(), pending_direct_branch_targets.end(),
+                       [address](const auto& pending) { return pending.first >= address; });
+      if (after_final_call) {
+        result.warnings.push_back("function 0x" + hex_string(start) + " ends in a call at 0x" +
+                                  hex_string(address - 4u) + " followed by non-code");
+        function.guest_end = address;
+        break;
+      }
       const std::string classification = classify_decode_failure(word);
       function.error = (classification == "invalid-ppc" ? "invalid PPC at 0x" : "unsupported PPC encoding at 0x") +
                        [&] { std::ostringstream s; s << std::hex << address; return s.str(); }();
@@ -170,6 +229,8 @@ void scan_primary_range(CandidateScan& scan) {
               ++result.resolved_indirect_via_backward_slice;
             if (indirect_resolution.kind == value_analysis::IndirectResolverKind::ReadOnlyTable)
               ++result.resolved_indirect_via_readonly_table;
+            if (indirect_resolution.kind == value_analysis::IndirectResolverKind::JumpTable)
+              ++result.resolved_indirect_via_jump_table;
             for (const auto target : indirect_resolution.targets) {
               if (instruction.lk()) {
                 function.calls.push_back(target);
@@ -187,7 +248,8 @@ void scan_primary_range(CandidateScan& scan) {
                                             : DiscoverySource::ResolvedIndirectBranch});
             }
             if (indirect_resolution.kind == value_analysis::IndirectResolverKind::BackwardSlice ||
-                indirect_resolution.kind == value_analysis::IndirectResolverKind::ReadOnlyTable) {
+                indirect_resolution.kind == value_analysis::IndirectResolverKind::ReadOnlyTable ||
+                indirect_resolution.kind == value_analysis::IndirectResolverKind::JumpTable) {
               std::string detail = "resolved indirect " +
                   std::string(value_analysis::indirect_resolver_name(indirect_resolution.kind)) +
                   " at 0x" + hex_string(address);
@@ -240,6 +302,7 @@ void scan_primary_range(CandidateScan& scan) {
     value_history.push_back(instruction);
     if (value_history.size() > 96u) value_history.erase(value_history.begin(), value_history.begin() + 32u);
     value_tracker.step(instruction);
+    scan.note_address_taken_code(instruction, value_tracker);
     function.guest_end = address + 4;
     if (metadata_end && address + 4u >= *metadata_end) {
       function.guest_end = address + 4u;

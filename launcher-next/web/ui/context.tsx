@@ -1,3 +1,4 @@
+import { t } from "../localization";
 import {
   createContext,
   useContext,
@@ -19,7 +20,8 @@ export interface LauncherContext {
   state: Snapshot;
   busy: boolean;
   query: string;
-  navigate: (page: Page) => void;
+  setQuery: (query: string) => void;
+  navigate: (page: Page, targetId?: string, section?: string) => void;
   openGame: (id: string) => void;
   libraryBrowse: LibraryBrowse;
   setLibraryBrowse: Dispatch<SetStateAction<LibraryBrowse>>;
@@ -63,7 +65,7 @@ export function Modal({
   const dialog = useRef<HTMLDialogElement>(null);
   const titleId = useId();
   function dismiss() {
-    if (!dirty || window.confirm("Discard unsaved changes?")) close();
+    if (!dirty || window.confirm(t("ui.470e7ee2a579"))) close();
   }
   useEffect(() => {
     const node = dialog.current!;
@@ -99,7 +101,7 @@ export function Modal({
       <section>
         <div className="heading">
           <h2 id={titleId}>{title}</h2>
-          <button aria-label="Close dialog" onClick={dismiss}>
+          <button aria-label={t("ui.c8df66c5fe3f")} onClick={dismiss}>
             ×
           </button>
         </div>

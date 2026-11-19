@@ -102,7 +102,12 @@ void test_persistence_roundtrip() {
 
 void test_profiles_apply_before_packet_comparison() {
   input::InputSystem system;
-  auto driver = std::make_unique<input::KeyboardMouseInputDriver>();
+  // Bound explicitly: the default layout puts D on the D-pad, and this test
+  // needs a full-scale left-stick deflection for the profile to transform.
+  auto options = input::default_keyboard_mouse_options();
+  options.key_bindings = {{static_cast<input::KeyCode>(input::Key::D),
+                           input::VirtualControl::LeftStickRight}};
+  auto driver = std::make_unique<input::KeyboardMouseInputDriver>(std::move(options));
   auto* keyboard = driver.get();
   assert(system.add_driver(std::move(driver)));
   assert(system.setup() == input::Result::Success);

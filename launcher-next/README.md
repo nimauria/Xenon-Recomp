@@ -1,6 +1,6 @@
 # Xenon Launcher Next
 
-Separate CEF + React/TypeScript launcher conversion. The retired Qt launcher is kept locally under ignored `../launcher/`; it is no longer versioned. Xenon runtime builds remain separate. **The Windows desktop package runs; full legacy feature parity is still in progress.** See [MIGRATION_STATUS.md](MIGRATION_STATUS.md) for verified work and remaining gaps.
+Separate CEF + React/TypeScript launcher conversion. The retired Qt launcher is kept locally under ignored `../launcher/`; it is no longer versioned. Xenon runtime builds remain separate. **Windows and Linux native builds pass; remaining acceptance gates are recorded separately from feature implementation.** See [MIGRATION_STATUS.md](MIGRATION_STATUS.md) for verified work and remaining gaps.
 
 The [design direction](DESIGN_DIRECTION.md) combines Steam's page structure, GOG GALAXY's collection browsing and COGBox's focused game view with Xenon's existing themes. Navigation, shared controls and library presentation are being established during conversion; larger new product features follow parity.
 
@@ -27,6 +27,7 @@ Browser preview uses its own localStorage. Native imports, package installation,
 
 ## Implemented conversion slices
 
+- English master catalogue and French/German/Spanish UI translations, persistent language selection, translated command search and safe English fallback. See [LOCALIZATION.md](LOCALIZATION.md) for authoring and remaining native-message work.
 - CEF Views desktop window, sandbox bootstrap on Windows, packaged local assets, origin-restricted asynchronous command bridge, bounded native worker queue and renderer error logging.
 - Original System/Xenon Dark/Carbon/Industrial/Light theme catalogue, palettes, all seven raster backgrounds, decorative SVGs and branding. Accent presets/custom colour, corners, per-theme backgrounds, intensity, decorations, panel transparency, high contrast, text scaling, reduced motion and system appearance changes.
 - Library source registration, search/filter/sort, virtualized list/grid and optional carousel, favourites, metadata/module association, local module cover/hero artwork, local DLC references and source-path checks. Registration does not assert game compatibility or integrity.
@@ -37,9 +38,20 @@ Browser preview uses its own localStorage. Native imports, package installation,
 - Background module ZIP jobs with progress, cancellation before commit, retry, interrupted-work recovery and persistent shell status. A renderer reload leaves the native job running. See [JOBS.md](JOBS.md).
 - Visible pre-React loading/error screens, a React render error boundary and a native main-document failure page. Failed startup does not silently reset state.
 
-The original registry/catalogue schema, cached/bundled entries, native HTTPS, verified release downloads, module updates/install/rollback and update history are connected. Captures use an asynchronous bounded index and virtualized thumbnails with zoom/navigation. Copied legacy data can be reviewed and imported under Settings ? General, with backups and unchanged originals.
+Game modules are discovered and installed directly from Xenon-Modules under `games/<contributor>/<game>/`, with per-file SHA-256 checks and digest-based updates. No game releases or separate game repositories are required. See [module distribution](../docs/modules/GITHUB_MODULE_RELEASES.md). Cached/bundled entries, staged installation, rollback and update history are connected. Captures use an asynchronous bounded index and virtualized thumbnails with zoom/navigation. Copied legacy data can be reviewed and imported under Settings → General, with backups and unchanged originals.
 
-Some surfaces remain partial: launcher self-replacement, full log sanitization, remaining library workflows, input-provider routing and production runtime integration. A converted page is not evidence of parity.
+The production session bridge can now use the real Xenon runtime host. Settings → Runtime selects a host; an explicit `--runtime-host` or a host beside the launcher is also supported. See [INTEGRATION.md](INTEGRATION.md) for running, verified evidence and the remaining preparation/content/live-service work. Native-message translation, Mac and broader accessibility/distribution checks remain open. Optional Discord presence has an opt-in local IPC provider.
+
+## Planned graphics controls
+
+The [graphics menu plan](../docs/graphics/LAUNCHER_GRAPHICS_MENU_PLAN.md)
+describes global/per-game reconstruction, frame-generation controls and
+reporting of the active renderer state. It accompanies the
+[shared XeSS/FSR/DLSS plan](../docs/graphics/UPSCALING_FRAME_GENERATION_PLAN.md)
+and [per-game rendering support plan](../docs/graphics/UNIVERSAL_RENDERING_SUPPORT_PLAN.md).
+These controls and SDK integrations are planned, not implemented launcher
+features. The existing runtime-host bridge does not establish enhancement
+support or title playability.
 
 ## Native builds and validation
 
@@ -70,7 +82,7 @@ For background installation/cancellation/retry tests, start another isolated deb
 
 An explicit `--fixture-host="C:\path\to\launcher-next\build\native\xenon_launcher_fixture_host.exe"` argument enables the separate test-process adapter. With registered test content, `node scripts/smoke-session.mjs` verifies the launch handshake, asynchronous stop and history. The fixture runs no game or Xenon code. Normal launches do not discover or enable it. `node scripts/smoke-restart.mjs` checks a safe-mode restart against an isolated debug instance.
 
-Linux core builds use the same CMake project. A CEF desktop build additionally needs the matching SDK (`npm run cef:fetch`), platform dependencies and `-DXENON_NEXT_BUILD_DESKTOP=ON -DCEF_ROOT=...`. Linux desktop code is not yet live-validated here. macOS core/platform seams exist, but the required helper application bundles remain an explicit desktop-build blocker; do not advertise macOS desktop support yet.
+Linux core builds use the same CMake project. A CEF desktop build additionally needs the matching SDK (`npm run cef:fetch`), platform dependencies and `-DXENON_NEXT_BUILD_DESKTOP=ON -DCEF_ROOT=...`. Linux has passed sandbox-enabled Xvfb startup and the four-language smoke checks in the isolated Ubuntu validation container. macOS now has main/helper bundles, dynamic framework loading, native preference discovery and a CI build lane; its first real build/runtime result remains unverified.
 
 ## Source ownership
 
@@ -88,7 +100,7 @@ The converters read the original launcher and write only this folder. C++ servic
 
 Re-running those legacy converters requires the locally retained `../launcher` sources; normal builds use the converted contracts and assets already in this project.
 
-The baseline [migration plan](MIGRATION_PLAN.md) and [legacy inventory](LEGACY_INVENTORY.md) are retained here. Conversion scripts also require that local source tree. Full parity, platform, migration and packaging gates remain open.
+The completed migration inventory is summarised in [MIGRATION_STATUS.md](MIGRATION_STATUS.md), alongside remaining platform, migration and packaging acceptance. Legacy conversion scripts still require the local source tree; normal builds do not.
 
 Additional isolated desktop checks: `node scripts/smoke-profiles.mjs` (requires the explicit runtime fixture), `node scripts/smoke-captures.mjs`, `node scripts/smoke-migration.mjs`, and `node scripts/smoke-crash.mjs`. Test windows are closed when each check finishes; they are separate from the normal launcher. For network checks, generate `node scripts/create-network-fixtures.mjs`, start with `--fixture-network="<absolute build/network-fixtures>"` and run `npm run test:network`.
 
@@ -100,4 +112,36 @@ Automatic replacement is offered only by a marked packaged Windows installation,
 
 `create-updater-fixture.mjs <old-payload> <new-package.zip>` and `smoke-updater.mjs` exercise isolated real package replacement. Additional checks are `test:library`, `test:services`, `test:shell`, `scripts/smoke-parity-actions.mjs`, `scripts/smoke-dlc-catalog.mjs` and `scripts/smoke-startup-failure.mjs <isolated-fixture-data>`. Chooser selection remains a manual gate; automated content fixtures use native RPC.
 
-See [the individual parity audit](MIGRATION_PARITY.md) and [current migration gates](MIGRATION_STATUS.md). The original 183 invokable methods and 55 QML components are accounted for; remaining partial flows and platform/performance/accessibility gates are explicitly open.
+See the [current migration evidence and gates](MIGRATION_STATUS.md). The original 183 invokable methods and 55 QML components were accounted for; platform/performance/accessibility and live-provider acceptance remain open.
+
+`npm run test:media` and `npm run test:modules` require fresh isolated desktop instances with the explicit fixture host and debug endpoint described above. They exercise grouped discs/primary launch sources, metadata/unsaved changes, separate test activity, API declaration checks and owned-module uninstall. Their source paths and deletion requests use native RPC; the operating-system picker remains a separate acceptance gate. See [JOBS.md](JOBS.md) for ownership, cancellation and interrupted-deletion behaviour, and [MIGRATION_STATUS.md](MIGRATION_STATUS.md) for recorded suite results and compatibility boundaries.
+
+`npm run test:presentation-paths -- build/presentation-paths-network` additionally requires a local network fixture generated with `node scripts/create-network-fixtures.mjs build/presentation-paths-network` and the desktop arguments `--fixture-network="<absolute fixture folder>" --fixture-host="<absolute fixture host>"`. It checks catalogue text/artwork/DLC refresh, unsaved-edit protection, storage defaults/reset, decoded captures, build information and launch paths. Use a new isolated data directory; omit `--offline` so the explicit network fixture is selected. No real network service is used.
+
+Settings > Paths shows working destinations separately from fixed launcher storage. Game/save/module/capture destination changes affect future imports/launches and keep existing files at their recorded locations. Cache changes queue a verified copy of managed artwork/downloads and update package references atomically; previous copies are retained and listed by their managed subfolders. Browser cache stays with launcher data. Profile/settings data is stored together in `state.json`; unused old profile-folder values and cache values not yet applied remain visible for review. A different launcher data root can be supplied with `--data-dir` at startup.
+
+`npm run test:profile-cache -- build/profile-cache-network` uses a fresh isolated desktop instance with `--fixture-network="<absolute fixture folder>"` and the debug endpoint. Generate that fixture first with `node scripts/create-network-fixtures.mjs build/profile-cache-network`; omit `--offline`. It tests Unicode profile creation/copy/import and inline duplicate errors, cache copy/reset/reload/image decoding, installation from copied packages, future downloads and unsupported-provider controls. Cache destination/source selection uses native RPC; no real network service is contacted.
+
+Profile names use pinned Unicode 17.0 data in both native and preview validation. The mapping is locale-independent scalar lowercase with Unicode whitespace trimming, preserving display names and the 48 UTF-16-unit limit; it does not add case folding or Unicode normalization. Metadata edits to older Unicode-equivalent display names remain possible without forced renaming, while new duplicates are rejected. `node scripts/generate-profile-unicode.mjs` reproduces both tables using a Node build with Unicode 17.0. Normal builds use the checked-in data and do not regenerate it. The Unicode licence ships with the package. The baseline is the original locale-independent [QString lowercase policy](https://doc.qt.io/qt-6/qstring.html#toLower); the new launcher has no Qt dependency.
+
+Legacy feature names map through `web/features.ts` to explicit capability gates. Runtime network status, runtime network configuration and the launcher's own update transport have separate availability. Unknown names return false; the [status record](MIGRATION_STATUS.md#compatibility-boundaries-retained-from-migration) summarises the preserved boundaries.
+
+The [performance record](PERFORMANCE.md) includes process-startup samples and isolated 0/100/1,000/10,000-entry library measurements, runners and limits. Platform, total-memory and physical-input acceptance remain open.
+
+## Populated developer demo
+
+After building the desktop, run `npm run demo` for a persistent sample library, or `npm run demo:fresh` for a new isolated copy. Four fictional games, two profiles, original Xenon artwork, captures, notifications and sample jobs make the pages reviewable. Local verified packages exercise download, install and update actions; the explicit test host exercises sessions without running Xenon or a game. A visible banner identifies the demo.
+
+Demo files stay below `build/demo/`; normal launcher data is separate. No sample library is shipped or automatically added to a normal launch. Use `npm run demo -- --prepare-only` to generate the samples without opening a window.
+
+Updates is a dedicated page for launcher/module releases. Download and Install controls remain visible with explanations when unavailable. Downloads also lists verified packages that are ready to install, including packages whose old job records were cleared.
+
+Discover exposes catalogue search and platform/installed/downloaded filters as a normal page. Home's Needs attention shortcuts lead to ready packages, updates, failed jobs and missing sources. See [current evidence](MIGRATION_STATUS.md) and [planned product follow-ups](DESIGN_DIRECTION.md#planned-product-follow-ups).
+
+## Per-game settings and repeatable acceptance
+
+Every selected game has **Game settings**, also available in its action menu. Graphics, Audio, Controls and Game Options are saved for that game only. Unchecked overrides inherit active-profile/launcher values; game options inherit module defaults. Saving is atomic, changes apply on the next launch, and settings for the active game are locked. The separate **Module defaults** control intentionally changes shared defaults.
+
+`npm run test:acceptance` runs isolated CEF workflows with fresh data, local fixtures and owned processes. Pass scenario names to narrow a run, for example `npm run test:acceptance -- game-settings controller localization profile-cache`. Reports live under ignored `build/desktop-validation-*`. `XENON_TEST_DESKTOP` selects an already packaged payload; `XENON_TEST_BUILD` selects the native fixture build. Tests never opt into real Discord publication.
+
+`npm run desktop:build` and `npm run desktop:package -- --skip-build` select the host platform. Windows produces a ZIP; Linux/macOS produce a tar.gz with a SHA-256 sidecar. macOS packages still require real build, signing/notarization and runtime acceptance before distribution. Linux distributions need compatible CEF system libraries and a supported sandbox configuration. No Node, Qt or development server is shipped.

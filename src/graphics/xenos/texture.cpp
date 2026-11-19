@@ -1,4 +1,5 @@
 #include "xenon/gpu/texture.hpp"
+#include "xenon/gpu/depth_format.hpp"
 #include "xenon/memory/address_space.hpp"
 
 #include <algorithm>
@@ -27,6 +28,13 @@ constexpr TextureFormatInfo f(std::uint8_t id, std::string_view name,
   return {id, name, storage, bw, bh, bpp, host};
 }
 
+// A depth format sampled as float32 depth, replicated to every component.
+constexpr TextureFormatInfo sampled_depth(std::uint8_t id, std::string_view name,
+                                          TextureLoad load) {
+  return {id, name, TextureStorage::Uncompressed, 1, 1, 32, TextureHostFormat::R32Float, load,
+          true};
+}
+
 constexpr std::array<TextureFormatInfo, 64> kFormats{{
     f(0,"1_REVERSE",TextureStorage::Uncompressed,1,1,1,TextureHostFormat::Unsupported),
     f(1,"1",TextureStorage::Uncompressed,1,1,1,TextureHostFormat::Unsupported),
@@ -50,10 +58,11 @@ constexpr std::array<TextureFormatInfo, 64> kFormats{{
     f(19,"DXT2_3",TextureStorage::BlockCompressed,4,4,8,TextureHostFormat::BC2Unorm),
     f(20,"DXT4_5",TextureStorage::BlockCompressed,4,4,8,TextureHostFormat::BC3Unorm),
     f(21,"16_16_16_16_EDRAM",TextureStorage::Uncompressed,1,1,64,TextureHostFormat::R16G16B16A16Unorm),
-    // Xenos depth values need explicit depth/stencil conversion. GPU 10 owns
-    // that EDRAM/depth path, so do not claim a lossless sampled-image mapping.
-    f(22,"24_8",TextureStorage::Uncompressed,1,1,32,TextureHostFormat::Unsupported),
-    f(23,"24_8_FLOAT",TextureStorage::Uncompressed,1,1,32,TextureHostFormat::Unsupported),
+    // Sampled depth (a resolved depth buffer read as a texture, e.g. for
+    // depth of field): float32 depth in R, replicated, as xenia samples it
+    // (R32_FLOAT, swizzle RRRR); stencil is not sampled.
+    sampled_depth(22,"24_8",TextureLoad::DepthUnorm24ToFloat),
+    sampled_depth(23,"24_8_FLOAT",TextureLoad::DepthFloat20e4ToFloat),
     f(24,"16",TextureStorage::Uncompressed,1,1,16,TextureHostFormat::R16Unorm),
     f(25,"16_16",TextureStorage::Uncompressed,1,1,32,TextureHostFormat::R16G16Unorm),
     f(26,"16_16_16_16",TextureStorage::Uncompressed,1,1,64,TextureHostFormat::R16G16B16A16Unorm),
@@ -87,7 +96,9 @@ constexpr std::array<TextureFormatInfo, 64> kFormats{{
     f(54,"2_10_10_10_AS_16_16_16_16",TextureStorage::Uncompressed,1,1,32,TextureHostFormat::R10G10B10A2Unorm),
     f(55,"10_11_11_AS_16_16_16_16",TextureStorage::Uncompressed,1,1,32,TextureHostFormat::R11G11B10Float),
     f(56,"11_11_10_AS_16_16_16_16",TextureStorage::Uncompressed,1,1,32,TextureHostFormat::R11G11B10Float),
-    f(57,"32_32_32_FLOAT",TextureStorage::Uncompressed,1,1,96,TextureHostFormat::R32G32B32Float),
+    // Widened to RGBA on load: no host here samples a 96-bit format.
+    {57, "32_32_32_FLOAT", TextureStorage::Uncompressed, 1, 1, 96,
+     TextureHostFormat::R32G32B32A32Float, TextureLoad::ExpandRgbFloatToRgba},
     f(58,"DXT3A",TextureStorage::BlockCompressed,4,4,4,TextureHostFormat::BC4Unorm),
     f(59,"DXT5A",TextureStorage::BlockCompressed,4,4,4,TextureHostFormat::BC4Unorm),
     f(60,"CTX1",TextureStorage::BlockCompressed,4,4,4,TextureHostFormat::Unsupported),
@@ -157,7 +168,24 @@ void packed_origin(const TextureDescriptor& descriptor, const TextureFormatInfo&
   y /= format.block_height;
 }
 
+// Names the format, so a failure log says which mapping is missing.
+std::string unsupported_format_error(const TextureFormatInfo& format) {
+  return "Xenos texture format " + std::to_string(format.xenos_format) + " (" +
+         std::string(format.name) + ") has no lossless native mapping";
+}
+
 }  // namespace
+
+std::uint16_t host_view_swizzle(std::uint8_t format, std::uint16_t swizzle) noexcept {
+  if (!texture_format_info(format).replicate_first_component) return swizzle;
+  std::uint16_t result = 0;
+  for (unsigned component = 0; component < 4u; ++component) {
+    auto select = static_cast<std::uint16_t>((swizzle >> (component * 3u)) & 7u);
+    if (select < 4u) select = 0u;  // x/y/z/w all read the one host channel
+    result |= static_cast<std::uint16_t>(select << (component * 3u));
+  }
+  return result | static_cast<std::uint16_t>(swizzle & ~0x0FFFu);
+}
 
 const TextureFormatInfo& texture_format_info(std::uint8_t format) noexcept {
   return kFormats[format & 63u];
@@ -235,6 +263,10 @@ TextureLayout build_texture_layout(const TextureDescriptor& descriptor) {
                                                   : std::numeric_limits<std::uint32_t>::max();
   std::uint64_t mip_cursor = 0;
   std::uint64_t packed_tail_offset = 0;
+  // The mips' packed tail is stored once, at the first packed mip past the
+  // base (every later level samples inside it), even when the tail starts
+  // at level 0 and the base keeps its own (xenia/rexglue GetGuestTextureLayout).
+  bool mip_tail_placed = false;
   std::uint64_t linear_cursor = 0;
   for (std::uint32_t mip = first_mip; mip <= last_mip; ++mip) {
     const auto width = std::max(1u, descriptor.width >> mip);
@@ -258,13 +290,19 @@ TextureLayout build_texture_layout(const TextureDescriptor& descriptor) {
     auto row_pitch = pitch_blocks * result.format.bytes_per_block();
     if (!descriptor.tiled && mip != 0) row_pitch = align_up(row_pitch, 256);
     const auto slice_stride = std::uint64_t(row_pitch) * storage_height;
+    // Only 3D textures tile their depth in groups of four slices. A 2D array
+    // layer or cube face is one slice apart; padding those to four made every
+    // mip from 2 up, and cube faces 1-5, read the wrong guest memory (AC6's
+    // clouds as blocky noise, minified terrain and runway as garbage).
+    const auto stacked_slices =
+        descriptor.dimension == TextureDimension::ThreeD ? align_up(depth, 4) : 1u;
     const auto layer_stride = align_up(static_cast<std::uint32_t>(
-        std::min<std::uint64_t>(slice_stride * align_up(depth, 4),
+        std::min<std::uint64_t>(slice_stride * stacked_slices,
                                 std::numeric_limits<std::uint32_t>::max())), 4096);
     std::uint32_t packed_x{}, packed_y{}, packed_z{};
     if (packed) packed_origin(descriptor, result.format, mip, packed_x, packed_y, packed_z);
-    if (mip != 0 && packed && (mip == tail_level || tail_level == 0))
-      packed_tail_offset = mip_cursor;
+    const bool places_mip_tail = mip != 0 && packed && !mip_tail_placed;
+    if (places_mip_tail) packed_tail_offset = mip_cursor;
     const auto level_offset = mip == 0 ? 0u :
                               packed ? packed_tail_offset : mip_cursor;
     for (std::uint32_t layer = 0; layer < array_layers; ++layer) {
@@ -288,12 +326,13 @@ TextureLayout build_texture_layout(const TextureDescriptor& descriptor) {
       sub.packed_z = packed_z;
       sub.guest_size_bytes = layer_stride;
       sub.linear_offset_bytes = linear_cursor;
-      sub.linear_row_pitch_bytes = width_blocks * result.format.bytes_per_block();
+      sub.linear_row_pitch_bytes = width_blocks * result.format.host_bytes_per_block();
       linear_cursor += std::uint64_t(sub.linear_row_pitch_bytes) * height_blocks * depth;
       result.subresources.push_back(sub);
     }
     if (mip == 0) result.base_extent_bytes = layer_stride * array_layers;
-    else if (!packed || mip == tail_level || tail_level == 0) {
+    else if (!packed || places_mip_tail) {
+      mip_tail_placed |= places_mip_tail;
       mip_cursor += layer_stride * array_layers;
       result.mip_extent_bytes = std::max(result.mip_extent_bytes, mip_cursor);
     }
@@ -310,12 +349,14 @@ DecodedTexture decode_texture(const TextureDescriptor& descriptor,
   DecodedTexture result{};
   result.layout = build_texture_layout(descriptor);
   if (!result.layout.valid || !result.layout.format.host_supported()) {
-    result.error = result.layout.valid ? "Xenos texture format has no lossless native mapping"
+    result.error = result.layout.valid ? unsupported_format_error(result.layout.format)
                                        : result.layout.error;
     return result;
   }
   result.linear_data.resize(static_cast<std::size_t>(result.layout.linear_size_bytes));
   const auto bpb = result.layout.format.bytes_per_block();
+  const auto host_bpb = result.layout.format.host_bytes_per_block();
+  const bool widen = result.layout.format.load == TextureLoad::ExpandRgbFloatToRgba;
   for (const auto& sub : result.layout.subresources) {
     for (std::uint32_t z = 0; z < sub.depth_texels; ++z) {
       for (std::uint32_t y = 0; y < sub.height_blocks; ++y) {
@@ -338,11 +379,11 @@ DecodedTexture decode_texture(const TextureDescriptor& descriptor,
           const auto source = std::uint64_t(sub.guest_address) + source_offset;
           const auto destination = sub.linear_offset_bytes +
               (std::uint64_t(z) * sub.height_blocks + y) * sub.linear_row_pitch_bytes +
-              std::uint64_t(x) * bpb;
+              std::uint64_t(x) * host_bpb;
           if (source < physical_base ||
               source + bpb >
                   std::uint64_t{physical_base} + physical_memory.size() ||
-              destination + bpb > result.linear_data.size()) {
+              destination + host_bpb > result.linear_data.size()) {
             result.error = "Xenos texture references guest memory outside physical RAM";
             result.linear_data.clear();
             return result;
@@ -350,8 +391,24 @@ DecodedTexture decode_texture(const TextureDescriptor& descriptor,
           endian_copy(result.linear_data.data() + destination,
                       physical_memory.data() + (source - physical_base), bpb,
                       descriptor.endian);
+          if (widen) {
+            constexpr float kOne = 1.0f;
+            std::memcpy(result.linear_data.data() + destination + bpb, &kOne, sizeof(kOne));
+          }
         }
       }
+    }
+  }
+  if (result.layout.format.load == TextureLoad::DepthUnorm24ToFloat ||
+      result.layout.format.load == TextureLoad::DepthFloat20e4ToFloat) {
+    const auto depth_format = result.layout.format.load == TextureLoad::DepthFloat20e4ToFloat
+                                  ? DepthRenderTargetFormat::D24FS8
+                                  : DepthRenderTargetFormat::D24S8;
+    for (std::size_t offset = 0; offset + 4u <= result.linear_data.size(); offset += 4u) {
+      std::uint32_t packed{};
+      std::memcpy(&packed, result.linear_data.data() + offset, sizeof(packed));
+      const float depth = unpack_depth_stencil(depth_format, packed).depth;
+      std::memcpy(result.linear_data.data() + offset, &depth, sizeof(depth));
     }
   }
   result.valid = true;
@@ -369,7 +426,11 @@ bool encode_texture(const TextureDescriptor& descriptor,
   const auto layout = build_texture_layout(descriptor);
   if (!layout.valid) return fail(layout.error);
   if (!layout.format.host_supported())
-    return fail("Xenos texture format has no lossless native mapping");
+    return fail(unsupported_format_error(layout.format));
+  if (layout.format.load != TextureLoad::Copy)
+    return fail("Xenos texture format " + std::to_string(layout.format.xenos_format) + " (" +
+                std::string(layout.format.name) +
+                ") is widened or decoded to depth on load, so it cannot be encoded back");
   if (linear_data.size() < layout.linear_size_bytes)
     return fail("linear texture source is smaller than the declared layout");
 

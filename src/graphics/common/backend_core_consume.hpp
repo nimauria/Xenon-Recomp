@@ -8,9 +8,56 @@
 
 namespace xenon::gpu::detail {
 
+// Why a resolve took the CPU path (a readback, a CPU pack and a store each):
+// each kind's first occurrence, then a running count of every kind once in
+// 512 CPU resolves, on the probe logs' clock. The GPU path is the normal one,
+// so these name exactly what still holds a scene's resolves on the CPU.
+inline void note_cpu_resolve(std::string_view reason, bool depth, unsigned source_format,
+                             unsigned destination_format, std::uint32_t width,
+                             std::uint32_t height, std::uint32_t destination) {
+  struct Kind {
+    std::string reason;
+    std::uint64_t count{};
+  };
+  static std::mutex mutex;
+  static std::map<std::uint64_t, Kind> kinds;
+  static std::uint64_t total{};
+  const std::lock_guard lock(mutex);
+  const auto key = (std::uint64_t{std::hash<std::string_view>{}(reason)} << 1u) ^
+                   (std::uint64_t{depth} << 63u) ^ (std::uint64_t{source_format} << 56u) ^
+                   (std::uint64_t{destination_format} << 48u) ^
+                   (std::uint64_t{width} << 24u) ^ height;
+  auto [kind, inserted] = kinds.try_emplace(key);
+  ++kind->second.count;
+  ++total;
+  const auto now = static_cast<long long>(
+      std::chrono::duration_cast<std::chrono::milliseconds>(
+          std::chrono::steady_clock::now().time_since_epoch())
+          .count());
+  if (inserted) {
+    kind->second.reason = std::string(depth ? "depth" : "color") + " fmt " +
+                          std::to_string(source_format) + " -> " +
+                          std::to_string(destination_format) + " " + std::to_string(width) +
+                          "x" + std::to_string(height) + ": " + std::string(reason);
+    xenon::logging::append_probe_log("resolve_cpu_path_diag.log",
+                                     "%lld first %s (dest=0x%08X)\n", now,
+                                     kind->second.reason.c_str(), destination);
+  }
+  if (total % 512u == 0u) {
+    for (const auto& [_, entry] : kinds)
+      xenon::logging::append_probe_log("resolve_cpu_path_diag.log", "%lld count %llu %s\n", now,
+                                       static_cast<unsigned long long>(entry.count),
+                                       entry.reason.c_str());
+  }
+}
+
 template <typename Derived, typename Api>
 void BackendCore<Derived, Api>::consume(const ir::Command& command) {
-  collect_retired_resources();
+  // Register writes - most of the stream - neither create nor retire native
+  // resources; the rest collect what the GPU has finished with. Collecting at
+  // every command queried the GPU fence ~3000 times a frame (a quarter of
+  // the backend's consume time replaying AC6's title screen).
+  if (!std::holds_alternative<ir::RegisterWrite>(command)) collect_retired_resources();
   ++command_count;
   ++performance.commands;
   // RegisterWrite/DrawPacket/ShaderLoad carry state the host renderer needs.
@@ -61,8 +108,13 @@ void BackendCore<Derived, Api>::consume(const ir::Command& command) {
       }
     }
     const auto state = resource_state.snapshot();
-    const auto draw_start = std::chrono::steady_clock::now();
+    // The slow-draw report goes to a probe log; without probe logs no clock
+    // is read per draw.
+    const bool timed = xenon::logging::probe_logs_enabled();
+    const auto draw_start =
+        timed ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
     const auto report_slow = [&](const char* kind) {
+      if (!timed) return;
       const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                           std::chrono::steady_clock::now() - draw_start)
                           .count();
@@ -97,10 +149,44 @@ void BackendCore<Derived, Api>::consume(const ir::Command& command) {
     error.clear();
     const bool resolve = state.edram_mode == EdramMode::Copy;
     if (resolve) {
+      if (tracing()) {
+        const auto& copy = state.copy;
+        const auto source = copy.copies_depth() ? state.depth_target.base_tile
+                                                : state.color_targets[copy.source_select & 3u].base_tile;
+        const auto source_format = copy.copies_depth()
+                                       ? state.depth_target.format
+                                       : state.color_targets[copy.source_select & 3u].format;
+        char line[320];
+        std::snprintf(line, sizeof(line),
+                      "#%llu resolve source=%u base=%u fmt=%u pitch=%u msaa=%u samples=%u "
+                      "scissor=(%d,%d)-(%d,%d) window_offset=(%d,%d) to 0x%08X pitch=%u height=%u "
+                      "fmt=%u command=%u clear color=%d(0x%08X) depth=%d(0x%08X)",
+                      static_cast<unsigned long long>(trace_index), unsigned(copy.source_select),
+                      unsigned(source), unsigned(source_format),
+                      unsigned(state.raster.surface_pitch),
+                      unsigned(state.raster.msaa_samples_log2), unsigned(copy.sample_select),
+                      state.raster.scissor_left, state.raster.scissor_top,
+                      state.raster.scissor_right, state.raster.scissor_bottom,
+                      state.raster.window_offset_x, state.raster.window_offset_y,
+                      unsigned(copy.destination_base), unsigned(copy.destination_pitch),
+                      unsigned(copy.destination_height), unsigned(copy.destination_format),
+                      unsigned(copy.command), int(copy.color_clear_enabled),
+                      unsigned(copy.color_clear[0]), int(copy.depth_clear_enabled),
+                      unsigned(copy.depth_clear));
+        trace(line);
+      }
+      perf::add(perf::Counter::Resolves, 1u);
       consume_resolve(state);
+      if (tracing() && !error.empty()) trace("  resolve failed: " + error);
       report_slow("resolve");
+      // The next resolve's trail starts here.
+      perf::note_draw_run(draw_trail_count);
+      draw_trail_count = 0;
     } else {
+      note_draw(*draw, state);
+      perf::add(perf::Counter::Draws, 1u);
       consume_draw(draw, state);
+      if (tracing() && !error.empty()) trace("  draw failed: " + error);
       report_slow("draw");
     }
     if (error.empty()) {
@@ -108,6 +194,15 @@ void BackendCore<Derived, Api>::consume(const ir::Command& command) {
       error = std::move(previous_error);
     } else {
       ++(resolve ? performance.failed_resolves : performance.failed_draws);
+      // The first 64 of each reason, then every 1000th: a draw that fails
+      // every frame stays readable in the log; the stop report has totals.
+      const auto occurrence = failure_log.record(error, resolve);
+      if (occurrence != 0u && (occurrence <= 64u || occurrence % 1000u == 0u)) {
+        xenon::logging::Logger::instance().log(
+            xenon::logging::Level::Error, "gpu",
+            std::string(resolve ? "resolve" : "draw") + " failed (#" +
+                std::to_string(occurrence) + " of this reason): " + error);
+      }
     }
     if (resolve) return;
   }
@@ -154,6 +249,18 @@ void BackendCore<Derived, Api>::consume_resolve(
     return;
   }
   const auto& rectangle = resolve_plan.rectangle;
+  static const auto activity_key = xenon::logging::intern_activity(
+      {"gpu", "resolve", {"dest", "rect_wh", "fmt_depth_samples", "clear"}, false});
+  xenon::logging::ActivityScope activity(
+      activity_key,
+      {resolve_plan.copy.destination_base,
+       std::uint64_t(std::uint32_t(rectangle.right - rectangle.left)) |
+           (std::uint64_t(std::uint32_t(rectangle.bottom - rectangle.top)) << 16u),
+       std::uint64_t(resolve_plan.copy.destination_format) |
+           (std::uint64_t(resolve_plan.depth ? 1u : 0u) << 8u) |
+           (std::uint64_t(resolve_plan.samples) << 16u),
+       std::uint64_t(resolve_plan.copy.color_clear_enabled ? 1u : 0u) |
+           (std::uint64_t(state.copy.depth_clear_enabled ? 2u : 0u))});
   // Every resolve: where the guest asked EDRAM to be copied, on the probe
   // logs' clock, so a screen that samples a stale copy can be traced back.
   xenon::logging::append_probe_log(
@@ -203,12 +310,55 @@ void BackendCore<Derived, Api>::consume_resolve(
     const EdramSurfaceLayout canonical_surface{
         state.depth_target.base_tile, state.raster.surface_pitch,
         static_cast<std::uint32_t>(rectangle.bottom), samples, false, true};
-    if (source) {
-      if (!acquire_depth_ownership(source_key, *source, source->surface())) return;
-    } else if (!make_region_canonical(canonical_surface, {rectangle.left, rectangle.top,
-                                                          rectangle.right, rectangle.bottom})) {
-      return;
+    const EdramSurfaceRegion depth_region{rectangle.left, rectangle.top, rectangle.right,
+                                          rectangle.bottom};
+    if (source && !acquire_depth_ownership(source_key, *source, source->surface())) return;
+    // When one native depth image owns every tile, the resolve runs on the GPU
+    // out of it, as a color resolve does: shadow maps and AC6's depth copies
+    // for depth of field took a readback, a CPU pack and a store each.
+    std::string cpu_reason = "no native depth image owns every tile";
+    if (auto* owner = source ? source : single_depth_owner(canonical_surface, depth_region)) {
+      const auto gpu = plan_gpu_depth_resolve(resolve_plan, format, canonical_surface,
+                                              owner->surface(), owner->host_msaa(),
+                                              owner->guest_format());
+      cpu_reason = gpu.error;
+      if (gpu.valid) {
+        // Bytes of the touched pages outside the rectangle keep their CPU
+        // values; the pass writes the rectangle's words over them.
+        if (!mirror.synchronize_range(gpu.range_address, gpu.range_size,
+                                      memory::GpuRangeUsage::RenderReadback)) {
+          error = mirror.error();
+          return;
+        }
+        if (!self().gpu_depth_resolve(*owner, gpu)) return;
+        mirror.mark_gpu_write(gpu.range_address, gpu.range_size);
+        note_gpu_guest_write(gpu.range_address, gpu.range_size);
+        note_backend_write(texture_dirty, guest_reads, gpu.range_address, gpu.range_size);
+        // Guest code may read what it resolved; the copy lands with the work
+        // (unless the title's module says its CPU never does).
+        if (resolve_readback == ResolveReadback::Always &&
+            !mirror.queue_cpu_visibility(gpu.range_address, gpu.range_size,
+                                         memory::GpuRangeUsage::RenderReadback)) {
+          error = mirror.error();
+          return;
+        }
+        ++performance.gpu_depth_resolves;
+        note_resolve(true, static_cast<std::uint8_t>(format), resolve_plan.copy.destination_format,
+                     rectangle, false,
+                     std::string("GPU path, ") + (source ? "native depth target" : "single owner") +
+                         ", RB_DEPTH_CLEAR 0x" + hex_word(state.copy.depth_clear) +
+                         (state.copy.depth_clear_enabled ? " (clears after)" : ""),
+                     resolve_plan.copy.destination_base);
+        (void)clear_depth_resolve_region(state, rectangle, samples);
+        return;
+      }
     }
+    note_cpu_resolve(cpu_reason, true, static_cast<unsigned>(format),
+                     resolve_plan.copy.destination_format,
+                     static_cast<std::uint32_t>(rectangle.right - rectangle.left),
+                     static_cast<std::uint32_t>(rectangle.bottom - rectangle.top),
+                     resolve_plan.copy.destination_base);
+    if (!source && !make_region_canonical(canonical_surface, depth_region)) return;
     if (resolve_plan.selected_sample_count != 1) {
       error = named("Xenos depth resolve selected multiple samples");
       return;
@@ -252,6 +402,16 @@ void BackendCore<Derived, Api>::consume_resolve(
       error = written.error;
       return;
     }
+    note_resolve(true, static_cast<std::uint8_t>(format), resolve_plan.copy.destination_format,
+                 rectangle,
+                 std::all_of(readback.begin(), readback.end(),
+                             [](std::uint32_t word) { return word == 0u; }),
+                 std::string(source ? "native depth target" : "canonical EDRAM") +
+                     ", RB_DEPTH_CLEAR 0x" + hex_word(state.copy.depth_clear) +
+                     (state.copy.depth_clear_enabled ? " (clears after)" : ""),
+                 resolve_plan.copy.destination_base);
+    note_backend_write(texture_dirty, guest_reads, written.modified_address,
+                       written.modified_size);
     if (!clear_depth_resolve_region(state, rectangle, samples))
       return;
     return;
@@ -296,10 +456,14 @@ void BackendCore<Derived, Api>::consume_resolve(
   // that image, through the EDRAM mapping when it is another view of the
   // tiles (AC6 resolves its 640x360 4x MSAA scene as a 1280x720 surface).
   // Nothing is flushed to canonical EDRAM or read back to convert.
-  if (auto* owner = source ? source : single_color_owner(canonical_surface, resolve_region)) {
+  std::string cpu_reason;
+  auto* owner = source ? source : single_color_owner(canonical_surface, resolve_region);
+  if (!owner) cpu_reason = describe_missing_color_owner(canonical_surface, resolve_region);
+  if (owner) {
     const auto gpu = plan_gpu_color_resolve(resolve_plan, format, canonical_surface,
                                             owner->surface(), owner->host_msaa(),
                                             owner->guest_format());
+    cpu_reason = gpu.valid ? "the clear after it has no GPU form" : gpu.error;
     GpuClearConstants clear{};
     if (gpu.valid && (!state.copy.color_clear_enabled ||
                       plan_gpu_color_clear(resolve_plan, format, canonical_surface,
@@ -311,21 +475,44 @@ void BackendCore<Derived, Api>::consume_resolve(
         error = mirror.error();
         return;
       }
-      if (!self().gpu_color_resolve(*owner, gpu.constants)) return;
+      if (!self().gpu_color_resolve(*owner, gpu)) return;
       mirror.mark_gpu_write(gpu.range_address, gpu.range_size);
+      note_gpu_guest_write(gpu.range_address, gpu.range_size);
+      note_backend_write(texture_dirty, guest_reads, gpu.range_address, gpu.range_size);
       if (state.copy.color_clear_enabled && !self().gpu_color_clear(*owner, clear)) return;
-      // Guest code may read what it resolved, and it reads CPU memory.
-      if (!mirror.make_cpu_visible(gpu.range_address, gpu.range_size,
-                                   memory::GpuRangeUsage::RenderReadback)) {
+      // Guest code may read what it resolved, and it reads CPU memory. The
+      // copy is queued with the work and lands as the GPU finishes it; the
+      // command processor waits for it only before the guest can observe
+      // the GPU having passed this point (Backend::publish_gpu_writes()).
+      // Waiting here instead cost a GPU round trip per resolve, dozens a frame.
+      // With ResolveReadback::OnRequest the bytes stay GPU-owned until Xenon
+      // itself reads them (make_guest_memory_cpu_visible()).
+      if (resolve_readback == ResolveReadback::Always &&
+          !mirror.queue_cpu_visibility(gpu.range_address, gpu.range_size,
+                                       memory::GpuRangeUsage::RenderReadback)) {
         error = mirror.error();
         return;
       }
       ++performance.gpu_resolves;
+      // Its bytes are not in guest memory yet, so the census counts it
+      // without a content scan.
+      note_resolve(false, static_cast<std::uint8_t>(format), state.copy.destination_format,
+                   rectangle, false, source ? "GPU path" : "GPU path, single owner",
+                   state.copy.destination_base);
+      trace_resolve_image(state.copy, rectangle);
+      probe_full_frame_resolve(source ? "gpu" : "gpu-single-owner", state.copy.destination_base,
+                               rectangle, source ? source_key : 0u,
+                               owner->height());
       // A depth clear sets its error itself; the color resolve is done.
       (void)clear_depth_resolve_region(state, rectangle, samples);
       return;
     }
   }
+  note_cpu_resolve(cpu_reason, false, static_cast<unsigned>(format),
+                   state.copy.destination_format,
+                   static_cast<std::uint32_t>(rectangle.right - rectangle.left),
+                   static_cast<std::uint32_t>(rectangle.bottom - rectangle.top),
+                   state.copy.destination_base);
   // Otherwise whichever images own the rectangle's tiles return them to
   // canonical EDRAM and the resolve reads them there. Failing the resolve
   // instead left AC6's front buffer unwritten, and the screen black.
@@ -439,7 +626,17 @@ void BackendCore<Derived, Api>::consume_resolve(
     error = written.error;
     return;
   }
+  note_backend_write(texture_dirty, guest_reads, written.modified_address, written.modified_size);
   // Keep resolve correctness failures separate from presentation failures.
+  note_resolve(false, static_cast<std::uint8_t>(format), state.copy.destination_format,
+               rectangle,
+               std::all_of(readback.begin(), readback.end(),
+                           [](std::byte byte) { return byte == std::byte{}; }),
+               source ? "readback of native target" : "canonical EDRAM",
+               state.copy.destination_base, readback);
+  trace_resolve_image(state.copy, rectangle);
+  probe_full_frame_resolve(source ? "native-readback" : "canonical", state.copy.destination_base,
+                           rectangle, source ? source_key : 0u, source ? source->height() : 0u);
   // When probe logging is explicitly enabled, sample the first few resolves
   // on both sides of the native-readback -> guest-memory boundary. This is
   // intentionally bounded: AC6 resolves every frame, and an unbounded byte
@@ -517,11 +714,53 @@ void BackendCore<Derived, Api>::consume_resolve(
 template <typename Derived, typename Api>
 void BackendCore<Derived, Api>::consume_shader_load(
     const ir::ShaderLoad* load) {
-  shader_textures[load->program.hash()] =
-      load->decoded.reflection.texture_fetch_constants;
+  // Titles reload the same microcode many times a frame (AC6: every draw
+  // batch). Everything below depends only on the program - its decode, the
+  // lowering, the compile and its outcome - so a program is handled once,
+  // and a repeat load only makes it current again, which the frontend
+  // already tracks through ShaderReference.
+  if (!load->decoded || !handled_shader_loads.insert(load->program.hash()).second) return;
+  const DecodedShader& decoded = *load->decoded;
+  shader_textures[load->program.hash()] = decoded.reflection.texture_fetch_constants;
+  shader_texture_filters[load->program.hash()] = decoded.reflection.texture_filter_overrides;
 #ifdef XENON_HAS_DXC
-  decoded_shaders[load->program.hash()] = load->decoded;
-  const auto lowered = HlslShaderLowerer::lower(load->decoded);
+  decoded_shaders[load->program.hash()] = decoded;
+  ShaderCompileOptions options{};
+  options = guest_shader_options();
+  // Usually lowered and compiled already, on a worker, since the frontend
+  // decoded the load (prefetch_shaders()); otherwise this waits for it -
+  // a draw never goes ahead without its shader.
+  std::shared_ptr<const LoweredShader> lowered_shader;
+  std::shared_ptr<const CompiledShader> prefetched;
+  if (shader_prefetch) {
+    shader_prefetch->prefetch(
+        load->program.hash(),
+        [decoded = load->decoded, lowering = with_guest_segments({})] {
+          return HlslShaderLowerer::lower(*decoded, lowering);
+        },
+        options);
+    const auto wait_start = std::chrono::steady_clock::now();
+    auto prepared = shader_prefetch->prepared(load->program.hash());
+    perf::add(perf::Counter::ShaderWaitNs,
+              static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                             std::chrono::steady_clock::now() - wait_start)
+                                             .count()));
+    perf::add(perf::Counter::ShaderWaits, 1u);
+    if (!prepared || !prepared->lowered) {
+      ++shader_translation_failures;
+      error = prepared && !prepared->error.empty()
+                  ? named("shader lowering failed: " + prepared->error)
+                  : named("shader prefetch ended before the shader was prepared");
+      return;
+    }
+    lowered_shader = prepared->lowered;
+    prefetched = prepared->compiled;
+  } else {
+    lowered_shader = std::make_shared<const LoweredShader>(
+        HlslShaderLowerer::lower(decoded, with_guest_segments({})));
+  }
+  const auto& lowered = *lowered_shader;
+  dump_shader(load->program, lowered.hlsl);
   unsupported.unsupported_shader_instructions += lowered.unsupported_instructions;
   unsupported.unsupported_shader_features += lowered.unsupported_features;
   unsupported.unsupported_fetch_formats += lowered.unsupported_fetch_formats;
@@ -538,9 +777,7 @@ void BackendCore<Derived, Api>::consume_shader_load(
                  "): " + error;
         });
   } else {
-    ShaderCompileOptions options{};
-    options.format = Api::kShaderBinaryFormat;
-    const auto compiled = shader_cache.get_or_compile(lowered, options);
+    const auto compiled = prefetched ? prefetched : shader_cache.get_or_compile(lowered, options);
     if (compiled->succeeded) {
       ++compiled_shader_count;
       shaders[load->program.hash()] = compiled;

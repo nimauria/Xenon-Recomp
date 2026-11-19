@@ -1,3 +1,4 @@
+import { t, tText } from "../localization";
 import { useEffect, useState } from "react";
 import {
   themes,
@@ -62,7 +63,7 @@ export function AppearanceSettings() {
     void action("settings.set", { key, value });
   return (
     <div className="appearance-settings">
-      <h3>Theme</h3>
+      <h3>{t("ui.efb52e7172b7")}</h3>
       <div className="theme-options">
         {themes.map((theme) => {
           const palette = resolveAppearance(
@@ -87,12 +88,12 @@ export function AppearanceSettings() {
                 <i style={{ background: palette.surface }} />
                 <i style={{ background: palette.accent }} />
               </span>
-              {theme.label}
+              {tText(theme.label)}
             </button>
           );
         })}
       </div>
-      <h3>Accent colour</h3>
+      <h3>{t("ui.12376f4cbd6c")}</h3>
       <div className="accent-options">
         {accents.map((accent) => (
           <button
@@ -110,16 +111,16 @@ export function AppearanceSettings() {
                     : appearance.palette.accent),
               }}
             />
-            {accent.label}
+            {tText(accent.label)}
           </button>
         ))}
       </div>
       {appearance.accentId === "custom" && (
         <label>
-          Custom accent
+          {t("ui.e1535e71560f")}
           <input
             type="color"
-            aria-label="Custom accent colour"
+            aria-label={t("ui.a37c3fad1a72")}
             disabled={busy}
             value={String(settings["ui/customAccent"] ?? "#35D7EA")}
             onChange={(e) => save("ui/customAccent", e.target.value)}
@@ -127,20 +128,20 @@ export function AppearanceSettings() {
         </label>
       )}
       <label>
-        Corner style
+        {t("ui.4ce0a25a3684")}
         <select
           value={appearance.corner}
           disabled={busy}
           onChange={(e) => save("ui/corners", e.target.value)}
         >
-          <option value="rounded">Rounded</option>
-          <option value="soft">Soft</option>
-          <option value="square">Square</option>
+          <option value="rounded">{t("ui.0a62cd800f27")}</option>
+          <option value="soft">{t("ui.5964d4672956")}</option>
+          <option value="square">{t("ui.c11092bc0861")}</option>
         </select>
       </label>
-      <h3>Background</h3>
+      <h3>{t("ui.ea2b8a878841")}</h3>
       <label>
-        Show theme background
+        {t("ui.0e858e7d52a3")}
         <input
           type="checkbox"
           checked={settings["appearance/themeBackdrop"] !== false}
@@ -151,7 +152,7 @@ export function AppearanceSettings() {
       <div className="background-options">
         {backgrounds[appearance.id as ThemeId].map((variant) => (
           <button
-            key={variant}
+            key={tText(variant)}
             disabled={busy}
             aria-pressed={appearance.variant === variant}
             onClick={() =>
@@ -159,7 +160,7 @@ export function AppearanceSettings() {
             }
           >
             {appearance.id === "light" ? (
-              <span className="background-minimal">Minimal</span>
+              <span className="background-minimal">{t("ui.057b5de48d7b")}</span>
             ) : (
               <img
                 loading="lazy"
@@ -169,21 +170,21 @@ export function AppearanceSettings() {
             )}
             <span>
               {variant === "hud"
-                ? "HUD"
+                ? t("ui.c40c747ee79e")
                 : variant[0].toUpperCase() + variant.slice(1)}
             </span>
           </button>
         ))}
       </div>
       <RangeSetting
-        label="Background intensity"
+        label={t("ui.5e7d9ba19671")}
         value={appearance.intensity}
         min={0.2}
         disabled={busy}
         commit={(value) => save("appearance/backdropIntensity", value)}
       />
       <label>
-        Decorations
+        {t("ui.5a02b0538c33")}
         <select
           value={appearance.decorLevel}
           disabled={busy}
@@ -195,16 +196,13 @@ export function AppearanceSettings() {
         </select>
       </label>
       <RangeSetting
-        label="Panel opacity"
+        label={t("ui.6d8e2f52b8c9")}
         value={Number(settings["appearance/panelOpacity"] ?? 0.94)}
         min={0}
         disabled={busy}
         commit={(value) => save("appearance/panelOpacity", value)}
       />
-      <p className="appearance-note">
-        Background artwork stays specific to its theme. Accent colours recolour
-        controls and Xenon branding. High contrast hides decorative backgrounds.
-      </p>
+      <p className="appearance-note">{t("ui.04f2d907bdb0")}</p>
     </div>
   );
 }

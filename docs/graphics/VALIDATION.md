@@ -1,5 +1,14 @@
 # Xenon GPU Phase 1 Validation — 2026-09-16
 
+This is a historical validation log. Test counts, failures and untested areas
+belong to the dated pass that records them, not necessarily the current tree.
+For current compatibility and known issues, use the
+[README milestone](../../README.md#current-milestone-project-gracemeria):
+AC6 reaches the first cutscene after the main menu with working audio;
+cutscene frame rate/pacing is being fixed (owner report, 11 November 2026).
+The new [enhancement plan](UPSCALING_FRAME_GENERATION_PLAN.md) is planning
+work, not additional GPU validation.
+
 ## Result
 
 The CPU + memory + GPU Phase 1 source tree passes all current tests in three

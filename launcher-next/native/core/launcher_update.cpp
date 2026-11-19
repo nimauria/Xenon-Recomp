@@ -1,4 +1,5 @@
 #include "launcher_update.hpp"
+#include "platform/file_path.hpp"
 #include "archive.hpp"
 #include "file_transfer.hpp"
 #include "releases.hpp"
@@ -21,7 +22,7 @@ bool within(const fs::path &path, const fs::path &root) {
   return !relative.empty() && *relative.begin() != "..";
 }
 std::string hash_file(const fs::path &path) {
-  std::ifstream stream(path, std::ios::binary);
+  std::ifstream stream(io_path(path), std::ios::binary);
   if (!stream)
     throw std::runtime_error("Cannot read update file");
   std::array<char, 256 * 1024> buffer{};
@@ -37,7 +38,7 @@ std::string hash_file(const fs::path &path) {
 }
 void plain_root(const fs::path &path) {
   if (!path.is_absolute() || path == path.root_path() || path != path.lexically_normal() ||
-      fs::weakly_canonical(path) != path || redirected_path(path))
+      normal_path(fs::weakly_canonical(io_path(path))) != path || redirected_path(path))
     throw std::runtime_error(
         "Update location was redirected or is not an absolute installation folder");
 }
@@ -57,7 +58,7 @@ void validate_package(const fs::path &root, const std::string &version = "") {
         "libcef.dll", "icudtl.dat", "resources.pak", "v8_context_snapshot.bin",
         "chrome_100_percent.pak", "locales/en-US.pak", "web/index.html", "settings-schema.json",
         "module-catalog-fallback.json"})
-    if (!fs::is_regular_file(root / file) || fs::file_size(root / file) == 0)
+    if (!fs::is_regular_file(io_path(root / file)) || fs::file_size(io_path(root / file)) == 0)
       throw std::runtime_error(std::string("Incomplete CEF launcher package: ") + file);
 #else
   throw std::runtime_error(
@@ -66,10 +67,10 @@ void validate_package(const fs::path &root, const std::string &version = "") {
 }
 Json files(const fs::path &root) {
   Json result = Json::array();
-  for (const auto &entry : fs::recursive_directory_iterator(root))
+  for (const auto &entry : fs::recursive_directory_iterator(io_path(root)))
     if (entry.is_regular_file())
-      result.push_back({{"path", text(entry.path().lexically_relative(root))},
-                        {"sha256", hash_file(entry.path())},
+      result.push_back({{"path", text(normal_path(entry.path()).lexically_relative(root))},
+                        {"sha256", hash_file(normal_path(entry.path()))},
                         {"size", entry.file_size()}});
   std::sort(result.begin(), result.end(),
             [](const auto &a, const auto &b) { return a.at("path") < b.at("path"); });
@@ -101,8 +102,9 @@ struct Plan {
     if (!storage.is_absolute() || storage != storage.lexically_normal() ||
         within(storage, installation) || within(storage, work))
       throw std::runtime_error("User data must be outside the installation and update workspace");
-    if (fs::weakly_canonical(work.parent_path()) != work.parent_path() ||
-        fs::weakly_canonical(installation.parent_path()) != installation.parent_path())
+    if (normal_path(fs::weakly_canonical(io_path(work.parent_path()))) != work.parent_path() ||
+        normal_path(fs::weakly_canonical(io_path(installation.parent_path()))) !=
+            installation.parent_path())
       throw std::runtime_error("Update parent directory changed");
     if (read_document(work / "owner.json", 65536) !=
         Json{{"product", product}, {"id", id}, {"installation", text(installation)}})
@@ -115,10 +117,11 @@ struct Plan {
 void rename_directory(const fs::path &source, const fs::path &destination) {
   // Chromium child handles can take a moment to close after the browser exits.
   for (unsigned i = 0;; ++i) {
-    if (fs::weakly_canonical(source) != source || fs::exists(destination))
+    if (normal_path(fs::weakly_canonical(io_path(source))) != source ||
+        fs::exists(io_path(destination)))
       throw std::runtime_error("Update rename boundary changed; folders were left untouched");
     std::error_code error;
-    fs::rename(source, destination, error);
+    fs::rename(io_path(source), io_path(destination), error);
     if (!error)
       return;
     if (i >= 50)
@@ -152,10 +155,10 @@ fs::path prepare_launcher_update(const fs::path &package, const std::string &dig
     throw std::runtime_error("Staged launcher package failed SHA-256 verification");
   const auto id = make_id();
   const auto parent_folder = installation.parent_path() / ".xenon-updates";
-  fs::create_directories(parent_folder);
+  fs::create_directories(io_path(parent_folder));
   plain_root(parent_folder);
   const auto work = parent_folder / id;
-  if (!fs::create_directory(work))
+  if (!fs::create_directory(io_path(work)))
     throw std::runtime_error("Cannot create a fresh update workspace");
   write_document(work / "owner.json",
                  {{"product", product}, {"id", id}, {"installation", text(installation)}});
@@ -164,7 +167,8 @@ fs::path prepare_launcher_update(const fs::path &package, const std::string &dig
   validate_package(work / "payload", version);
   if (hash_file(package) != digest)
     throw std::runtime_error("Update package changed during extraction");
-  fs::copy_file(installation / "xenon_launcher_updater.exe", work / "updater.exe");
+  fs::copy_file(io_path(installation / "xenon_launcher_updater.exe"),
+                io_path(work / "updater.exe"));
   write_document(work / "plan.json",
                  {{"format", 1},
                   {"product", product},
@@ -180,7 +184,7 @@ fs::path prepare_launcher_update(const fs::path &package, const std::string &dig
 void apply_launcher_update(const fs::path &plan_file, const UpdateHooks &hooks) {
   const Plan plan(plan_file);
   StorageLock lock(plan.work);
-  if (fs::exists(plan.backup) || fs::exists(plan.work / "failed"))
+  if (fs::exists(io_path(plan.backup)) || fs::exists(io_path(plan.work / "failed")))
     throw std::runtime_error(
         "This update was already attempted; its recovery folders were retained");
   const ProcessIdentity parent{plan.data.at("parent").at("pid"),
@@ -231,7 +235,7 @@ void apply_launcher_update(const fs::path &plan_file, const UpdateHooks &hooks) 
         [&] {
           if (!hooks.running(replacement))
             throw std::runtime_error("Replacement launcher exited before its interface was ready");
-          if (!fs::is_regular_file(plan.receipt))
+          if (!fs::is_regular_file(io_path(plan.receipt)))
             return false;
           if (redirected_path(plan.receipt))
             throw std::runtime_error("Update receipt was redirected");
@@ -280,7 +284,7 @@ void acknowledge_launcher_update(const fs::path &receipt, const std::string &tok
   if (receipt.filename() != "ready.json")
     throw std::runtime_error("Invalid update receipt location");
   const Plan plan(receipt.parent_path() / "plan.json");
-  if (plan.id != token || plan.version != launcher_version || fs::exists(receipt))
+  if (plan.id != token || plan.version != launcher_version || fs::exists(io_path(receipt)))
     throw std::runtime_error("Update receipt token or version does not match this application");
   const auto identity = current_process_identity();
   write_document(receipt, {{"token", token},

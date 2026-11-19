@@ -44,7 +44,7 @@ bool ScanoutRenderer::prepare(ID3D12Device* device, DXGI_FORMAT format) {
       return false;
     }
   }
-  DxcShaderCompiler compiler;
+  UtilityShaderCompiler compiler;
   const auto vs = compiler.compile(make_transfer_fullscreen_vertex_shader());
   const auto ps = compiler.compile(make_scanout_shader());
   if (!vs.succeeded || !ps.succeeded) {

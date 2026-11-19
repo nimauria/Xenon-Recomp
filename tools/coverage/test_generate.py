@@ -45,6 +45,19 @@ class CoverageTests(unittest.TestCase):
         self.assertEqual(generate.counts(expanded, self.entries)["unassessed"],
                          generate.counts(self.items, self.entries)["unassessed"] + 1)
 
+    def test_pm4_groups_follow_current_dispatch_packets(self):
+        processor = generate.source("src/graphics/xenos/command_processor.cpp")
+        groups = generate.pm4_classifier_groups(processor)
+        self.assertEqual(groups["DrawIndx"], "Draw")
+        self.assertEqual(groups["ImLoad"], "Shader")
+        self.assertEqual(groups["ImLoadImmediate"], "Shader")
+        self.assertEqual(groups["SetShaderConstants"], "Shader")
+        self.assertEqual(groups["SetConstant2"], "State")
+        self.assertEqual(groups["WaitRegMem"], "Synchronization")
+        self.assertEqual(groups["EventWrite"], "Event")
+        self.assertEqual(groups["RegRmw"], "State")
+        self.assertNotIn("Nop", groups)
+
     def test_kernel_diagnostic_metadata_must_match_registration(self):
         original = generate.source
 
@@ -256,11 +269,24 @@ class CoverageTests(unittest.TestCase):
         self.assertGreater(int(root.attrib["viewBox"].split()[-1]),
                            int(ET.fromstring(generate.render_svg(self.items, self.entries)).attrib["viewBox"].split()[-1]))
 
+    def test_interactive_dashboard_contains_searchable_operation_view(self):
+        model = generate.Model([], {}, {}, {}, {}, {}, {}, {}, [])
+        html = generate.render_dashboard_html(model, {"assessed_commit": "abc123"}, {
+            "counts": {}, "test_results": {}, "problems": [], "candidates": [],
+            "operations": [{"id": "ppc:addi", "category": "ppc", "group": "Integer",
+                            "name": "addi", "source": "src/cpu/ppc/lifter/integer.cpp",
+                            "state": "verified"}],
+        })
+        self.assertIn('id="search"', html)
+        self.assertIn('id="operations"', html)
+        self.assertIn("ppc:addi", html)
+        self.assertIn("filter by area", html.lower())
+
     def test_ci_references_real_workflow_and_jobs(self):
-        workflow = (generate.ROOT / ".github/workflows/ci.yml").read_text()
-        windows = (generate.ROOT / ".github/workflows/windows.yml").read_text()
-        linux = (generate.ROOT / ".github/workflows/linux.yml").read_text()
-        readme = (generate.ROOT / "README.md").read_text()
+        workflow = (generate.ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        windows = (generate.ROOT / ".github/workflows/windows.yml").read_text(encoding="utf-8")
+        linux = (generate.ROOT / ".github/workflows/linux.yml").read_text(encoding="utf-8")
+        readme = (generate.ROOT / "README.md").read_text(encoding="utf-8")
         self.assertIn("name: Xenon CI", workflow)
         self.assertIn("platform-results:", workflow)
         self.assertIn("coverage-dashboard:", workflow)
@@ -277,6 +303,7 @@ class CoverageTests(unittest.TestCase):
         self.assertEqual((generate.ROOT / "README.md").read_bytes().count(b"\r\n"),
                          (generate.ROOT / "README.md").read_bytes().count(b"\n"))
         for link in ("docs/coverage/summary.svg", "docs/coverage/dashboard.svg",
+                     "docs/coverage/dashboard.html",
                      "docs/coverage/README.md", "docs/coverage/REPORT.md"):
             self.assertTrue((generate.ROOT / link).is_file(), link)
         self.assertTrue(generate.SUMMARY_SVG.is_file())

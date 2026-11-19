@@ -20,6 +20,7 @@ void InputSystem::auto_assign_locked() {
     for (const auto& [id, record] : records_) {
       static_cast<void>(id);
       if (!record.info.connected || record.info.type != DeviceType::Gamepad ||
+          is_companion_locked(record) ||
           std::find(users_.begin(), users_.end(), record.info.id) != users_.end()) {
         continue;
       }
@@ -301,15 +302,49 @@ std::vector<DeviceId> InputSystem::sources_for_user(std::uint32_t user_index) co
   return result;
 }
 
+void InputSystem::set_companion_source(std::uint32_t user_index,
+                                       std::string identity_key) {
+  if (user_index >= kMaxUsers) return;
+  {
+    std::scoped_lock lock(mutex_);
+    companion_identities_[user_index] = std::move(identity_key);
+    // setup() may already have auto-assigned the companion a user of its own.
+    for (auto& user : users_) {
+      const auto it = records_.find(user);
+      if (it != records_.end() && is_companion_locked(it->second)) user = kInvalidDeviceId;
+    }
+    auto_assign_locked();
+  }
+  sync_player_indicators();
+}
+
+bool InputSystem::is_companion_locked(const DeviceRecord& record) const {
+  return std::find(companion_identities_.begin(), companion_identities_.end(),
+                   record.info.identity_key) != companion_identities_.end();
+}
+
+std::optional<InputSystem::RoutedDevice> InputSystem::companion_route_locked(
+    std::uint32_t user_index) const {
+  if (user_index >= kMaxUsers || companion_identities_[user_index].empty()) {
+    return std::nullopt;
+  }
+  const auto id = connected_id_for_identity_locked(companion_identities_[user_index]);
+  if (!id) return std::nullopt;
+  const auto& record = records_.at(*id);
+  if (record.driver_index >= drivers_.size()) return std::nullopt;
+  return RoutedDevice{*id, record.driver_index, record.native_id, record.info.identity_key};
+}
+
 std::optional<InputSystem::RoutedDevice> InputSystem::route_user_locked(
     std::uint32_t user_index) const {
   if (user_index >= kMaxUsers) return std::nullopt;
   const auto id = users_[user_index];
-  if (id == kInvalidDeviceId) return std::nullopt;
+  // Without a controller of its own, the user's companion is its controller.
+  if (id == kInvalidDeviceId) return companion_route_locked(user_index);
   const auto it = records_.find(id);
   if (it == records_.end() || !it->second.info.connected ||
       it->second.driver_index >= drivers_.size()) {
-    return std::nullopt;
+    return companion_route_locked(user_index);
   }
   return RoutedDevice{id, it->second.driver_index, it->second.native_id,
                       it->second.info.identity_key};

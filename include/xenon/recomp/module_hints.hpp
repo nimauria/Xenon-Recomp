@@ -4,6 +4,7 @@
 // providers, and the Analysis Hint Schema V2 provider interface.
 
 #include <cstdint>
+#include <filesystem>
 #include <string>
 #include <vector>
 
@@ -64,6 +65,18 @@ class ModuleHintProviderV2 {
   [[nodiscard]] virtual bool provide(const xbox::XexEffectiveIdentity& identity,
                                      analysis::AnalysisHintSetV2& out_hint_set,
                                      std::string& error) const = 0;
+
+  // Appends the C++ sources implementing that hint set's instruction hooks
+  // (analysis::HookKind::Instruction). A provider whose hint sets declare no
+  // instruction hooks has none to add.
+  [[nodiscard]] virtual bool hook_sources(const xbox::XexEffectiveIdentity& identity,
+                                          std::vector<std::filesystem::path>& out_sources,
+                                          std::string& error) const {
+    static_cast<void>(identity);
+    static_cast<void>(out_sources);
+    static_cast<void>(error);
+    return true;
+  }
 };
 
 }  // namespace xenon::recomp

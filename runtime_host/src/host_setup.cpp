@@ -1,5 +1,7 @@
 #include "host_setup.hpp"
 
+#include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -24,6 +26,7 @@
 #include "presentation_host.hpp"
 #include "status_writer.hpp"
 #include "xenon/core/session.hpp"
+#include "xenon/logging/logger.hpp"
 #if defined(XENON_RUNTIME_HAS_MEMORY) && XENON_RUNTIME_HAS_MEMORY
 #include "xenon/memory/host_vm.hpp"
 #include "xenon/memory/types.hpp"
@@ -80,6 +83,80 @@ std::optional<std::string> parse_launch_config_argument(int argc, char** argv) {
 // Redirects stdout/stderr into the session log file so every
 // XenonSession/runtime-host diagnostic line lands somewhere the launcher can
 // tail, since this process normally runs detached with no visible console.
+std::string error_log_run_name(const std::tm& local_time) {
+  char name[32];
+  std::snprintf(name, sizeof(name), "%04d-%02d-%02d_%02d-%02d-%02d", local_time.tm_year + 1900,
+                local_time.tm_mon + 1, local_time.tm_mday, local_time.tm_hour, local_time.tm_min,
+                local_time.tm_sec);
+  return name;
+}
+
+namespace {
+
+// "YYYY-MM-DD_HH-MM-SS", optionally followed by "-N".
+bool is_error_log_run_name(std::string_view name) {
+  if (name.size() < 19u) return false;
+  for (std::size_t i = 0; i < 19u; ++i) {
+    const char c = name[i];
+    const bool separator = i == 4u || i == 7u || i == 13u || i == 16u;
+    if (i == 10u ? c != '_' : separator ? c != '-' : (c < '0' || c > '9')) return false;
+  }
+  if (name.size() == 19u) return true;
+  if (name[19] != '-' || name.size() == 20u) return false;
+  for (std::size_t i = 20u; i < name.size(); ++i) {
+    if (name[i] < '0' || name[i] > '9') return false;
+  }
+  return true;
+}
+
+// Run folders oldest first: by start time, then by the "-N" suffix.
+bool error_log_run_before(const std::string& a, const std::string& b) {
+  const auto stamp_a = a.substr(0, 19u), stamp_b = b.substr(0, 19u);
+  if (stamp_a != stamp_b) return stamp_a < stamp_b;
+  const auto suffix = [](const std::string& s) {
+    return s.size() > 20u ? std::stoull(s.substr(20u)) : 1ull;
+  };
+  return suffix(a) < suffix(b);
+}
+
+}  // namespace
+
+void prune_error_log_runs(const std::filesystem::path& errors_dir, std::size_t keep_runs) {
+  std::error_code error;
+  std::vector<std::string> runs;
+  for (const auto& entry : std::filesystem::directory_iterator(errors_dir, error)) {
+    const auto name = entry.path().filename().string();
+    if (entry.is_directory(error) && is_error_log_run_name(name)) runs.push_back(name);
+  }
+  if (runs.size() <= keep_runs) return;
+  std::sort(runs.begin(), runs.end(), error_log_run_before);
+  for (std::size_t i = 0; i + keep_runs < runs.size(); ++i) {
+    std::filesystem::remove_all(errors_dir / runs[i], error);
+  }
+}
+
+std::filesystem::path open_error_logs(const std::string& session_dir, std::size_t keep_runs) {
+  const auto errors_dir = std::filesystem::path(session_dir) / "errors";
+  const auto now = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
+  std::tm local{};
+#if defined(_WIN32)
+  localtime_s(&local, &now);
+#else
+  localtime_r(&now, &local);
+#endif
+  const auto base = error_log_run_name(local);
+  std::error_code error;
+  std::filesystem::create_directories(errors_dir, error);
+  auto run_dir = errors_dir / base;
+  for (unsigned n = 2u; std::filesystem::exists(run_dir, error); ++n) {
+    run_dir = errors_dir / (base + "-" + std::to_string(n));
+  }
+  // Prune first so the new run is never the one removed.
+  if (keep_runs > 0u) prune_error_log_runs(errors_dir, keep_runs - 1u);
+  if (!xenon::logging::Logger::instance().set_error_directory(run_dir.string())) return {};
+  return run_dir;
+}
+
 void redirect_log(const std::string& session_dir) {
   std::error_code error;
   std::filesystem::create_directories(session_dir, error);
@@ -146,7 +223,7 @@ xenon::core::SessionConfig build_session_config(const LaunchConfig& launch) {
   xenon::core::SessionConfig config{};
   config.enable_logging = true;
   config.verbose_logging = launch.log_verbose;
-  config.memory_watch_addresses = launch.memory_watch_addresses;
+  config.memory_watch_targets = launch.memory_watch_targets;
   config.memory_watch_history = launch.memory_watch_history;
   config.memory_watch_poll_ms = launch.memory_watch_poll_ms;
   config.enable_export_diagnostics = true;
@@ -159,6 +236,28 @@ xenon::core::SessionConfig build_session_config(const LaunchConfig& launch) {
   // to a Null backend for a real Play request. See docs/runtime/RUNTIME_SESSION.md.
   config.enable_graphics = launch.renderer != "None";
   config.graphics_backend = launch.renderer;
+#if defined(XENON_HAS_PRESENTATION_HOST)
+  // A Vulkan renderer presents to this process's window: its instance needs
+  // the window system's surface extensions, which only the host knows.
+  {
+    std::string renderer = launch.renderer;
+    std::transform(renderer.begin(), renderer.end(), renderer.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    if (renderer == "vulkan" && !launch.headless_mode) {
+      std::string error;
+      config.vulkan_instance_extensions = PresentationHost::vulkan_instance_extensions(&error);
+      if (config.vulkan_instance_extensions.empty())
+        std::cerr << "[runtime_host] Vulkan window-system extensions unavailable: " << error
+                  << std::endl;
+    }
+  }
+#endif
+  // "Persistent" keeps compiled shaders in the session directory between
+  // runs; "Session only" (or the cache switched off) keeps them in memory.
+  if (launch.shader_cache && launch.shader_cache_mode == "Persistent" &&
+      !launch.session_dir.empty())
+    config.shader_cache_directory =
+        (std::filesystem::path(launch.session_dir) / "shader_cache").string();
 
   // Same "None" convention on the input side; anything else (including an
   // empty/legacy launch config's default-constructed string) is treated as
@@ -192,7 +291,17 @@ xenon::core::SessionConfig build_session_config(const LaunchConfig& launch) {
   config.audio_mute_unfocused = launch.audio_mute_unfocused;
   config.audio_latency_profile = launch.audio_latency_profile;
 
+  // Game saves (XamContentCreate) and title profile settings live here.
+  // Without it the session falls back to a fresh temporary folder per run,
+  // so a save made in one session was gone in the next.
+  if (!launch.save_path.empty()) config.save_root_path = launch.save_path;
+
   config.native_extension_path = launch.native_extension_path;
+  // Per-revision runtime data the module ships beside its hints (the
+  // temporal rendering profile).
+  if (!launch.module_path.empty())
+    config.module_package_path = std::filesystem::path(launch.module_path) / "xenon-analysis";
+  config.temporal_probe_interval = launch.temporal_probe_frames;
   if (!launch.adaptive_observation_path.empty())
     config.adaptive_observation_path = launch.adaptive_observation_path;
   if (!launch.session_dir.empty()) {

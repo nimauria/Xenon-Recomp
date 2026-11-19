@@ -83,6 +83,11 @@ enum class DiscoverySource : std::uint8_t {
                        // Never a semantic boundary on its own.
                        // because multiple independent owners reference it. Low authority;
                        // eligible for absorption into a stronger overlapping owner.
+  AddressTakenCode,    // a code address built as a constant (lis + addi/ori) in guest code
+                       // that lands on a function boundary - just after an unconditional
+                       // return or tail branch, or its alignment padding: a callback
+                       // handed to qsort, a thread start routine. Entry evidence like
+                       // PointerTable; absorbed if CFG proves the address internal.
 };
 
 // Part 11: confidence is derived from evidence (DiscoverySource), not an

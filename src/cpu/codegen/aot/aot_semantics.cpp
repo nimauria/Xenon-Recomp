@@ -64,6 +64,23 @@ void write_vmx_f32(Vector128& v, unsigned lane, float f, const CpuState& state) 
   write_f32(v, lane, vmx_flush_subnormal(f, state));
 }
 
+// The VMX multiply-add family rounds the product to single precision before
+// the add, as Xbox 360 hardware does (xenia-project/xenia PPC test
+// instr_vmaddfp: 1.1 * 1.1 + 1.1 is 0x4013D70A, where a fused multiply-add
+// gives 0x4013D70B), and flushes a subnormal product like any other result.
+// Passing the product through the flush also keeps a compiler from fusing
+// the two back into one rounding.
+// NaN operands propagate in operand order (vmx_nan_order): the product's x
+// before y, then the product before z.
+float vmx_multiply_add(float x, float y, float z, const CpuState& state) noexcept {
+  const auto product = vmx_flush_subnormal(vmx_nan_order(x * y, x, y), state);
+  return vmx_nan_order(product + z, product, z);
+}
+float vmx_negative_multiply_subtract(float x, float y, float z, const CpuState& state) noexcept {
+  const auto product = vmx_flush_subnormal(vmx_nan_order(x * y, x, y), state);
+  return -vmx_nan_order(product - z, product, z);
+}
+
 
 float round_nearest_even(float value) noexcept {
   fenv_t env{};
@@ -76,10 +93,11 @@ float round_nearest_even(float value) noexcept {
 
 template <typename T>
 T vector_fp_to_int_sat(float value, CpuState& state) noexcept {
+  // A NaN converts to 0 for both the signed and unsigned forms (AltiVec
+  // vctsxs/vctuxs; rexglue masks NaN lanes to 0).
   if (std::isnan(value)) {
     state.set_vector_saturated();
-    if constexpr (std::is_signed_v<T>) return std::numeric_limits<T>::min();
-    else return T{};
+    return T{};
   }
   const long double x = std::trunc(static_cast<long double>(value));
   const long double lo = static_cast<long double>(std::numeric_limits<T>::min());
@@ -162,7 +180,7 @@ Vector128 fp_binary(const Vector128&a,const Vector128&b,char op,const CpuState& 
   Vector128 r{};
   for(unsigned i=0;i<4;++i){
     float x=read_vmx_f32(a,i,state),y=read_vmx_f32(b,i,state),z{};
-    switch(op){case '+':z=x+y;break;case '-':z=x-y;break;case '*':z=x*y;break;case 'x':z=std::fmax(x,y);break;case 'n':z=std::fmin(x,y);break;}
+    switch(op){case '+':z=vmx_nan_order(x+y,x,y);break;case '-':z=vmx_nan_order(x-y,x,y);break;case '*':z=vmx_nan_order(x*y,x,y);break;case 'x':z=std::fmax(x,y);break;case 'n':z=std::fmin(x,y);break;}
     write_vmx_f32(r,i,z,state);
   }
   return r;
@@ -251,38 +269,164 @@ Vector128 unpack_standard(VectorSemantic s,const Vector128&b){
   Vector128 r{};
   if(s==VectorSemantic::vupkhsb||s==VectorSemantic::vupkhsb128){for(unsigned i=0;i<8;++i)write_be<std::int16_t>(r,i,static_cast<std::int8_t>(b.bytes[i]));return r;}
   if(s==VectorSemantic::vupklsb||s==VectorSemantic::vupklsb128){for(unsigned i=0;i<8;++i)write_be<std::int16_t>(r,i,static_cast<std::int8_t>(b.bytes[8+i]));return r;}
-  if(s==VectorSemantic::vupkhsh){for(unsigned i=0;i<4;++i)write_be<std::int32_t>(r,i,static_cast<std::int16_t>(b.u16_be(i)));return r;}
-  if(s==VectorSemantic::vupklsh){for(unsigned i=0;i<4;++i)write_be<std::int32_t>(r,i,static_cast<std::int16_t>(b.u16_be(4+i)));return r;}
+  if(s==VectorSemantic::vupkhsh||s==VectorSemantic::vupkhsh128){for(unsigned i=0;i<4;++i)write_be<std::int32_t>(r,i,static_cast<std::int16_t>(b.u16_be(i)));return r;}
+  if(s==VectorSemantic::vupklsh||s==VectorSemantic::vupklsh128){for(unsigned i=0;i<4;++i)write_be<std::int32_t>(r,i,static_cast<std::int16_t>(b.u16_be(4+i)));return r;}
   return r;
 }
 
-Vector128 d3d_pack(std::uint32_t w,const Vector128&src){
-  Vector128 r{}; unsigned imm=vx128_imm4(w), type=imm>>2, pack=imm&3u, shift=vx128_z4(w); std::uint64_t packed=0;
-  switch(type){
-    case 0:{ // D3DCOLOR - clamp floats to [0,1], 8-bit ARGB/RGBA lane sequence.
-      std::uint32_t x=0; for(unsigned i=0;i<4;++i){auto f=std::clamp(read_f32(src,i),0.0f,1.0f);x=(x<<8)|std::uint32_t(std::lround(f*255.0f));} packed=x; break; }
-    case 1:{ packed=std::uint32_t(src.u16_be(0))<<16|src.u16_be(1); break; }
-    case 2:{ for(unsigned i=0;i<3;++i) packed|=(std::uint64_t(src.u32_be(i)&0x3FFu)<<(i*10)); packed|=std::uint64_t(src.u32_be(3)&3u)<<30; break; }
-    case 3:{ packed=std::uint32_t(float_to_half(read_f32(src,0)))<<16|float_to_half(read_f32(src,1)); break; }
-    case 4:{ for(unsigned i=0;i<4;++i) packed=(packed<<16)|src.u16_be(i); break; }
-    case 5:{ for(unsigned i=0;i<4;++i) packed=(packed<<16)|float_to_half(read_f32(src,i)); break; }
-    case 6:{ for(unsigned i=0;i<3;++i) packed|=(std::uint64_t(src.u32_be(i)&0xFFFFFu)<<(i*20)); packed|=std::uint64_t(src.u32_be(3)&0xFu)<<60; break; }
-    default: break;
+// VMX128 D3D pack/unpack (vpkd3d128/vupkd3d128). The hardware works on the
+// "magic number" float encodings D3D uses: an N-bit signed integer x is the
+// float whose bits are 0x40400000 + x (3.0 + x*2^-22), an unsigned w is
+// 0x3F800000 | w (1.0 + w*2^-23), and D3DCOLOR bytes are 0x3F800000 | byte.
+// Results follow the xenia-project/xenia PPC hardware test vectors
+// (instr_vpkd3d128.s / instr_vupkd3d128.s) bit for bit. Types:
+//   0 D3DCOLOR  1 NORMSHORT2  2 NORMPACKED32 (2:10:10:10)  3 FLOAT16_2
+//   4 NORMSHORT4  5 FLOAT16_4  6 NORMPACKED64 (4:20:20:20)
+// Type 6 has no hardware vectors; it follows the 2:10:10:10 rules widened to
+// 20-bit fields. Type 7, and a pack with mask 0, are undefined encodings:
+// the destination is left as it was.
+
+constexpr std::uint32_t kD3DThree = 0x40400000u;  // 3.0f
+constexpr std::uint32_t kD3DOne = 0x3F800000u;    // 1.0f
+constexpr std::uint32_t kD3DQuietNaN = 0x7FC00000u;
+
+// x86 maxps/minps order: a NaN in `value` yields `bound`, so NaN packs as the
+// saturation limit (games pack 0xFFFFFFFF to get a zero constant).
+float d3d_max(float value, std::uint32_t bound) noexcept {
+  const float b = std::bit_cast<float>(bound);
+  return value > b ? value : b;
+}
+float d3d_min(float value, std::uint32_t bound) noexcept {
+  const float b = std::bit_cast<float>(bound);
+  return value < b ? value : b;
+}
+// Saturates `value` to [lo, hi] in the magic-number domain; returns the bits.
+std::uint32_t d3d_saturate(float value, std::uint32_t lo, std::uint32_t hi) noexcept {
+  return std::bit_cast<std::uint32_t>(d3d_min(d3d_max(value, lo), hi));
+}
+
+// float -> IEEE half, rounding toward zero (the F16C mode xenia's PPC pack
+// uses): overflow gives the largest finite half, infinities and NaNs keep
+// their class.
+std::uint16_t float_to_half_toward_zero(float f) noexcept {
+  const std::uint32_t x = std::bit_cast<std::uint32_t>(f);
+  const std::uint32_t sign = (x >> 16) & 0x8000u;
+  const std::uint32_t exponent = (x >> 23) & 0xFFu;
+  std::uint32_t mantissa = x & 0x7FFFFFu;
+  if (exponent == 0xFFu)
+    return std::uint16_t(sign | 0x7C00u | (mantissa ? 0x200u | (mantissa >> 13) : 0u));
+  const int e = int(exponent) - 127 + 15;
+  if (e >= 31) return std::uint16_t(sign | 0x7BFFu);
+  if (e <= 0) {
+    if (e < -10) return std::uint16_t(sign);
+    mantissa |= 0x800000u;
+    return std::uint16_t(sign | (mantissa >> unsigned(14 - e)));
   }
-  // VMX128 z selects the packed destination word position; pack acts as a write mask.
-  const unsigned bytes = type==4||type==5||type==6 ? 8u : 4u;
-  unsigned pos=std::min<unsigned>(shift*4u,16u-bytes);
-  for(unsigned i=0;i<bytes;++i) r.bytes[pos+i]=std::uint8_t(packed>>(8u*(bytes-1u-i)));
-  (void)pack;
+  return std::uint16_t(sign | (unsigned(e) << 10) | (mantissa >> 13));
+}
+
+// An N-bit signed field to the magic-number float; the most negative value
+// (which has no magic encoding) unpacks as a quiet NaN.
+std::uint32_t d3d_unpack_signed(std::uint64_t field, unsigned bits) noexcept {
+  const std::int32_t value = std::int32_t(std::uint32_t(field << (32u - bits))) >> (32u - bits);
+  if (value == -(std::int32_t(1) << (bits - 1u))) return kD3DQuietNaN;
+  return kD3DThree + std::uint32_t(value);
+}
+
+Vector128 d3d_pack(std::uint32_t w, const Vector128& old, const Vector128& src) {
+  const unsigned imm = vx128_imm4(w), type = imm >> 2, pack = imm & 3u, shift = vx128_z4(w);
+  if (type == 7u || pack == 0u) return old;
+  const auto lane = [&](unsigned i) { return read_f32(src, i); };
+  std::uint64_t packed = 0;  // The low 32 bits are the low guest word.
+  switch (type) {
+    case 0: {  // RGBA lanes -> ARGB bytes, each saturated to [3.0, 3.0+255ulp].
+      std::uint32_t c[4];
+      for (unsigned i = 0; i < 4; ++i) c[i] = d3d_saturate(lane(i), kD3DThree, 0x404000FFu) & 0xFFu;
+      packed = (c[3] << 24) | (c[0] << 16) | (c[1] << 8) | c[2];
+      break;
+    }
+    case 1:
+      packed = (d3d_saturate(lane(0), 0x403F8001u, 0x40407FFFu) & 0xFFFFu) << 16 |
+               (d3d_saturate(lane(1), 0x403F8001u, 0x40407FFFu) & 0xFFFFu);
+      break;
+    case 2:
+      for (unsigned i = 0; i < 3; ++i)
+        packed |= std::uint64_t(d3d_saturate(lane(i), 0x403FFE01u, 0x404001FFu) & 0x3FFu) << (10u * i);
+      packed |= std::uint64_t(d3d_saturate(lane(3), kD3DThree, 0x40400003u) & 3u) << 30;
+      break;
+    case 3:
+      packed = std::uint32_t(float_to_half_toward_zero(lane(0))) << 16 |
+               float_to_half_toward_zero(lane(1));
+      break;
+    case 4:
+      for (unsigned i = 0; i < 4; ++i)
+        packed = (packed << 16) | (d3d_saturate(lane(i), 0x403F8001u, 0x40407FFFu) & 0xFFFFu);
+      break;
+    case 5:
+      for (unsigned i = 0; i < 4; ++i) packed = (packed << 16) | float_to_half_toward_zero(lane(i));
+      break;
+    case 6:
+      for (unsigned i = 0; i < 3; ++i)
+        packed |= std::uint64_t(d3d_saturate(lane(i), 0x40380001u, 0x4047FFFFu) & 0xFFFFFu) << (20u * i);
+      packed |= std::uint64_t(d3d_saturate(lane(3), kD3DThree, 0x4040000Fu) & 0xFu) << 60;
+      break;
+  }
+  const auto high = std::uint32_t(packed >> 32), low = std::uint32_t(packed);
+  // The mask selects a word (1) or a word pair (2, 3); the shift moves it
+  // left by whole words. Every other word of vD is kept.
+  Vector128 r = old;
+  if (pack == 1u) {
+    r.set_u32_be(3u - shift, low);
+  } else if (shift < 3u) {
+    r.set_u32_be(2u - shift, high);
+    r.set_u32_be(3u - shift, low);
+  } else if (pack == 2u) {
+    r.set_u32_be(0, low);
+  } else {
+    r.set_u32_be(3, high);
+  }
   return r;
 }
 
-Vector128 d3d_unpack(std::uint32_t w,const Vector128&src){
-  Vector128 r{}; const unsigned type=vx128_imm3(w)>>2;
-  if(type==0){ std::uint32_t x=src.u32_be(3); for(unsigned i=0;i<4;++i)write_f32(r,i,float((x>>(24-8*i))&0xFFu)/255.0f); }
-  else if(type==1){write_be<std::int32_t>(r,0,static_cast<std::int16_t>(src.u16_be(6)));write_be<std::int32_t>(r,1,static_cast<std::int16_t>(src.u16_be(7)));}
-  else if(type==3){write_f32(r,0,half_to_float(src.u16_be(6)));write_f32(r,1,half_to_float(src.u16_be(7)));}
-  else if(type==5){for(unsigned i=0;i<4;++i)write_f32(r,i,half_to_float(src.u16_be(4+i)));}
+Vector128 d3d_unpack(std::uint32_t w, const Vector128& old, const Vector128& src) {
+  const unsigned type = vx128_imm3(w) >> 2;
+  const std::uint32_t word = src.u32_be(3);
+  const std::uint64_t pair = (std::uint64_t(src.u32_be(2)) << 32) | word;
+  Vector128 r{};
+  switch (type) {
+    case 0:  // ARGB bytes -> RGBA lanes.
+      r.set_u32_be(0, kD3DOne | ((word >> 16) & 0xFFu));
+      r.set_u32_be(1, kD3DOne | ((word >> 8) & 0xFFu));
+      r.set_u32_be(2, kD3DOne | (word & 0xFFu));
+      r.set_u32_be(3, kD3DOne | (word >> 24));
+      break;
+    case 1:  // (x, y, 0.0, 1.0): titles splat w to get a vector of ones.
+      r.set_u32_be(0, d3d_unpack_signed(word >> 16, 16));
+      r.set_u32_be(1, d3d_unpack_signed(word, 16));
+      r.set_u32_be(3, kD3DOne);
+      break;
+    case 2:
+      for (unsigned i = 0; i < 3; ++i) r.set_u32_be(i, d3d_unpack_signed(word >> (10u * i), 10));
+      r.set_u32_be(3, kD3DOne | (word >> 30));
+      break;
+    case 3:
+      write_f32(r, 0, half_to_float(std::uint16_t(word >> 16)));
+      write_f32(r, 1, half_to_float(std::uint16_t(word)));
+      r.set_u32_be(3, kD3DOne);
+      break;
+    case 4:
+      for (unsigned i = 0; i < 4; ++i) r.set_u32_be(i, d3d_unpack_signed(pair >> (48u - 16u * i), 16));
+      break;
+    case 5:
+      for (unsigned i = 0; i < 4; ++i) write_f32(r, i, half_to_float(std::uint16_t(pair >> (48u - 16u * i))));
+      break;
+    case 6:
+      for (unsigned i = 0; i < 3; ++i) r.set_u32_be(i, d3d_unpack_signed(pair >> (20u * i), 20));
+      r.set_u32_be(3, kD3DOne | std::uint32_t(pair >> 60));
+      break;
+    default:
+      return old;
+  }
   return r;
 }
 
@@ -365,14 +509,18 @@ Vector128 execute_vector(VectorSemantic s, std::uint32_t w, CpuState& state,
     case VectorSemantic::vctsxs:case VectorSemantic::vcfpsxws128:{unsigned sh=(s==VectorSemantic::vctsxs)?vx_imm5(w):vx128_imm3(w);float scale=std::ldexp(1.0f,int(sh));for(unsigned i=0;i<4;++i)write_be<std::int32_t>(r,i,vector_fp_to_int_sat<std::int32_t>(read_vmx_f32(a,i,state)*scale,state));return r;}
     case VectorSemantic::vctuxs:case VectorSemantic::vcfpuxws128:{unsigned sh=(s==VectorSemantic::vctuxs)?vx_imm5(w):vx128_imm3(w);float scale=std::ldexp(1.0f,int(sh));for(unsigned i=0;i<4;++i)write_be<std::uint32_t>(r,i,vector_fp_to_int_sat<std::uint32_t>(read_vmx_f32(a,i,state)*scale,state));return r;}
 
-    case VectorSemantic::vmaddfp:{for(unsigned i=0;i<4;++i)write_vmx_f32(r,i,std::fma(read_vmx_f32(a,i,state),read_vmx_f32(c,i,state),read_vmx_f32(b,i,state)),state);return r;}
-    case VectorSemantic::vmaddfp128:{for(unsigned i=0;i<4;++i)write_vmx_f32(r,i,std::fma(read_vmx_f32(b,i,state),read_vmx_f32(c,i,state),read_vmx_f32(a,i,state)),state);return r;}
-    case VectorSemantic::vmaddcfp128:{for(unsigned i=0;i<4;++i)write_vmx_f32(r,i,std::fma(read_vmx_f32(b,i,state),read_vmx_f32(a,i,state),read_vmx_f32(c,i,state)),state);return r;}
-    case VectorSemantic::vnmsubfp:{for(unsigned i=0;i<4;++i)write_vmx_f32(r,i,-std::fma(read_vmx_f32(a,i,state),read_vmx_f32(c,i,state),-read_vmx_f32(b,i,state)),state);return r;}
+    case VectorSemantic::vmaddfp:{for(unsigned i=0;i<4;++i)write_vmx_f32(r,i,vmx_multiply_add(read_vmx_f32(a,i,state),read_vmx_f32(c,i,state),read_vmx_f32(b,i,state),state),state);return r;}
+    case VectorSemantic::vmaddfp128:{for(unsigned i=0;i<4;++i)write_vmx_f32(r,i,vmx_multiply_add(read_vmx_f32(b,i,state),read_vmx_f32(c,i,state),read_vmx_f32(a,i,state),state),state);return r;}
+    case VectorSemantic::vmaddcfp128:{for(unsigned i=0;i<4;++i)write_vmx_f32(r,i,vmx_multiply_add(read_vmx_f32(b,i,state),read_vmx_f32(a,i,state),read_vmx_f32(c,i,state),state),state);return r;}
+    case VectorSemantic::vnmsubfp:{for(unsigned i=0;i<4;++i)write_vmx_f32(r,i,vmx_negative_multiply_subtract(read_vmx_f32(a,i,state),read_vmx_f32(c,i,state),read_vmx_f32(b,i,state),state),state);return r;}
     // VMX128 inputs are (old vD, vA, vB): vD = -(vA * vB - old vD).
-    case VectorSemantic::vnmsubfp128:{for(unsigned i=0;i<4;++i)write_vmx_f32(r,i,-std::fma(read_vmx_f32(b,i,state),read_vmx_f32(c,i,state),-read_vmx_f32(a,i,state)),state);return r;}
-    case VectorSemantic::vmsum3fp128:{float z=0;for(unsigned i=0;i<3;++i)z+=read_vmx_f32(b,i,state)*read_vmx_f32(c,i,state);for(unsigned i=0;i<4;++i)write_vmx_f32(r,i,z,state);return r;}
-    case VectorSemantic::vmsum4fp128:{float z=0;for(unsigned i=0;i<4;++i)z+=read_vmx_f32(b,i,state)*read_vmx_f32(c,i,state);for(unsigned i=0;i<4;++i)write_vmx_f32(r,i,z,state);return r;}
+    case VectorSemantic::vnmsubfp128:{for(unsigned i=0;i<4;++i)write_vmx_f32(r,i,vmx_negative_multiply_subtract(read_vmx_f32(b,i,state),read_vmx_f32(c,i,state),read_vmx_f32(a,i,state),state),state);return r;}
+    case VectorSemantic::vmsum3fp128:case VectorSemantic::vmsum4fp128:{
+      // Products summed in lane order from 0.0f, NaNs in operand order.
+      const unsigned lanes=s==VectorSemantic::vmsum3fp128?3u:4u;
+      float z=0;
+      for(unsigned i=0;i<lanes;++i){const float x=read_vmx_f32(b,i,state),y=read_vmx_f32(c,i,state);const float p=vmx_nan_order(x*y,x,y);z=vmx_nan_order(z+p,z,p);}
+      for(unsigned i=0;i<4;++i)write_vmx_f32(r,i,z,state);return r;}
 
     case VectorSemantic::vmladduhm:{for(unsigned i=0;i<8;++i)r.set_u16_be(i,std::uint16_t(std::uint32_t(a.u16_be(i))*b.u16_be(i)+c.u16_be(i)));return r;}
     case VectorSemantic::vmhaddshs:case VectorSemantic::vmhraddshs:{for(unsigned i=0;i<8;++i){std::int32_t p=std::int32_t(read_be<std::int16_t>(a,i))*read_be<std::int16_t>(b,i);if(s==VectorSemantic::vmhraddshs)p+=0x4000;p=(p>>15)+read_be<std::int16_t>(c,i);write_be<std::int16_t>(r,i,sat_cast<std::int16_t>(p,state));}return r;}
@@ -426,9 +574,10 @@ Vector128 execute_vector(VectorSemantic s, std::uint32_t w, CpuState& state,
 
     case VectorSemantic::vpkuhum:case VectorSemantic::vpkuhum128:case VectorSemantic::vpkuhus:case VectorSemantic::vpkuhus128:case VectorSemantic::vpkshss:case VectorSemantic::vpkshss128:case VectorSemantic::vpkshus:case VectorSemantic::vpkshus128:
     case VectorSemantic::vpkuwum:case VectorSemantic::vpkuwum128:case VectorSemantic::vpkuwus:case VectorSemantic::vpkuwus128:case VectorSemantic::vpkswss:case VectorSemantic::vpkswss128:case VectorSemantic::vpkswus:case VectorSemantic::vpkswus128:return pack_standard(s,a,b,state);
-    case VectorSemantic::vupkhsb:case VectorSemantic::vupkhsb128:case VectorSemantic::vupklsb:case VectorSemantic::vupklsb128:case VectorSemantic::vupkhsh:case VectorSemantic::vupklsh:return unpack_standard(s,a);
-    case VectorSemantic::vpkd3d128:return d3d_pack(w,a);
-    case VectorSemantic::vupkd3d128:return d3d_unpack(w,a);
+    case VectorSemantic::vupkhsb:case VectorSemantic::vupkhsb128:case VectorSemantic::vupklsb:case VectorSemantic::vupklsb128:case VectorSemantic::vupkhsh:case VectorSemantic::vupkhsh128:case VectorSemantic::vupklsh:case VectorSemantic::vupklsh128:return unpack_standard(s,a);
+    // (old vD, vB), as lifter/vector.cpp and the interpreter wire them.
+    case VectorSemantic::vpkd3d128:return d3d_pack(w,a,b);
+    case VectorSemantic::vupkd3d128:return d3d_unpack(w,a,b);
     case VectorSemantic::vpkpx:{for(unsigned i=0;i<4;++i){auto conv=[](std::uint32_t x){return std::uint16_t(((x>>16)&0x8000u)|((x>>9)&0x7C00u)|((x>>6)&0x03E0u)|((x>>3)&0x001Fu));};r.set_u16_be(i,conv(a.u32_be(i)));r.set_u16_be(4+i,conv(b.u32_be(i)));}return r;}
     case VectorSemantic::vupkhpx:case VectorSemantic::vupklpx:{unsigned base=s==VectorSemantic::vupkhpx?0:4;for(unsigned i=0;i<4;++i){auto x=a.u16_be(base+i);std::uint32_t y=((x&0x8000u)<<16)|((x&0x7C00u)<<9)|((x&0x03E0u)<<6)|((x&0x001Fu)<<3);r.set_u32_be(i,y);}return r;}
 
@@ -453,43 +602,18 @@ Vector128 execute_vector(VectorSemantic s, std::uint32_t w, CpuState& state,
 Vector128 vector_load_shift_left(std::uint64_t ea) noexcept { Vector128 r{};unsigned n=unsigned(ea&15u);for(unsigned i=0;i<16;++i)r.bytes[i]=std::uint8_t((n+i)&31u);return r; }
 Vector128 vector_load_shift_right(std::uint64_t ea) noexcept { Vector128 r{};unsigned n=unsigned(ea&15u);for(unsigned i=0;i<16;++i)r.bytes[i]=std::uint8_t((16u-n+i)&31u);return r; }
 
-Vector128 vector_load_element(const Vector128& old, MemoryAccessContext& m, GuestAddress ea,unsigned width){Vector128 r=old;unsigned p=unsigned(ea&15u);if(width==1)r.bytes[p]=m.read8(ea);else if(width==2){ea&=~GuestAddress{1};unsigned lane=(p&14u)/2;r.set_u16_be(lane,m.read16_be(ea));}else{ea&=~GuestAddress{3};unsigned lane=(p&12u)/4;r.set_u32_be(lane,m.read32_be(ea));}return r;}
+// lvebx/lvehx/lvewx(128): AltiVec leaves the lanes other than the addressed
+// element undefined; the Xbox 360 loads the whole aligned quadword, as lvx
+// does (xenia-project/xenia PPC tests instr_lvexx: lvewx of 0x10001000 yields
+// all four words). Titles that read a neighbouring lane see memory, not the
+// register's old contents.
+Vector128 vector_load_element(const Vector128& old, MemoryAccessContext& m, GuestAddress ea,
+                              unsigned width) {
+  (void)old;
+  (void)width;
+  return m.read128(GuestAddress(ea & ~GuestAddress{15}));
+}
 void vector_store_element(const Vector128& v,MemoryAccessContext&m,GuestAddress ea,unsigned width){unsigned p=unsigned(ea&15u);if(width==1)m.write8(ea,v.bytes[p]);else if(width==2){ea&=~GuestAddress{1};m.write16_be(ea,v.u16_be((p&14u)/2));}else{ea&=~GuestAddress{3};m.write32_be(ea,v.u32_be((p&12u)/4));}}
-Vector128 vector_load_left(const Vector128& old, MemoryAccessContext& m,
-                           GuestAddress ea) {
-  (void)old;
-  Vector128 result{};
-  const auto n = static_cast<unsigned>(ea & 15u);
-  auto bytes = std::as_writable_bytes(std::span(result.bytes));
-  m.read_bytes(ea, bytes.first(16u - n));
-  return result;
-}
-
-Vector128 vector_load_right(const Vector128& old, MemoryAccessContext& m,
-                            GuestAddress ea) {
-  (void)old;
-  Vector128 result{};
-  const auto base = GuestAddress(ea & ~15u);
-  const auto n = static_cast<unsigned>(ea & 15u);
-  auto bytes = std::as_writable_bytes(std::span(result.bytes));
-  if (n) m.read_bytes(base, bytes.subspan(16u - n, n));
-  return result;
-}
-
-void vector_store_left(const Vector128& value, MemoryAccessContext& m,
-                       GuestAddress ea) {
-  const auto n = static_cast<unsigned>(ea & 15u);
-  const auto bytes = std::as_bytes(std::span(value.bytes));
-  m.write_bytes(ea, bytes.first(16u - n));
-}
-
-void vector_store_right(const Vector128& value, MemoryAccessContext& m,
-                        GuestAddress ea) {
-  const auto base = GuestAddress(ea & ~15u);
-  const auto n = static_cast<unsigned>(ea & 15u);
-  const auto bytes = std::as_bytes(std::span(value.bytes));
-  if (n) m.write_bytes(base, bytes.subspan(16u - n, n));
-}
 
 void string_load(CpuState& state, MemoryAccessContext& memory, GuestAddress ea,
                  std::uint32_t count, unsigned first) {

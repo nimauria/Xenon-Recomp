@@ -12,6 +12,7 @@
 #include "xenon/core/session.hpp"
 
 #include "xenon/kernel/time.hpp"
+#include "xenon/xbox/xboxkrnl_sync_exports.hpp"
 
 #include <algorithm>
 #include <array>
@@ -773,6 +774,59 @@ void test_ex_create_thread_rejects_null_start_address() {
   assert(cpu.gpr[3] == 0xC000000Du);  // STATUS_INVALID_PARAMETER
 }
 
+// ExTerminateThread never returns on hardware. AC6's thread exit stub is
+// followed by an unrelated routine that dereferences null; Xenon used to
+// return from the export and let the thread run into it, so every worker that
+// exited this way was reported as crashed and the title hung at "checking
+// downloadable content".
+xenon::core::XenonSession* g_terminating_session = nullptr;
+std::atomic<bool> g_ran_after_terminate{false};
+
+ExecutionResult self_terminating_entry(ExecutionContext& context) {
+  context.state.gpr[3] = 0x1234u;
+  static_cast<void>(xenon::core::SessionExecutionTestAccess::external_call(
+      *g_terminating_session, "xboxkrnl.exe", 0x019u, context.state, context.memory));
+  g_ran_after_terminate.store(true);
+  static_cast<void>(context.memory.read32_be(0u));
+  context.state.lr = 0u;
+  return {FlowReason::Return, 0u, 0u};
+}
+
+void test_ex_terminate_thread_does_not_return_to_the_guest() {
+  g_ran_after_terminate.store(false);
+  ThreadCreationHarness harness(&self_terminating_entry);
+  g_terminating_session = &harness.session;
+  auto& process = *harness.session.kernel_process();
+  core::ExportDescriptor descriptor{};
+  descriptor.library = "xboxkrnl.exe";
+  descriptor.name = "ExTerminateThread";
+  descriptor.ordinal = 0x019u;
+  descriptor.requirement = core::ExportRequirement::Required;
+  descriptor.handler = [&process](core::ExportCallContext& ctx) {
+    return xbox::ex_terminate_thread_export(process, ctx);
+  };
+  assert(harness.session.exports()->register_export(std::move(descriptor)));
+
+  xenon::memory::GuestAddress handle_out{};
+  assert(harness.session.memory()->allocate(4, 4, xenon::memory::kReadWrite, false, handle_out));
+  xenon::cpu::CpuState cpu{};
+  cpu.gpr[3] = handle_out;
+  cpu.gpr[7] = 0x3000u;
+  auto call = make_call(cpu, *harness.session.memory());
+  assert(xenon::core::SessionExecutionTestAccess::ex_create_thread(harness.session, call));
+  kernel::HandleView view{};
+  assert(process.handle_table().lookup(harness.session.memory()->read32_be(handle_out), view) ==
+         kernel::KernelIoCode::Success);
+  auto& thread = static_cast<kernel::KernelThread&>(*view.object);
+
+  assert(thread.join(2000));
+  assert(!g_ran_after_terminate.load() &&
+         "no guest code may run after ExTerminateThread");
+  assert(thread.state() == kernel::ThreadState::Terminated);
+  assert(thread.exit_code() == 0x1234u);
+  g_terminating_session = nullptr;
+}
+
 void test_external_call_resolves_real_calling_thread_identity() {
   // Regression for external_call() previously hardcoding thread_id to 0.
   ThreadCreationHarness harness(&echo_increment_entry);
@@ -1078,6 +1132,7 @@ int main() {
   test_ex_create_thread_crash_produces_terminal_state_and_nonzero_exit();
   test_ex_create_thread_rejects_null_start_address();
   test_external_call_resolves_real_calling_thread_identity();
+  test_ex_terminate_thread_does_not_return_to_the_guest();
   test_thread_count_returns_to_baseline_after_threads_finish();
   test_capability_report_kernel_objects_section_reflects_real_liveness();
   test_run_execution_reaps_main_thread_without_self_destruction();

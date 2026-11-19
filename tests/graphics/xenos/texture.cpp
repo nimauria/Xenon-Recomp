@@ -4,6 +4,7 @@
 #include <cstring>
 #include <iostream>
 #include <set>
+#include <string>
 #include <vector>
 
 #include "xenon/gpu/depth_format.hpp"
@@ -43,8 +44,72 @@ void test_complete_format_catalogue() {
   assert(texture_format_info(18).bytes_per_block() == 8);
   assert(texture_format_info(20).bytes_per_block() == 16);
   assert(texture_format_info(49).host_format == TextureHostFormat::BC5Unorm);
-  assert(texture_format_info(22).host_format == TextureHostFormat::Unsupported);
-  assert(texture_format_info(23).host_format == TextureHostFormat::Unsupported);
+  // Sampled depth: float32 depth in one channel, read by every component.
+  assert(texture_format_info(22).host_format == TextureHostFormat::R32Float);
+  assert(texture_format_info(22).load == TextureLoad::DepthUnorm24ToFloat);
+  assert(texture_format_info(23).host_format == TextureHostFormat::R32Float);
+  assert(texture_format_info(23).load == TextureLoad::DepthFloat20e4ToFloat);
+  assert(texture_format_info(22).replicate_first_component);
+  assert(!texture_format_info(6).replicate_first_component);
+
+  // A format without a native mapping fails with an error naming it, so the
+  // GPU error log says which mapping a title needs.
+  auto unsupported = rgba8(16, 16, false);
+  unsupported.format = 5;  // 6_5_5
+  std::vector<std::byte> memory(0x40000);
+  const auto failed = decode_texture(unsupported, memory);
+  assert(!failed.valid);
+  assert(failed.error == "Xenos texture format 5 (6_5_5) has no lossless native mapping");
+}
+
+// A resolved depth buffer sampled as a texture (Ace Combat 6's opening reads
+// one through 24_8 and 24_8_FLOAT): each packed depth/stencil word decodes to
+// its float32 depth, the stencil byte is dropped, and a fetch of any component
+// reads that depth.
+void test_sampled_depth_formats() {
+  struct Case {
+    std::uint8_t format;
+    DepthRenderTargetFormat depth_format;
+    float values[4];
+  };
+  const Case cases[] = {
+      {22, DepthRenderTargetFormat::D24S8, {0.0f, 0.25f, 0.5f, 1.0f}},
+      {23, DepthRenderTargetFormat::D24FS8, {0.0f, 0.5f, 1.0f, 1.5f}},  // 20e4 reaches past 1
+  };
+  for (const auto& c : cases) {
+    auto descriptor = rgba8(4, 1, false);
+    descriptor.format = c.format;
+    descriptor.endian = Endian::None;
+    std::vector<std::byte> memory(0x40000);
+    for (std::uint32_t x = 0; x < 4u; ++x) {
+      const auto packed = pack_depth_stencil(c.depth_format, c.values[x],
+                                             static_cast<std::uint8_t>(0xA0u + x));
+      std::memcpy(memory.data() + descriptor.base_address + x * 4u, &packed, 4u);
+    }
+    const auto decoded = decode_texture(descriptor, memory);
+    assert(decoded.valid && decoded.error.empty());
+    for (std::uint32_t x = 0; x < 4u; ++x) {
+      float depth{};
+      std::memcpy(&depth, decoded.linear_data.data() + x * 4u, sizeof(depth));
+      const auto expected = c.depth_format == DepthRenderTargetFormat::D24FS8
+                                ? quantize_float20e4(c.values[x])
+                                : unpack_depth_stencil(c.depth_format,
+                                                       pack_depth_stencil(c.depth_format,
+                                                                          c.values[x], 0))
+                                      .depth;
+      assert(depth == expected);
+    }
+    // Encoding back would need the dropped stencil.
+    std::string error;
+    assert(!encode_texture(descriptor, decoded.linear_data, memory, &error));
+    assert(error.find("cannot be encoded back") != std::string::npos);
+  }
+
+  // Swizzle: 3 bits per component, 0-3 select x/y/z/w, 4/5 force 0/1.
+  const std::uint16_t yzw_one = 1u | (2u << 3u) | (3u << 6u) | (5u << 9u);
+  assert(host_view_swizzle(22, yzw_one) == (0u | (0u << 3u) | (0u << 6u) | (5u << 9u)));
+  assert(host_view_swizzle(23, yzw_one) == (0u | (0u << 3u) | (0u << 6u) | (5u << 9u)));
+  assert(host_view_swizzle(6, yzw_one) == yzw_one);  // other formats keep theirs
 }
 
 void test_tiled_decode_and_endian() {
@@ -132,6 +197,53 @@ void test_mips_packing_and_dirty_ranges() {
   const auto dirty_epoch = coherency.current_epoch();
   assert(dirty.consume_dirty(descriptor.hash(), coherency, dirty_epoch));
   assert(!dirty.consume_dirty(descriptor.hash(), coherency, dirty_epoch));
+}
+
+// Regression (AC6 clouds as blocky noise, minified terrain and runway as
+// garbage): only 3D textures tile depth in groups of four slices. 2D mips and
+// cube faces are one 4 KiB-aligned slice apart (xenia/rexglue
+// GetGuestTextureLayout, COGBox texture_layout.h), and a mip tail packed from
+// level 0 is stored once, at the start of the mips.
+void test_layer_and_mip_strides() {
+  // 256x256 RGBA8, tiled, unpacked mips: mip 1 (128x128) is 128 * 4 bytes x
+  // 128 rows = 64 KiB, so mip 2 starts 64 KiB after the mip address.
+  auto mipped = rgba8(256, 256, true);
+  mipped.mip_max_level = 8;
+  auto layout = build_texture_layout(mipped);
+  assert(layout.valid && layout.subresources.size() == 9u);
+  assert(layout.subresources[1].guest_address == mipped.mip_address);
+  assert(layout.subresources[1].guest_size_bytes == 0x10000u);
+  assert(layout.subresources[2].guest_address == mipped.mip_address + 0x10000u);
+  assert(layout.subresources[3].guest_address == mipped.mip_address + 0x10000u + 0x4000u);
+
+  // 64x64 RGBA8 cube: each face is 64 * 4 bytes x 64 rows = 16 KiB.
+  auto cube = rgba8(64, 64, true);
+  cube.dimension = TextureDimension::Cube;
+  layout = build_texture_layout(cube);
+  assert(layout.valid && layout.subresources.size() == 6u);
+  for (std::uint32_t face = 0; face < 6u; ++face) {
+    assert(layout.subresources[face].array_layer == face);
+    assert(layout.subresources[face].guest_address == cube.base_address + face * 0x4000u);
+  }
+
+  // A 3D texture still keeps four slices per depth tile.
+  auto volume = rgba8(32, 32, true);
+  volume.dimension = TextureDimension::ThreeD;
+  volume.depth = 2;
+  layout = build_texture_layout(volume);
+  assert(layout.valid && layout.subresources[0].guest_size_bytes == 4u * 32u * 4u * 32u);
+
+  // 16x16 with packed mips: the tail starts at level 0, so the base keeps
+  // its own and every mip samples inside one shared tail at the mip address.
+  auto small = rgba8(16, 16, true);
+  small.mip_max_level = 4;
+  small.packed_mips = true;
+  layout = build_texture_layout(small);
+  assert(layout.valid && layout.subresources.size() == 5u);
+  assert(layout.subresources[0].guest_address == small.base_address);
+  for (std::size_t mip = 1; mip < layout.subresources.size(); ++mip)
+    assert(layout.subresources[mip].guest_address == small.mip_address);
+  std::cout << "  [PASS] 2D, cube and 3D layer and mip strides\n";
 }
 
 void test_3d_tiled_addressing() {
@@ -368,16 +480,50 @@ void test_converted_resolve_write() {
              ColorRenderTargetFormat::R8G8B8A8Gamma, gamma_sample)[0]);
 }
 
+// 32_32_32_FLOAT is widened on load: no D3D12 or Vulkan device here samples
+// a 96-bit format (the host images failed to create), so each 12-byte texel
+// becomes four floats with w = 1.0, what a fetch of the format returns in w.
+void test_rgb_float_is_widened() {
+  const auto& format = texture_format_info(57);
+  assert(format.bytes_per_block() == 12u && format.host_bytes_per_block() == 16u);
+  assert(format.host_format == TextureHostFormat::R32G32B32A32Float);
+  assert(format.load == TextureLoad::ExpandRgbFloatToRgba);
+  TextureDescriptor d{};
+  d.base_address = 0x1000;
+  d.width = 2;
+  d.height = 1;
+  d.depth = 1;
+  d.pitch = 32;
+  d.format = 57;
+  d.endian = Endian::None;
+  d.valid = true;
+  std::vector<std::byte> memory(0x4000);
+  const std::array<float, 6> texels{1.5f, -2.0f, 3.25f, 4.0f, 5.5f, -6.75f};
+  std::memcpy(memory.data() + 0x1000, texels.data(), sizeof(texels));
+  const auto decoded = decode_texture(d, memory);
+  assert(decoded.valid);
+  assert(decoded.layout.subresources[0].linear_row_pitch_bytes == 32u);
+  std::array<float, 8> host{};
+  assert(decoded.linear_data.size() >= sizeof(host));
+  std::memcpy(host.data(), decoded.linear_data.data(), sizeof(host));
+  assert((host == std::array<float, 8>{1.5f, -2.0f, 3.25f, 1.0f, 4.0f, 5.5f, -6.75f, 1.0f}));
+  // Widened texels have no exact guest encoding to write back.
+  assert(!encode_texture(d, decoded.linear_data, memory));
+}
+
 }  // namespace
 
 int main() {
   test_complete_format_catalogue();
+  test_sampled_depth_formats();
   test_tiled_decode_and_endian();
   test_mips_packing_and_dirty_ranges();
+  test_layer_and_mip_strides();
   test_3d_tiled_addressing();
   test_endian128_modes();
   test_raw_resolve_write();
   test_depth_resolve_write();
   test_converted_resolve_write();
+  test_rgb_float_is_widened();
   std::cout << "xenon_texture_tests: ok\n";
 }

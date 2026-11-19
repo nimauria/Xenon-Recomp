@@ -86,6 +86,9 @@ struct AnalysisContext {
   // from one function and a validated tail call from another carry BOTH
   // pieces of evidence once it is finally claimed and analyzed.
   const std::map<GuestAddress, std::vector<DiscoverySource>>& discovered_evidence;
+  // The hint set's instruction hooks; each compiled function takes the ones
+  // inside its ranges.
+  const InstructionHookPlan& instruction_hooks;
 };
 
 // Candidate filtering and canonicalization

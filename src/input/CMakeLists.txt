@@ -18,6 +18,7 @@ if(XENON_ENABLE_INPUT)
     flight_driver.cpp
     xinput/xinput_driver.cpp
     keyboard_mouse_driver.cpp
+    module_input_profile.cpp
     xam_facade.cpp
     null_driver.cpp
     sdl/sdl_driver.cpp
@@ -34,20 +35,11 @@ if(XENON_ENABLE_INPUT)
   endif()
 
   if(XENON_INPUT_ENABLE_SDL3)
-    find_package(SDL3 3.2 QUIET CONFIG)
-    if(TARGET SDL3::SDL3)
+    xenon_resolve_sdl3(XENON_INPUT_SDL_TARGET)
+    if(XENON_INPUT_SDL_TARGET)
       target_sources(xenon_input PRIVATE sdl/sdl3_host.cpp)
-      target_link_libraries(xenon_input PRIVATE SDL3::SDL3)
+      target_link_libraries(xenon_input PRIVATE ${XENON_INPUT_SDL_TARGET})
       target_compile_definitions(xenon_input PUBLIC XENON_INPUT_HAS_SDL3=1)
-    endif()
-  endif()
-
-  if(XENON_INPUT_ENABLE_SDL2)
-    xenon_resolve_sdl2(XENON_SDL2_TARGET)
-    if(XENON_SDL2_TARGET)
-      target_sources(xenon_input PRIVATE sdl/sdl2_host.cpp)
-      target_link_libraries(xenon_input PRIVATE ${XENON_SDL2_TARGET})
-      target_compile_definitions(xenon_input PUBLIC XENON_INPUT_HAS_SDL2=1)
     endif()
   endif()
 

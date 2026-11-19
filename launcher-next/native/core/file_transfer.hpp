@@ -6,6 +6,7 @@
 namespace xenon::launcher_next {
 // All recursive operations reject links, junctions and other redirected entries.
 bool redirected_path(const std::filesystem::path &path);
+bool path_within(const std::filesystem::path &path, const std::filesystem::path &root);
 void check_transfer_tree(const std::filesystem::path &path);
 nlohmann::json
 copy_library_content(const std::filesystem::path &source, const std::filesystem::path &destination,

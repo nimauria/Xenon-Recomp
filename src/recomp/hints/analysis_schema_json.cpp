@@ -266,6 +266,19 @@ JsonValue to_json(const AnalysisHintSetV2& hint_set) {
     entry.set("address", JsonValue(hook.address));
     entry.set("nativeReplacementIdentity", hook.native_replacement_identity);
     if (!hook.description.empty()) entry.set("description", hook.description);
+    if (hook.kind == HookKind::Instruction) {
+      entry.set("kind", "instruction");
+      entry.set("symbol", hook.symbol);
+      if (hook.after_instruction) entry.set("afterInstruction", JsonValue(true));
+      const auto set_action = [&](const char* key, HookAction action, std::uint32_t target,
+                                  const char* target_key) {
+        if (action == HookAction::Continue) return;
+        entry.set(key, action == HookAction::Jump ? "jump" : "return");
+        if (action == HookAction::Jump) entry.set(target_key, JsonValue(target));
+      };
+      set_action("onTrue", hook.on_true, hook.jump_on_true, "jumpAddressOnTrue");
+      set_action("onFalse", hook.on_false, hook.jump_on_false, "jumpAddressOnFalse");
+    }
     hooks.append(std::move(entry));
   }
   root.set("hooks", std::move(hooks));
@@ -463,6 +476,36 @@ bool from_json(const JsonValue& json, AnalysisHintSetV2& out, std::string& error
         hook.address = entry.get("address").as_uint32();
         hook.native_replacement_identity = entry.get_string("nativeReplacementIdentity");
         hook.description = entry.get_string("description");
+        const auto kind = entry.get_string("kind", "metadata");
+        if (kind == "instruction") {
+          hook.kind = HookKind::Instruction;
+        } else if (kind != "metadata") {
+          error = "hook at address " + std::to_string(hook.address) + " has unknown kind '" +
+                  kind + "'";
+          return false;
+        }
+        hook.symbol = entry.get_string("symbol");
+        if (const auto* after = entry.find("afterInstruction")) hook.after_instruction = after->as_bool();
+        const auto parse_action = [&](const char* key, const char* target_key, HookAction& action,
+                                      std::uint32_t& target) {
+          const auto text = entry.get_string(key, "continue");
+          if (text == "continue") {
+            action = HookAction::Continue;
+          } else if (text == "return") {
+            action = HookAction::Return;
+          } else if (text == "jump") {
+            action = HookAction::Jump;
+            target = entry.get(target_key).as_uint32();
+          } else {
+            error = "hook at address " + std::to_string(hook.address) + " has unknown " + key +
+                    " action '" + text + "'";
+            return false;
+          }
+          return true;
+        };
+        if (!parse_action("onTrue", "jumpAddressOnTrue", hook.on_true, hook.jump_on_true) ||
+            !parse_action("onFalse", "jumpAddressOnFalse", hook.on_false, hook.jump_on_false))
+          return false;
         out.hooks.push_back(std::move(hook));
       }
     }

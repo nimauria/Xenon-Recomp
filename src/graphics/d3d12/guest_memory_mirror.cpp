@@ -19,7 +19,7 @@ bool GuestMemoryMirror::initialize(ID3D12Device* device, CommandQueue& queue,
                           D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS) ||
       !upload_.initialize(device, kTransferSize, D3D12_HEAP_TYPE_UPLOAD,
                           D3D12_RESOURCE_STATE_GENERIC_READ) ||
-      !readback_.initialize(device, kTransferSize, D3D12_HEAP_TYPE_READBACK,
+      !readback_.initialize(device, kReadbackSize, D3D12_HEAP_TYPE_READBACK,
                             D3D12_RESOURCE_STATE_COPY_DEST)) {
     error_ = "failed to allocate D3D12 Xbox physical-memory mirror transfers";
     reset();
@@ -29,10 +29,23 @@ bool GuestMemoryMirror::initialize(ID3D12Device* device, CommandQueue& queue,
   queue_ = &queue;
   coherency_.reset(memory::kPhysicalMemorySize, false);
   upload_ring_.reset(kTransferSize);
+  readback_ring_.reset(kReadbackSize);
+  std::span<std::byte> readback_bytes;
+  if (!readback_.map(readback_bytes)) {
+    error_ = "failed to map D3D12 guest-memory readback buffer";
+    reset();
+    return false;
+  }
+  publisher_.start(memory, coherency_, readback_bytes, kTransferSize,
+                   [&queue](std::uint64_t value, std::uint32_t timeout_ms) {
+                     return queue.wait_completed_concurrent(value, timeout_ms);
+                   });
   return true;
 }
 
 void GuestMemoryMirror::reset() noexcept {
+  // The publisher reads readback_ and coherency_; it stops first.
+  publisher_.stop();
   memory_ = nullptr;
   queue_ = nullptr;
   readback_.reset();
@@ -40,6 +53,7 @@ void GuestMemoryMirror::reset() noexcept {
   mirror_.reset();
   coherency_.clear();
   upload_ring_.reset(0);
+  readback_ring_.reset(0);
   state_ = D3D12_RESOURCE_STATE_COPY_DEST;
 }
 
@@ -50,13 +64,13 @@ bool GuestMemoryMirror::synchronize() {
 
 bool GuestMemoryMirror::synchronize_range(
     std::uint32_t address, std::uint32_t width,
-    memory::GpuRangeUsage usage) {
+    memory::GpuRangeUsage usage, std::uint64_t read_epoch) {
   if (!memory_ || !queue_) {
     error_ = "D3D12 guest-memory mirror is not initialized";
     return false;
   }
   const auto plan = coherency_.plan_upload(memory_->coherency(), address, width,
-                                            kTransferSize, usage);
+                                            kTransferSize, usage, read_epoch);
   if (plan.ranges.empty()) return true;
 
   std::span<std::byte> upload_bytes;
@@ -126,7 +140,11 @@ bool GuestMemoryMirror::synchronize_range(
 
 void GuestMemoryMirror::mark_gpu_write(std::uint32_t address,
                                        std::uint32_t width) {
-  coherency_.mark_gpu_write(address, width);
+  if (memory_) {
+    coherency_.mark_gpu_write(memory_->coherency(), address, width);
+  } else {
+    coherency_.mark_gpu_write(address, width);
+  }
 }
 
 bool GuestMemoryMirror::has_gpu_dirty(std::uint32_t address,
@@ -137,64 +155,89 @@ bool GuestMemoryMirror::has_gpu_dirty(std::uint32_t address,
 bool GuestMemoryMirror::make_cpu_visible(
     std::uint32_t address, std::uint32_t width,
     memory::GpuRangeUsage usage) {
+  // Bytes the GPU never wrote are already current in guest RAM: no readback,
+  // and no wait for readbacks of other ranges (a range with one in flight
+  // stays GPU-dirty until it commits). Every indexed draw asks for its index
+  // buffer, and waiting here cost a GPU round trip after every resolve.
+  if (!coherency_.has_gpu_dirty(address, width)) return true;
+  // Queued readbacks first, so this one is not planned and copied twice.
+  return complete_cpu_visibility(true) && queue_cpu_visibility(address, width, usage) &&
+         complete_cpu_visibility(true);
+}
+
+bool GuestMemoryMirror::queue_cpu_visibility(
+    std::uint32_t address, std::uint32_t width,
+    memory::GpuRangeUsage usage) {
   if (!memory_ || !queue_) {
     error_ = "D3D12 guest-memory mirror is not initialized";
     return false;
   }
   const auto plan = coherency_.plan_readback(memory_->coherency(), address, width,
                                              kTransferSize, usage);
-  if (plan.ranges.empty()) return true;
+  for (const auto& range : plan.ranges) {
+    // A region is free again once the publisher has written its readback
+    // into guest memory, which it does only after the GPU finished the copy.
+    const auto consumed =
+        (std::min)(publisher_.published_through(), queue_->completed_value());
+    const auto offset = readback_ring_.reserve(
+        range.size, consumed, [&](std::uint64_t value) { return wait_readbacks(value); });
+    if (!offset) {
+      if (error_.empty())
+        error_ = queue_->error().empty() ? "D3D12 readback ring reservation failed"
+                                         : queue_->error();
+      return false;
+    }
+    const auto state_before_copy = state_;
+    if (!queue_->execute_async([&](ID3D12GraphicsCommandList* list, std::uint32_t,
+                                   std::uint32_t) {
+          if (state_before_copy != D3D12_RESOURCE_STATE_COPY_SOURCE) {
+            D3D12_RESOURCE_BARRIER barrier{};
+            barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+            barrier.Transition.pResource = mirror_.resource();
+            barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+            barrier.Transition.StateBefore = state_before_copy;
+            barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
+            list->ResourceBarrier(1, &barrier);
+          }
+          list->CopyBufferRegion(readback_.resource(), *offset, mirror_.resource(),
+                                 range.address, range.size);
+        })) {
+      error_ = queue_->error();
+      return false;
+    }
+    state_ = D3D12_RESOURCE_STATE_COPY_SOURCE;
+    const auto value = queue_->retirement_value();
+    readback_ring_.commit(*offset, range.size, value);
+    publisher_.push(range, *offset, value);
+  }
+  return true;
+}
 
-  std::span<std::byte> readback_bytes;
-  if (!readback_.map(readback_bytes)) {
-    error_ = "failed to map D3D12 guest-memory readback buffer";
+bool GuestMemoryMirror::wait_readbacks(std::uint64_t value) {
+  if (!queue_->flush()) {
+    error_ = queue_->error();
     return false;
   }
+  if (!publisher_.wait_published(value)) {
+    error_ = "D3D12 guest-memory readback failed: " + publisher_.error();
+    return false;
+  }
+  return true;
+}
 
-  for (const auto& range : plan.ranges) {
-      const auto chunk_address = range.address;
-      const auto chunk_size = range.size;
-      const auto state_before_copy = state_;
-      if (!queue_->execute([&](ID3D12GraphicsCommandList* list) {
-            if (state_before_copy != D3D12_RESOURCE_STATE_COPY_SOURCE) {
-              D3D12_RESOURCE_BARRIER barrier{};
-              barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-              barrier.Transition.pResource = mirror_.resource();
-              barrier.Transition.Subresource =
-                  D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-              barrier.Transition.StateBefore = state_before_copy;
-              barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
-              list->ResourceBarrier(1, &barrier);
-            }
-            list->CopyBufferRegion(readback_.resource(), 0, mirror_.resource(),
-                                   chunk_address, chunk_size);
-          })) {
-        error_ = queue_->error();
-        return false;
-      }
-      state_ = D3D12_RESOURCE_STATE_COPY_SOURCE;
-
-      auto write_window = memory_->physical_write_window();
-      if (!write_window) {
-        error_ = "failed to acquire D3D12 guest-memory readback window";
-        return false;
-      }
-      const auto safe_ranges = coherency_.prepare_gpu_download(
-          memory_->coherency(), range, kTransferSize);
-      for (const auto& safe : safe_ranges) {
-        const auto offset = safe.address - chunk_address;
-        std::uint64_t publication_epoch = 0u;
-        if (!write_window.write(
-                safe.address, readback_bytes.subspan(offset, safe.size),
-                &publication_epoch)) {
-          error_ =
-              "D3D12 guest-memory readback destination is outside physical RAM";
-          return false;
-        }
-        (void)coherency_.commit_gpu_download(
-            memory_->coherency(), safe, safe.address, safe.size,
-            publication_epoch);
-      }
+bool GuestMemoryMirror::complete_cpu_visibility(bool wait) {
+  if (!memory_ || !queue_) {
+    if (!publisher_.pending()) return true;
+    error_ = "D3D12 guest-memory mirror is not initialized";
+    return false;
+  }
+  // The publisher writes each readback into guest memory as soon as the GPU
+  // finishes it; waiting means submitting the open batch and letting it
+  // catch up with everything queued so far.
+  if (wait && publisher_.pending() && !wait_readbacks(publisher_.last_value())) return false;
+  if (const auto failure = publisher_.error(); !failure.empty()) {
+    error_ = "D3D12 guest-memory readback failed: " + failure;
+    return false;
   }
   return true;
 }

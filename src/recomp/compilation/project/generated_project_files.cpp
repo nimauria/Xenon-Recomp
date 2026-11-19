@@ -62,6 +62,12 @@ bool write_generated_hooks(const std::filesystem::path& generation_stage, const 
                            const AnalysisReport& report) {
   std::ofstream hooks(generation_stage / "hooks.cpp");
   hooks << "// Generated module hooks and patch manifest. Runtime integration owns semantics.\n";
+  // Instruction hooks are compiled into the function shards that carry them;
+  // the module's hook sources (added to xenon_game) implement each routine.
+  for (const auto& hook : report.instruction_hooks.hooks)
+    hooks << "// instruction-hook[0x" << std::hex << hook.address << std::dec << "] "
+          << report.instruction_hooks.symbols[hook.ordinal]
+          << (hook.after_instruction ? " after" : " before") << "\n";
   for (const auto& hint : options.hints) {
     for (const auto& hook : hint.special_hooks)
       hooks << "// hook[" << hint.name << "] " << hook << "\n";
@@ -139,6 +145,7 @@ bool write_module_export(const std::filesystem::path& generation_stage, const An
 }
 
 bool write_generated_cmake(const std::filesystem::path& generation_stage, const DriverOptions& options,
+                           const AnalysisReport& report,
                            const std::vector<std::filesystem::path>& shards) {
   std::ofstream build(generation_stage / "CMakeLists.txt");
   build << "cmake_minimum_required(VERSION 3.25)\n"
@@ -166,12 +173,27 @@ bool write_generated_cmake(const std::filesystem::path& generation_stage, const 
            "if(NOT XENON_RECOMP_ROOT)\n"
            "  message(FATAL_ERROR \"Set XENON_RECOMP_ROOT to the Xenon-Recomp source tree\")\n"
            "endif()\n"
+           // Every object of this build - the shared Xenon runtime libraries
+           // as well as the generated code - goes through the verified
+           // native-object cache (tools/compilation_cache.py), shared by every
+           // module's workspace. The runtime is compiled with the same source
+           // tree, flags and toolchain for every module, so a second module
+           // (another XEX of the title, another title or region) reuses its
+           // verified objects instead of compiling the runtime again; a
+           // changed source, flag or compiler is a different key and builds.
+           "find_package(Python3 3.9 REQUIRED COMPONENTS Interpreter)\n"
+           "set(XENON_GRAPH_CACHE \"${CMAKE_CURRENT_SOURCE_DIR}/.graph/native\" CACHE PATH \"Gen 10 native object cache\")\n"
+           "set(CMAKE_CXX_COMPILER_LAUNCHER \"${Python3_EXECUTABLE};${XENON_RECOMP_ROOT}/tools/compilation_cache.py;compile;${XENON_GRAPH_CACHE}\")\n"
            "add_subdirectory(${XENON_RECOMP_ROOT} xenon-recomp EXCLUDE_FROM_ALL)\n"
            "add_library(xenon_game STATIC\n";
   for (const auto& path : shards)
     build << "  " << std::filesystem::relative(path, options.output).generic_string() << "\n";
-  build << "  registry.cpp\n  imports.cpp\n  metadata.cpp\n  hooks.cpp\n"
-           ")\n"
+  build << "  registry.cpp\n  imports.cpp\n  metadata.cpp\n  hooks.cpp\n";
+  // The module's instruction hook routines, from wherever the module keeps
+  // them; the generated shards call them by name.
+  for (const auto& source : report.hook_sources)
+    build << "  \"" << std::filesystem::absolute(source).generic_string() << "\"\n";
+  build << ")\n"
            // Xenon::RecompRuntime: runtime helpers and
            // native_replacements.hpp/.cpp - referenced by registry.cpp's
            // lookup_compiled() switch whenever this module used at least one
@@ -185,9 +207,7 @@ bool write_generated_cmake(const std::filesystem::path& generation_stage, const 
            "add_library(xenon_game_module SHARED module_export.cpp)\n"
            "target_link_libraries(xenon_game_module PRIVATE xenon_game)\n"
            "target_include_directories(xenon_game_module PRIVATE ${XENON_RECOMP_ROOT}/include)\n";
-  build << "find_package(Python3 3.9 REQUIRED COMPONENTS Interpreter)\n"
-           "set(XENON_GRAPH_CACHE \"${CMAKE_CURRENT_SOURCE_DIR}/.graph/native\" CACHE PATH \"Gen 10 native object cache\")\n"
-           "if(MSVC)\n  target_compile_options(xenon_game PRIVATE /Brepro)\n  target_link_options(xenon_game_module PRIVATE /Brepro /INCREMENTAL:NO)\nendif()\n"
+  build << "if(MSVC)\n  target_compile_options(xenon_game PRIVATE /Brepro)\n  target_link_options(xenon_game_module PRIVATE /Brepro /INCREMENTAL:NO)\nendif()\n"
            // A module is prepared on the machine that plays it, so generated
            // code may use that machine's x86-64-v3 features (AVX2, FMA, BMI2,
            // MOVBE): wider vector code and fewer instructions per byte-swapped
@@ -224,7 +244,7 @@ bool write_generated_cmake(const std::filesystem::path& generation_stage, const 
            "    endif()\n"
            "  endif()\n"
            "endif()\n"
-           "set_property(TARGET xenon_game PROPERTY CXX_COMPILER_LAUNCHER \"${Python3_EXECUTABLE};${XENON_RECOMP_ROOT}/tools/compilation_cache.py;compile;${XENON_GRAPH_CACHE}\")\n";
+           ;
   build.close();
   return static_cast<bool>(build);
 }

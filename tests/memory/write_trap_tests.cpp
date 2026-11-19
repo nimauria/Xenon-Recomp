@@ -1,7 +1,7 @@
 // Opt-in guest write trap (xenon/cpu/memory_port.hpp: set_write_traps(),
-// XENON_WRITE_TRAP). A trapped 32-bit store is reported through the probe log
-// from both store paths; other stores and other widths are not, and nothing
-// is reported while no trap is set.
+// XENON_WRITE_TRAP). A store of any width that covers a trapped address is
+// reported through the probe log from both store paths; other stores are not,
+// and nothing is reported while no trap is set.
 
 #include <cassert>
 #include <cstdint>
@@ -52,9 +52,28 @@ int main() {
   xenon::cpu::set_write_traps(traps);
   assert(xenon::cpu::is_write_trapped(trapped) && !xenon::cpu::is_write_trapped(neighbour));
 
-  memory.write32_be(neighbour, 0x22222222u);
-  memory.write16_be(trapped, 0x3333u);  // only 32-bit stores are trapped
+  memory.write32_be(neighbour, 0x22222222u);  // next to it, not covering it
+  memory.write64_be(trapped + 8u, 0x2222222222222222ull);
   assert(!std::filesystem::exists(kTrapLog));
+
+  // Any store that covers the trapped address is reported, whatever its
+  // width: AC6 keeps its game-clock time base in a 64-bit field, which a
+  // 32-bit-only trap never saw being written.
+  memory.write16_be(trapped + 2u, 0x3333u);
+  {
+    auto access = memory.access_context();
+    access.write64_be(trapped - 4u, 0x7777777788888888ull);
+  }
+  {
+    const auto log = read_trap_log();
+    char expected[64];
+    std::snprintf(expected, sizeof(expected), "WRITE to guest 0x%08X value=0x00003333",
+                  static_cast<unsigned>(trapped + 2u));
+    assert(log.find(expected) != std::string::npos && "a 16-bit store inside the word");
+    std::snprintf(expected, sizeof(expected), "WRITE to guest 0x%08X",
+                  static_cast<unsigned>(trapped - 4u));
+    assert(log.find(expected) != std::string::npos && "a 64-bit store over the word");
+  }
 
   memory.write32_be(trapped, 0x44444444u);  // AddressSpace store path
   {

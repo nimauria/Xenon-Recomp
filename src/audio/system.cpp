@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "xenon/audio/downmix.hpp"
+#include "xenon/logging/logger.hpp"
 #include "xenon/logging/probe_log.hpp"
 #include "xenon/memory/types.hpp"
 
@@ -392,6 +393,10 @@ void AudioSystem::render(std::span<float> interleaved_stereo) {
 
   if (had_active_render_client && !had_render_driver_audio) {
     underrun_count_.fetch_add(1);
+    // Audible as a gap or crackle; repeats collapse in the log.
+    logging::Logger::instance().record(
+        logging::Level::Warning, "audio",
+        "underrun: a render client was active but had no frame ready for the output");
   }
 
   // Generic voices and the Xbox render-driver path share the same native
@@ -455,7 +460,17 @@ void AudioSystem::callback_pump() {
         auto& client = clients_[item.index];
         if (client.callback_in_flight) --client.callback_in_flight;
         ++client.counters.callbacks_returned;
-        if (!invoked) ++client.counters.callbacks_failed;
+        if (!invoked) {
+          ++client.counters.callbacks_failed;
+          // Skipped callbacks while the pump shuts down are expected.
+          if (callback_running_.load()) {
+            char entry[96];
+            std::snprintf(entry, sizeof(entry),
+                          "render client %zu: guest callback 0x%08X did not run",
+                          item.index, static_cast<unsigned>(item.callback));
+            logging::Logger::instance().record(logging::Level::Warning, "audio", entry);
+          }
+        }
         if (client.retiring && client.callback_in_flight == 0) {
           retired_wrapper = client.callback_argument_wrapper;
           client = {};

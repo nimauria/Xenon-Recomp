@@ -13,6 +13,7 @@ bool GuestMemoryMirror::initialize(VkPhysicalDevice physical_device,
                                    memory::AddressSpace& memory) {
   reset();
   error_.clear();
+  if (physical_device) limits_ = query_guest_memory_limits(physical_device);
   if (!mirror_.initialize(physical_device, device, memory::kPhysicalMemorySize,
                           VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
                               VK_BUFFER_USAGE_TRANSFER_DST_BIT |
@@ -24,10 +25,11 @@ bool GuestMemoryMirror::initialize(VkPhysicalDevice physical_device,
                           VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
                           VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
                               VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) ||
-      !readback_.initialize(physical_device, device, kTransferSize,
+      !readback_.initialize(physical_device, device, kReadbackSize,
                             VK_BUFFER_USAGE_TRANSFER_DST_BIT,
                             VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
-                                VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)) {
+                                VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                            Buffer::kCpuReadback)) {
     error_ = "failed to allocate Vulkan Xbox physical-memory mirror transfers";
     reset();
     return false;
@@ -36,10 +38,23 @@ bool GuestMemoryMirror::initialize(VkPhysicalDevice physical_device,
   queue_ = &queue;
   coherency_.reset(memory::kPhysicalMemorySize, false);
   upload_ring_.reset(kTransferSize);
+  readback_ring_.reset(kReadbackSize);
+  std::span<std::byte> readback_bytes;
+  if (!readback_.map(readback_bytes)) {
+    error_ = "failed to map Vulkan guest-memory readback buffer";
+    reset();
+    return false;
+  }
+  publisher_.start(memory, coherency_, readback_bytes, kTransferSize,
+                   [&queue](std::uint64_t value, std::uint32_t timeout_ms) {
+                     return queue.wait_completed_concurrent(value, timeout_ms);
+                   });
   return true;
 }
 
 void GuestMemoryMirror::reset() noexcept {
+  // The publisher reads readback_ and coherency_; it stops first.
+  publisher_.stop();
   memory_ = nullptr;
   queue_ = nullptr;
   readback_.reset();
@@ -47,6 +62,7 @@ void GuestMemoryMirror::reset() noexcept {
   mirror_.reset();
   coherency_.clear();
   upload_ring_.reset(0);
+  readback_ring_.reset(0);
   shader_read_state_ = false;
   shader_write_state_ = false;
 }
@@ -58,13 +74,13 @@ bool GuestMemoryMirror::synchronize() {
 
 bool GuestMemoryMirror::synchronize_range(
     std::uint32_t address, std::uint32_t width,
-    memory::GpuRangeUsage usage) {
+    memory::GpuRangeUsage usage, std::uint64_t read_epoch) {
   if (!memory_ || !queue_) {
     error_ = "Vulkan guest-memory mirror is not initialized";
     return false;
   }
   const auto plan = coherency_.plan_upload(memory_->coherency(), address, width,
-                                            kTransferSize, usage);
+                                            kTransferSize, usage, read_epoch);
   if (plan.ranges.empty()) return true;
 
   std::span<std::byte> upload_bytes;
@@ -140,7 +156,11 @@ bool GuestMemoryMirror::synchronize_range(
 
 void GuestMemoryMirror::mark_gpu_write(std::uint32_t address,
                                        std::uint32_t width) {
-  coherency_.mark_gpu_write(address, width);
+  if (memory_) {
+    coherency_.mark_gpu_write(memory_->coherency(), address, width);
+  } else {
+    coherency_.mark_gpu_write(address, width);
+  }
 }
 
 bool GuestMemoryMirror::has_gpu_dirty(std::uint32_t address,
@@ -151,94 +171,107 @@ bool GuestMemoryMirror::has_gpu_dirty(std::uint32_t address,
 bool GuestMemoryMirror::make_cpu_visible(
     std::uint32_t address, std::uint32_t width,
     memory::GpuRangeUsage usage) {
+  // Bytes the GPU never wrote are already current in guest RAM: no readback,
+  // and no wait for readbacks of other ranges (a range with one in flight
+  // stays GPU-dirty until it commits). Every indexed draw asks for its index
+  // buffer, and waiting here cost a GPU round trip after every resolve.
+  if (!coherency_.has_gpu_dirty(address, width)) return true;
+  // Queued readbacks first, so this one is not planned and copied twice.
+  return complete_cpu_visibility(true) && queue_cpu_visibility(address, width, usage) &&
+         complete_cpu_visibility(true);
+}
+
+bool GuestMemoryMirror::queue_cpu_visibility(
+    std::uint32_t address, std::uint32_t width,
+    memory::GpuRangeUsage usage) {
   if (!memory_ || !queue_) {
     error_ = "Vulkan guest-memory mirror is not initialized";
     return false;
   }
   const auto plan = coherency_.plan_readback(memory_->coherency(), address, width,
                                              kTransferSize, usage);
-  if (plan.ranges.empty()) return true;
+  for (const auto& range : plan.ranges) {
+    // A region is free again once the publisher has written its readback
+    // into guest memory, which it does only after the GPU finished the copy.
+    const auto consumed =
+        (std::min)(publisher_.published_through(), queue_->completed_value());
+    const auto offset = readback_ring_.reserve(
+        range.size, consumed, [&](std::uint64_t value) { return wait_readbacks(value); });
+    if (!offset) {
+      if (error_.empty())
+        error_ = queue_->error().empty() ? "Vulkan readback ring reservation failed"
+                                         : queue_->error();
+      return false;
+    }
+    const bool read_state = shader_read_state_;
+    const bool write_state = shader_write_state_;
+    if (!queue_->execute_async([&](VkCommandBuffer command, std::uint32_t, std::uint32_t) {
+          // Earlier shader or copy work in this batch or a previous one
+          // wrote the range (a resolve, a memory export).
+          VkBufferMemoryBarrier2 before{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2};
+          before.srcStageMask = (read_state || write_state) ? VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT
+                                                            : VK_PIPELINE_STAGE_2_NONE;
+          before.srcAccessMask = (read_state ? VK_ACCESS_2_MEMORY_READ_BIT : 0) |
+                                 (write_state ? VK_ACCESS_2_MEMORY_WRITE_BIT : 0);
+          before.dstStageMask = VK_PIPELINE_STAGE_2_COPY_BIT;
+          before.dstAccessMask = VK_ACCESS_2_TRANSFER_READ_BIT;
+          before.buffer = mirror_.buffer();
+          before.offset = range.address;
+          before.size = range.size;
+          VkDependencyInfo dependency{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+          dependency.bufferMemoryBarrierCount = 1;
+          dependency.pBufferMemoryBarriers = &before;
+          vkCmdPipelineBarrier2(command, &dependency);
+          VkBufferCopy copy{range.address, *offset, range.size};
+          vkCmdCopyBuffer(command, mirror_.buffer(), readback_.buffer(), 1, &copy);
+          VkBufferMemoryBarrier2 host{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2};
+          host.srcStageMask = VK_PIPELINE_STAGE_2_COPY_BIT;
+          host.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+          host.dstStageMask = VK_PIPELINE_STAGE_2_HOST_BIT;
+          host.dstAccessMask = VK_ACCESS_2_HOST_READ_BIT;
+          host.buffer = readback_.buffer();
+          host.offset = *offset;
+          host.size = range.size;
+          dependency.pBufferMemoryBarriers = &host;
+          vkCmdPipelineBarrier2(command, &dependency);
+        })) {
+      error_ = queue_->error();
+      return false;
+    }
+    // The copy reads the mirror: later writes must wait for it.
+    shader_read_state_ = true;
+    const auto value = queue_->retirement_value();
+    readback_ring_.commit(*offset, range.size, value);
+    publisher_.push(range, *offset, value);
+  }
+  return true;
+}
 
-  std::span<std::byte> readback_bytes;
-  if (!readback_.map(readback_bytes)) {
-    error_ = "failed to map Vulkan guest-memory readback buffer";
+bool GuestMemoryMirror::wait_readbacks(std::uint64_t value) {
+  if (!queue_->flush()) {
+    error_ = queue_->error();
     return false;
   }
+  if (!publisher_.wait_published(value)) {
+    error_ = "Vulkan guest-memory readback failed: " + publisher_.error();
+    return false;
+  }
+  return true;
+}
 
-  for (const auto& range : plan.ranges) {
-      const auto chunk_address = range.address;
-      const auto chunk_size = range.size;
-      if (!queue_->execute([&](VkCommandBuffer command) {
-            VkBufferMemoryBarrier2 before{
-                VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2};
-            before.srcStageMask = (shader_read_state_ || shader_write_state_)
-                                      ? VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT
-                                      : VK_PIPELINE_STAGE_2_NONE;
-            before.srcAccessMask =
-                (shader_read_state_ ? VK_ACCESS_2_MEMORY_READ_BIT : 0) |
-                (shader_write_state_ ? VK_ACCESS_2_MEMORY_WRITE_BIT : 0);
-            before.dstStageMask = VK_PIPELINE_STAGE_2_COPY_BIT;
-            before.dstAccessMask = VK_ACCESS_2_TRANSFER_READ_BIT;
-            before.buffer = mirror_.buffer();
-            before.offset = chunk_address;
-            before.size = chunk_size;
-
-            VkDependencyInfo dependency{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
-            dependency.bufferMemoryBarrierCount = 1;
-            dependency.pBufferMemoryBarriers = &before;
-            vkCmdPipelineBarrier2(command, &dependency);
-
-            VkBufferCopy copy{chunk_address, 0, chunk_size};
-            vkCmdCopyBuffer(command, mirror_.buffer(), readback_.buffer(), 1,
-                            &copy);
-
-            VkBufferMemoryBarrier2 host{
-                VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2};
-            host.srcStageMask = VK_PIPELINE_STAGE_2_COPY_BIT;
-            host.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
-            host.dstStageMask = VK_PIPELINE_STAGE_2_HOST_BIT;
-            host.dstAccessMask = VK_ACCESS_2_HOST_READ_BIT;
-            host.buffer = readback_.buffer();
-            host.offset = 0;
-            host.size = chunk_size;
-            dependency.pBufferMemoryBarriers = &host;
-            vkCmdPipelineBarrier2(command, &dependency);
-          })) {
-        error_ = queue_->error();
-        return false;
-      }
-
-      // The queue helper is synchronous, so no shader access remains in flight.
-      // The next prepare_shader_access call establishes the next GPU dependency.
-      shader_read_state_ = false;
-      shader_write_state_ = false;
-
-      // The native copy is complete, but CPU threads may have written the same
-      // Xbox bytes while it was in flight. Xenon Memory briefly quiesces
-      // physical writers, re-ingests those CPU publications and applies only
-      // the subranges still owned by this exact GPU generation.
-      auto write_window = memory_->physical_write_window();
-      if (!write_window) {
-        error_ = "failed to acquire Vulkan guest-memory readback window";
-        return false;
-      }
-      const auto safe_ranges = coherency_.prepare_gpu_download(
-          memory_->coherency(), range, kTransferSize);
-      for (const auto& safe : safe_ranges) {
-        const auto offset = safe.address - chunk_address;
-        std::uint64_t publication_epoch = 0u;
-        if (!write_window.write(
-                safe.address,
-                readback_bytes.subspan(offset, safe.size),
-                &publication_epoch)) {
-          error_ =
-              "Vulkan guest-memory readback destination is outside physical RAM";
-          return false;
-        }
-        (void)coherency_.commit_gpu_download(
-            memory_->coherency(), safe, safe.address, safe.size,
-            publication_epoch);
-      }
+bool GuestMemoryMirror::complete_cpu_visibility(bool wait) {
+  if (!memory_ || !queue_) {
+    if (!publisher_.pending()) return true;
+    error_ = "Vulkan guest-memory mirror is not initialized";
+    return false;
+  }
+  // The publisher writes each readback into guest memory as soon as the GPU
+  // finishes it; waiting means submitting the open batch and letting it
+  // catch up with everything queued so far.
+  if (wait && publisher_.pending() && !wait_readbacks(publisher_.last_value())) return false;
+  if (const auto failure = publisher_.error(); !failure.empty()) {
+    error_ = "Vulkan guest-memory readback failed: " + failure;
+    return false;
   }
   return true;
 }
@@ -264,10 +297,13 @@ void GuestMemoryMirror::prepare_shader_access(VkCommandBuffer command,
   barrier.offset = 0;
   barrier.size = VK_WHOLE_SIZE;
 
-  // Keep an explicit shader-to-shader dependency even when the access class
-  // doesn't change. Consecutive memexport draws otherwise have no transition
-  // that makes the previous shader writes visible to a later vertex fetch.
-  if (barrier.srcStageMask != VK_PIPELINE_STAGE_2_NONE || writable) {
+  // Only a hazard needs a barrier: earlier shader writes (a resolve, a memory
+  // export) before any access, or earlier reads before this write. Uploads
+  // already make their copies visible to every later read (see
+  // synchronize_range()), so a read after reads needs none - a barrier on
+  // every draw serialized the GPU between draws. Consecutive memexport draws
+  // still get one: the earlier one's writes are pending.
+  if (needs_shader_access_barrier(writable)) {
     VkDependencyInfo dependency{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
     dependency.bufferMemoryBarrierCount = 1;
     dependency.pBufferMemoryBarriers = &barrier;

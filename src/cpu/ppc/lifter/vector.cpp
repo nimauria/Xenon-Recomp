@@ -33,8 +33,10 @@ unsigned vb(const DecodedInstruction& i) {
     default: return i.vb5();
   }
 }
+// vperm128's VC is the 3-bit field at bits 6-8 (|A|0|VC|a|0|VDh|VBh|,
+// binutils VC128 {7, 6}), so it names v0-v7.
 unsigned vc(const DecodedInstruction& i) {
-  if (i.info->format == InstructionFormat::VX128_2) return (i.word >> 8) & 7u;
+  if (i.info->format == InstructionFormat::VX128_2) return (i.word >> 6) & 7u;
   return i.vc5();
 }
 
@@ -116,7 +118,9 @@ bool Lifter::lift_vector(const DecodedInstruction& i, ir::Builder& b) const {
   if(starts(m,"vsel")) {
     ValueId r{};
     if(i.info->format==InstructionFormat::VA) r=ternary(b,Op::VSelect,i,va(i),vb(i),vc(i));
-    else { auto old=vread(b,d),a=vread(b,va(i)),c=vread(b,vb(i)); const ValueId x[]={old,a,c}; r=b.emit(Op::VSelect,Type::V128,x,vector_tag(m),0,&i); }
+    // vsel128 vD,vA,vB,vD: the old vD is the mask (binutils {VD128,VA128,
+    // VB128,VS128}; xenia InstrEmit_vsel128), vD = (vA & ~vD) | (vB & vD).
+    else { auto old=vread(b,d),a=vread(b,va(i)),c=vread(b,vb(i)); const ValueId x[]={a,c,old}; r=b.emit(Op::VSelect,Type::V128,x,vector_tag(m),0,&i); }
     vwrite(b,d,r); return true;
   }
 
@@ -162,6 +166,15 @@ bool Lifter::lift_vector(const DecodedInstruction& i, ir::Builder& b) const {
     return true;
   }
 
+  // vpkd3d128/vupkd3d128 (VX128_4/VX128_3) have no vA: bits 11-15 hold the
+  // type/mask immediate. Pack merges into vD under its mask, so both take
+  // (old vD, vB) - reading vA here packed whichever register the immediate
+  // happened to name, and AC6's bone matrices came out zero.
+  if(m=="vpkd3d128" || m=="vupkd3d128") {
+    auto old=vread(b,d),src=vread(b,vb(i)); const ValueId x[]={old,src};
+    vwrite(b,d,b.emit(m=="vpkd3d128"?Op::VPack:Op::VUnpack,Type::V128,x,vector_tag(m),0,&i));
+    return true;
+  }
   if(starts(m,"vpk")) { vwrite(b,d,binary(b,Op::VPack,i,va(i),vb(i))); return true; }
   if(starts(m,"vupk")) { vwrite(b,d,unary(b,Op::VUnpack,i,vb(i))); return true; }
 

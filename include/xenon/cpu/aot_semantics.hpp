@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <cstring>
 #include <limits>
+#include <span>
 #include <string_view>
 #include <type_traits>
 
@@ -148,20 +149,23 @@ template <typename T>
                                              bool carry) noexcept {
   return a + b + static_cast<std::uint64_t>(carry);
 }
+// The add/subtract family's XER.CA and XER.OV follow 32-bit mode, as on the
+// console: CA is the carry out of the low word and OV the signed overflow of
+// the low word (xenia's AddDidCarry/SubDidCarry truncate to INT32, XenonRecomp
+// compares u32). The register still receives the full 64-bit sum.
 [[nodiscard]] inline bool carry_out(std::uint64_t a, std::uint64_t b,
                                     bool carry) noexcept {
-  const auto ab = a + b;
-  const bool c1 = ab < a;
-  const auto abc = ab + static_cast<std::uint64_t>(carry);
-  const bool c2 = abc < ab;
-  return c1 || c2;
+  const std::uint64_t sum = std::uint64_t{static_cast<std::uint32_t>(a)} +
+                            static_cast<std::uint32_t>(b) + static_cast<std::uint64_t>(carry);
+  return (sum >> 32) != 0;
 }
 
 [[nodiscard]] inline bool signed_add_overflow(std::uint64_t a, std::uint64_t b,
                                               bool carry = false) noexcept {
-  const auto r = add_carry(a,b,carry);
-  const auto sign = std::uint64_t{1} << 63;
-  return (((a ^ r) & (b ^ r) & sign) != 0);
+  const auto r = static_cast<std::uint32_t>(add_carry(a, b, carry));
+  const auto a32 = static_cast<std::uint32_t>(a);
+  const auto b32 = static_cast<std::uint32_t>(b);
+  return ((a32 ^ r) & (b32 ^ r) & 0x80000000u) != 0;
 }
 
 [[nodiscard]] inline std::uint64_t mul_hi_unsigned(std::uint64_t a,
@@ -435,11 +439,22 @@ inline bool fp_strict_mode = [] {
   return !fp_strict_mode && state.fp_rounding_mode() == FpRoundingMode::Nearest;
 }
 
+// The strict path reads the host's exception flags around one operation, so
+// that operation has to happen at run time. Once a helper is inlined with
+// constant operands the compiler can fold "a + b" away, raising no flag (a
+// strict-mode test lost FE_INEXACT that way); a volatile read of each operand
+// keeps it a real instruction. The result store is volatile for the same reason.
+template <typename T>
+[[nodiscard]] inline T fp_operand(T value) noexcept {
+  volatile T held = value;
+  return held;
+}
+
 [[nodiscard]] inline double fp_add(CpuState& state, double a, double b) noexcept {
   if (fp_native(state)) return a + b;
   begin_fp_operation(state);
   if (is_signaling_nan(a) || is_signaling_nan(b)) last_fp_invalid_detail |= fpscr_bits::VXSNAN;
-  volatile double r = a + b;
+  volatile double r = fp_operand(a) + fp_operand(b);
   finish_fp_operation();
   if ((last_fp_exceptions & FE_INVALID) && !last_fp_invalid_detail) last_fp_invalid_detail |= fpscr_bits::VXISI;
   return r;
@@ -448,7 +463,7 @@ inline bool fp_strict_mode = [] {
   if (fp_native(state)) return a - b;
   begin_fp_operation(state);
   if (is_signaling_nan(a) || is_signaling_nan(b)) last_fp_invalid_detail |= fpscr_bits::VXSNAN;
-  volatile double r = a - b;
+  volatile double r = fp_operand(a) - fp_operand(b);
   finish_fp_operation();
   if ((last_fp_exceptions & FE_INVALID) && !last_fp_invalid_detail) last_fp_invalid_detail |= fpscr_bits::VXISI;
   return r;
@@ -457,7 +472,7 @@ inline bool fp_strict_mode = [] {
   if (fp_native(state)) return a * b;
   begin_fp_operation(state);
   if (is_signaling_nan(a) || is_signaling_nan(b)) last_fp_invalid_detail |= fpscr_bits::VXSNAN;
-  volatile double r = a * b;
+  volatile double r = fp_operand(a) * fp_operand(b);
   finish_fp_operation();
   if ((last_fp_exceptions & FE_INVALID) && !last_fp_invalid_detail) last_fp_invalid_detail |= fpscr_bits::VXIMZ;
   return r;
@@ -466,7 +481,7 @@ inline bool fp_strict_mode = [] {
   if (fp_native(state)) return a / b;
   begin_fp_operation(state);
   if (is_signaling_nan(a) || is_signaling_nan(b)) last_fp_invalid_detail |= fpscr_bits::VXSNAN;
-  volatile double r = a / b;
+  volatile double r = fp_operand(a) / fp_operand(b);
   finish_fp_operation();
   if ((last_fp_exceptions & FE_INVALID) && !last_fp_invalid_detail) {
     if (a == 0.0 && b == 0.0) last_fp_invalid_detail |= fpscr_bits::VXZDZ;
@@ -479,7 +494,7 @@ inline bool fp_strict_mode = [] {
   if (fp_native(state)) return std::sqrt(a);
   begin_fp_operation(state);
   if (is_signaling_nan(a)) last_fp_invalid_detail |= fpscr_bits::VXSNAN;
-  volatile double r = std::sqrt(a);
+  volatile double r = std::sqrt(fp_operand(a));
   finish_fp_operation();
   if ((last_fp_exceptions & FE_INVALID) && !last_fp_invalid_detail) last_fp_invalid_detail |= fpscr_bits::VXSQRT;
   return r;
@@ -488,7 +503,7 @@ inline bool fp_strict_mode = [] {
   if (fp_native(state)) return std::fma(a, b, c);
   begin_fp_operation(state);
   if (is_signaling_nan(a) || is_signaling_nan(b) || is_signaling_nan(c)) last_fp_invalid_detail |= fpscr_bits::VXSNAN;
-  volatile double r = std::fma(a,b,c);
+  volatile double r = std::fma(fp_operand(a), fp_operand(b), fp_operand(c));
   finish_fp_operation();
   if ((last_fp_exceptions & FE_INVALID) && !last_fp_invalid_detail) {
     if ((a == 0.0 && std::isinf(b)) || (b == 0.0 && std::isinf(a))) last_fp_invalid_detail |= fpscr_bits::VXIMZ;
@@ -503,7 +518,7 @@ inline bool fp_strict_mode = [] {
   if (fp_native(state)) return 1.0 / std::sqrt(a);
   begin_fp_operation(state);
   if (is_signaling_nan(a)) last_fp_invalid_detail |= fpscr_bits::VXSNAN;
-  volatile double root = std::sqrt(a);
+  volatile double root = std::sqrt(fp_operand(a));
   volatile double r = 1.0 / root;
   finish_fp_operation();
   if ((last_fp_exceptions & FE_INVALID) && !last_fp_invalid_detail) {
@@ -523,7 +538,7 @@ inline bool fp_strict_mode = [] {
 
   begin_fp_operation(state);
   if (is_signaling_nan(a)) last_fp_invalid_detail |= fpscr_bits::VXSNAN;
-  volatile float f = static_cast<float>(a);
+  volatile float f = static_cast<float>(fp_operand(a));
   volatile double r = static_cast<double>(f);
   finish_fp_operation();
 
@@ -539,7 +554,7 @@ inline bool fp_strict_mode = [] {
 [[nodiscard]] inline double fp_from_i64(CpuState& state, std::uint64_t bits) noexcept {
   if (fp_native(state)) return static_cast<double>(static_cast<std::int64_t>(bits));
   begin_fp_operation(state);
-  volatile double r = static_cast<double>(static_cast<std::int64_t>(bits));
+  volatile double r = static_cast<double>(static_cast<std::int64_t>(fp_operand(bits)));
   finish_fp_operation();
   return r;
 }
@@ -878,14 +893,43 @@ Vector128 vector_load_element(const Vector128& old, MemoryAccessContext& memory,
                               GuestAddress ea, unsigned width);
 void vector_store_element(const Vector128& value, MemoryAccessContext& memory,
                           GuestAddress ea, unsigned width);
-Vector128 vector_load_left(const Vector128& old, MemoryAccessContext& memory,
-                           GuestAddress ea);
-Vector128 vector_load_right(const Vector128& old, MemoryAccessContext& memory,
-                            GuestAddress ea);
-void vector_store_left(const Vector128& value, MemoryAccessContext& memory,
-                       GuestAddress ea);
-void vector_store_right(const Vector128& value, MemoryAccessContext& memory,
-                        GuestAddress ea);
+
+// lvlx/lvrx/stvlx/stvrx (and the 128 forms): the part of the aligned 16-byte
+// block holding ea from ea up (left) or below ea (right), against the first
+// or last bytes of the register. Inline over MemoryAccessContext's
+// quadword-part accessors: AC6's audio mixer stores its unaligned output
+// with stvlx/stvrx pairs, and the general byte-range path cost it 8% of its
+// thread.
+inline Vector128 vector_load_left(const Vector128& old, MemoryAccessContext& memory,
+                                  GuestAddress ea) {
+  (void)old;
+  Vector128 result{};
+  const auto n = static_cast<unsigned>(ea & 15u);
+  memory.read_quadword_part(ea, std::as_writable_bytes(std::span(result.bytes)).first(16u - n));
+  return result;
+}
+inline Vector128 vector_load_right(const Vector128& old, MemoryAccessContext& memory,
+                                   GuestAddress ea) {
+  (void)old;
+  Vector128 result{};
+  const auto n = static_cast<unsigned>(ea & 15u);
+  if (n)
+    memory.read_quadword_part(GuestAddress(ea & ~15u),
+                              std::as_writable_bytes(std::span(result.bytes)).subspan(16u - n, n));
+  return result;
+}
+inline void vector_store_left(const Vector128& value, MemoryAccessContext& memory,
+                              GuestAddress ea) {
+  const auto n = static_cast<unsigned>(ea & 15u);
+  memory.write_quadword_part(ea, std::as_bytes(std::span(value.bytes)).first(16u - n));
+}
+inline void vector_store_right(const Vector128& value, MemoryAccessContext& memory,
+                               GuestAddress ea) {
+  const auto n = static_cast<unsigned>(ea & 15u);
+  if (n)
+    memory.write_quadword_part(GuestAddress(ea & ~15u),
+                               std::as_bytes(std::span(value.bytes)).subspan(16u - n, n));
+}
 
 void string_load(CpuState& state, MemoryAccessContext& memory, GuestAddress ea,
                  std::uint32_t count, unsigned first_reg);
@@ -893,3 +937,6 @@ void string_store(CpuState& state, MemoryAccessContext& memory, GuestAddress ea,
                   std::uint32_t count, unsigned first_reg);
 
 }  // namespace xenon::cpu::aot
+
+#include "xenon/cpu/aot_vector_inline.hpp"
+

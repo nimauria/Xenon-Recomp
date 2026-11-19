@@ -1,6 +1,6 @@
 {
   "schema": "xenon.module-entry",
-  "version": 1,
+  "version": 2,
   "id": "org.nimauria.project-gracemeria",
   "name": "Project Gracemeria",
   "type": "game",
@@ -14,11 +14,8 @@
   "repository": {
     "provider": "github",
     "owner": "nimauria",
-    "name": "Project-Gracemeria",
+    "name": "Xenon-Modules",
     "defaultBranch": "main"
-  },
-  "releaseAssets": {
-    "windows-x64": "project-gracemeria-windows-x64.xenonmod.zip"
   },
   "tags": [
     "game",
@@ -31,8 +28,8 @@
   "launcher": {
     "gameTitle": "Ace Combat 6: Fires of Liberation",
     "moduleName": "Project Gracemeria",
-    "tileArt": "assets/org.nimauria.project-gracemeria/game-art.webp",
-    "heroArt": "assets/org.nimauria.project-gracemeria/background.webp",
+    "tileArt": "games/nimauria/project-gracemeria/assets/game-art.webp",
+    "heroArt": "games/nimauria/project-gracemeria/assets/background.webp",
     "description": "Take to the skies of Strangereal in Ace Combat 6: Fires of Liberation through Project Gracemeria and the Xenon native recompilation runtime.",
     "renderer": "Automatic",
     "mode": "Offline",
@@ -1023,5 +1020,9 @@
       "name": "Ace Combat Wiki - Ace Combat 6 DLC",
       "url": "https://acecombat.wiki.gg/wiki/Ace_Combat_6:_Fires_of_Liberation/DLC"
     }
+  ],
+  "sourcePath": "games/nimauria/project-gracemeria",
+  "platforms": [
+    "windows-x64"
   ]
 }

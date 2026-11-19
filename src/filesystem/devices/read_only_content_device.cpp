@@ -139,8 +139,11 @@ FsError read_all(const ReadOnlyContentSource& source, std::string_view relative_
 }
 
 ReadOnlyContentDevice::ReadOnlyContentDevice(
-    std::string mount_point, std::shared_ptr<ReadOnlyContentSource> source)
-    : Device(std::move(mount_point), true), source_(std::move(source)) {
+    std::string mount_point, std::shared_ptr<ReadOnlyContentSource> source,
+    WriteAccessOpen write_access)
+    : Device(std::move(mount_point), true),
+      source_(std::move(source)),
+      write_access_(write_access) {
   if (!source_) {
     throw std::invalid_argument("read-only content device requires a source");
   }
@@ -190,7 +193,7 @@ FsError ReadOnlyContentDevice::open(std::string_view relative_path,
   if (out_action) *out_action = OpenAction::None;
   if (!initialized_) return FsError::IoError;
   if (options.access == FileAccess::None) return FsError::InvalidArgument;
-  if (has_access(options.access, FileAccess::Write) ||
+  if ((has_access(options.access, FileAccess::Write) && !opens_existing_for_write()) ||
       has_access(options.access, FileAccess::Delete)) {
     return FsError::ReadOnly;
   }

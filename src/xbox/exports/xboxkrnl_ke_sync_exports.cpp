@@ -297,13 +297,17 @@ bool ke_wait_for_multiple_objects_export(kernel::KernelProcess& process,
 
 // KeSetBasePriorityThread (ordinal 0x99)
 // Guest ABI: r3 = guest KTHREAD pointer, r4 = new base priority (LONG) ->
-// r3 = previous base priority (LONG). Xenon models thread priority as the
-// ThreadPriority enum (Idle=0..TimeCritical=6, see kernel/thread.hpp); the
-// requested value is clamped into that range rather than rejected outright,
-// since real titles occasionally pass values outside the documented range
-// and real hardware does not fault on it either.
+// r3 = previous base priority (LONG). The value is a base-priority
+// increment, kept exactly as given (KeQueryBasePriorityThread returns it);
+// the host priority follows from it through
+// kernel::host_priority_for_base_priority_increment().
 //
-// Real AC6 repro: reached during startup with no case registered at all.
+// Regression (AC6 stuck on its loading screen): the increment used to be
+// clamped into the ThreadPriority enum as if it were an index - 0 ran at
+// idle, 1 at lowest, the audio threads' 0xF/0x11 at time-critical. The main
+// thread, at "lowest", stalled tens of milliseconds resuming its audio
+// workers, and one reached a critical section before the main thread
+// initialized it, sleeping forever.
 bool ke_set_base_priority_thread_export(kernel::KernelProcess& process,
                                         ExportCallContext& context) {
   const auto thread_ptr = static_cast<cpu::GuestAddress>(context.cpu.gpr[3]);
@@ -321,13 +325,8 @@ bool ke_set_base_priority_thread_export(kernel::KernelProcess& process,
     return true;
   }
 
-  const auto previous = static_cast<std::int32_t>(target->priority());
-  auto clamped = requested;
-  if (clamped < static_cast<std::int32_t>(kernel::ThreadPriority::Idle))
-    clamped = static_cast<std::int32_t>(kernel::ThreadPriority::Idle);
-  if (clamped > static_cast<std::int32_t>(kernel::ThreadPriority::TimeCritical))
-    clamped = static_cast<std::int32_t>(kernel::ThreadPriority::TimeCritical);
-  target->set_priority(static_cast<kernel::ThreadPriority>(clamped));
+  const auto previous = target->guest_base_priority();
+  target->set_guest_base_priority(requested);
 
   context.cpu.gpr[3] = static_cast<std::uint32_t>(previous);
   return true;
@@ -350,7 +349,7 @@ bool ke_query_base_priority_thread_export(kernel::KernelProcess& process,
     }
   }
   context.cpu.gpr[3] =
-      target ? static_cast<std::uint32_t>(static_cast<std::int32_t>(target->priority())) : 0u;
+      target ? static_cast<std::uint32_t>(target->guest_base_priority()) : 0u;
   return true;
 }
 

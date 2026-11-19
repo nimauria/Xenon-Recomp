@@ -42,6 +42,12 @@ bool decompress_basic(std::span<const std::byte> header_bytes, std::size_t basic
       if (error) *error = "XEX basic-compression block overruns the file body.";
       return false;
     }
+    // The zero runs are header data, not file bytes: bound what they expand
+    // to by the largest image the console can hold.
+    if (std::uint64_t(out.size()) + data_size + zero_size > kMaxReasonableImageBytes) {
+      if (error) *error = "XEX basic-compression blocks expand beyond the Xbox 360's memory.";
+      return false;
+    }
     const auto span = body.subspan(src, data_size);
     out.insert(out.end(), span.begin(), span.end());
     out.insert(out.end(), static_cast<std::size_t>(zero_size), std::byte{0});

@@ -1,0 +1,70 @@
+#pragma once
+
+#include <chrono>
+#include <cstdint>
+#include <memory>
+
+namespace xenon::gpu {
+
+// The guest's vertical blank is NTSC/HDMI 60 Hz. A frame the title shows for
+// two vblanks stays up for exactly two host refreshes only if guest vblanks
+// fall on host refreshes; a free-running 60 Hz timer drifts against the real
+// display and frames alternate between one and three refreshes (visible judder).
+
+inline constexpr double kGuestVblankHz = 60.0;
+
+// How many host refreshes make one guest vblank: the whole multiple of the
+// guest rate the host refresh rate is (60 Hz -> 1, 120 Hz -> 2, 240 Hz -> 4),
+// or 0 when it is none (75 Hz, 144 Hz, 165 Hz), which cannot be locked and keeps
+// timer-paced vblanks. Within a hertz of the multiple counts: displays run at
+// 59.94 Hz, 119.88 Hz and the like.
+[[nodiscard]] std::uint32_t host_refreshes_per_guest_vblank(double host_refresh_hz) noexcept;
+
+// Whether waiting for `refreshes` vertical blanks of a display reporting
+// `host_refresh_hz` took longer than those refreshes plus kDisplayWaitSlack
+// of one more: a display that does not wait at the rate it reports. A wait
+// ends at the next vblank, so it never needs more than its refreshes; the
+// slack absorbs the scheduler waking the thread late. A virtual or remote
+// display can report one rate and wait at another - CI runners' adapters
+// report 64 Hz (15.6 ms) and waited 24.6 ms on one run, 21.2 ms on another -
+// and guest vblanks locked to it would run the title's 60 Hz clock slow (47 Hz
+// at 21.2 ms), so the GPU pump stops locking to it. (A wait returning early is
+// the pump's other check: no vblank in between.)
+inline constexpr double kDisplayWaitSlack = 0.15;
+[[nodiscard]] bool display_wait_overran(double host_refresh_hz, std::uint32_t refreshes,
+                                        std::chrono::nanoseconds elapsed) noexcept;
+
+// Whether a display vblank came less than `refreshes` (less the same slack)
+// after the previous one the guest was locked to: a display waiting faster
+// than it reports, which would run the title's 60 Hz clock fast. With
+// display_wait_overran() it keeps locked guest vblanks within 15% of the
+// display's reported rate either way.
+[[nodiscard]] bool display_wait_returned_early(double host_refresh_hz, std::uint32_t refreshes,
+                                               std::chrono::nanoseconds since_last) noexcept;
+
+// Waits for the vertical blank of the display a native window is on (the
+// primary display without one). Backend-independent: the same display clock
+// serves D3D12 and Vulkan presentation.
+class HostDisplayVblank {
+ public:
+  HostDisplayVblank();
+  ~HostDisplayVblank();
+  HostDisplayVblank(const HostDisplayVblank&) = delete;
+  HostDisplayVblank& operator=(const HostDisplayVblank&) = delete;
+
+  // Resolves the display `native_window` is on (an HWND on Windows; null for
+  // the primary display) and its refresh rate. Returns available().
+  bool select(void* native_window);
+  [[nodiscard]] bool available() const noexcept;
+  // The selected display's refresh rate in hertz; 0 when unknown.
+  [[nodiscard]] double refresh_hz() const noexcept;
+  // Blocks until the selected display's next vertical blank. False when no
+  // display is selected or the wait failed.
+  bool wait();
+
+ private:
+  struct State;
+  std::unique_ptr<State> state_;
+};
+
+}  // namespace xenon::gpu

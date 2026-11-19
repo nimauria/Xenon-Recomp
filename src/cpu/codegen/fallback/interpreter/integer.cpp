@@ -25,9 +25,9 @@ namespace xenon::cpu::fallback {
     const auto c = static_cast<std::uint64_t>(static_cast<std::int64_t>(i.simm16()));
     const auto value = a + c;
     state.gpr[i.rt()] = value;
-    // carry = sum <u a (valid for two-input unsigned addition) - matches
-    // lifter_integer.cpp's emit_ca_from_add() exactly.
-    state.set_xer_ca(value < a);
+    // carry = sum <u a on the low words (CA follows 32-bit mode, see
+    // aot::carry_out) - matches the lifter's emit_ca_from_add() exactly.
+    state.set_xer_ca(static_cast<std::uint32_t>(value) < static_cast<std::uint32_t>(a));
     if (m == "addicx") state.update_cr0_signed(value);
     return true;
   }
@@ -61,7 +61,8 @@ namespace xenon::cpu::fallback {
   }
 
   // Carry arithmetic: addc/adde/addme/addze and subfc/subfe/subfme/subfze/subfic.
-  // XER.CA is the 64-bit carry out; the "extended" forms also add the incoming CA.
+  // XER.CA is the carry out of the low word (aot::carry_out); the "extended"
+  // forms also add the incoming CA.
   // Identical semantics to lifter_integer.cpp (the compiled path) - this used to
   // be missing here, so any undiscovered function using them ended the run.
   if (m == "addcx" || m == "addex" || m == "addmex" || m == "addzex") {
@@ -84,7 +85,8 @@ namespace xenon::cpu::fallback {
     const auto rb = state.gpr[i.rb()];
     const auto value = rb - ra;
     state.gpr[i.rt()] = value;
-    state.set_xer_ca(rb >= ra);  // no borrow
+    // No borrow out of the low word.
+    state.set_xer_ca(static_cast<std::uint32_t>(rb) >= static_cast<std::uint32_t>(ra));
     if (i.oe()) state.set_xer_overflow(aot::signed_add_overflow(rb, ~ra, true));
     if (i.rc()) state.update_cr0_signed(value);
     return true;
@@ -109,7 +111,7 @@ namespace xenon::cpu::fallback {
     const auto imm = static_cast<std::uint64_t>(static_cast<std::int64_t>(i.simm16()));
     const auto ra = state.gpr[i.ra()];
     state.gpr[i.rt()] = imm - ra;
-    state.set_xer_ca(imm >= ra);
+    state.set_xer_ca(static_cast<std::uint32_t>(imm) >= static_cast<std::uint32_t>(ra));
     return true;
   }
 
@@ -132,8 +134,11 @@ namespace xenon::cpu::fallback {
   }
 
   if (m == "negx") {
-    const auto value = std::uint64_t{0} - state.gpr[i.ra()];
+    const auto ra = state.gpr[i.ra()];
+    const auto value = std::uint64_t{0} - ra;
     state.gpr[i.rt()] = value;
+    // nego overflows only negating the most negative low word, as compiled.
+    if (i.oe()) state.set_xer_overflow(static_cast<std::uint32_t>(ra) == 0x80000000u);
     if (i.rc()) state.update_cr0_signed(value);
     return true;
   }

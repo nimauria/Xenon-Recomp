@@ -77,7 +77,7 @@ def verify_install(
     # These dependency license directories are part of the release contract,
     # not optional documentation. Their absence means the package should not be
     # published even if its binaries happen to run.
-    for license_dir in ("xenia-ffmpeg", "dxc", "vulkan-loader", "vulkan-headers", "sdl2", "qt6"):
+    for license_dir in ("xenia-ffmpeg", "dxc", "vulkan-loader", "vulkan-headers", "sdl3", "qt6"):
         path = licenses / license_dir
         if not path.is_dir() or not any(p.is_file() for p in path.rglob("*")):
             missing.append(f"third-party license material: {license_dir}")

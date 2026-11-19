@@ -1,16 +1,22 @@
 #include "launcher_service.hpp"
+#include "platform/file_path.hpp"
 #include "core/archive.hpp"
 #include "core/releases.hpp"
+#include "core/module_presentation.hpp"
 #include "core/launcher_update.hpp"
+#include "core/cache_storage.hpp"
+#include "core/file_transfer.hpp"
 #include "picosha2/picosha2.h"
 #include <algorithm>
+#include <array>
+#include <map>
 #include <chrono>
 #include <fstream>
 #include <set>
 namespace xenon::launcher_next {
 namespace fs = std::filesystem;
 namespace {
-const std::string registry = "https://raw.githubusercontent.com/nimauria/Xenon-Modules/main/";
+const std::string registry = module_registry;
 std::string now() {
   return std::to_string(std::chrono::duration_cast<std::chrono::milliseconds>(
                             std::chrono::system_clock::now().time_since_epoch())
@@ -40,6 +46,17 @@ std::string installed_version(const Json &state, const std::string &id) {
       return module.value("version", "");
   return {};
 }
+bool package_changed(const Json &state, const std::string &id, const Json &package) {
+  if (!package.is_object())
+    return false;
+  if (package.value("source", "") != "repository")
+    return newer_version(package.value("version", ""), installed_version(state, id));
+  for (const auto &module : state.at("modules"))
+    if (module.at("id") == id)
+      return module.value("repositoryDigest", "") !=
+             package.at("asset").at("sha256").get<std::string>();
+  return true;
+}
 void history(Json &next, const std::string &module, const std::string &action,
              const std::string &outcome, const std::string &message) {
   next["updateHistory"].push_back({{"id", make_id()},
@@ -63,11 +80,13 @@ void LauncherService::load_online_state() {
   if (!state_.contains("catalog")) {
     state_["catalog"] = {
         {"state", "idle"}, {"entries", Json::array()}, {"lastError", ""}, {"lastChecked", ""}};
-    if (fs::is_regular_file(storage_ / "module-catalog-fallback.json"))
+    if (fs::is_regular_file(io_path(storage_ / "module-catalog-fallback.json")))
       try {
+        const auto bundled = read_document(storage_ / "module-catalog-fallback.json");
         state_["catalog"]["entries"].push_back(
-            catalog_entry(read_document(storage_ / "module-catalog-fallback.json"),
-                          "modules/org.nimauria.project-gracemeria.json"));
+            catalog_entry(bundled, bundled.value("version", 1) == 2
+                                       ? bundled.at("sourcePath").get<std::string>() + "/entry.json"
+                                       : "modules/org.nimauria.project-gracemeria.json"));
         state_["catalog"]["state"] = "bundled";
       } catch (const std::exception &error) {
         state_["catalog"]["lastError"] = error.what();
@@ -75,6 +94,14 @@ void LauncherService::load_online_state() {
   }
   if (!state_.contains("moduleUpdates"))
     state_["moduleUpdates"] = Json::object();
+  // Migrate persisted v1 entries as well as the bundled/offline catalogue.
+  for (auto &entry : state_["catalog"]["entries"]) {
+    centralize_module_entry(entry);
+    auto &value = state_["moduleUpdates"][entry.at("id").get<std::string>()];
+    if (value.is_object() && value.contains("release") && value["release"].is_object() &&
+        value["release"].value("source", "") != "repository")
+      value = {{"state", "idle"}};
+  }
   if (!state_.contains("launcherUpdate"))
     state_["launcherUpdate"] = {{"state", "idle"}, {"currentVersion", launcher_version}};
   if (!state_.contains("updateHistory"))
@@ -107,8 +134,7 @@ void LauncherService::project_online(Json &result) const {
     const auto release = value.value("release", Json());
     const bool asset =
         release.is_object() && release.contains("asset") && release["asset"].is_object();
-    const bool newer =
-        release.is_object() && newer_version(release.value("version", ""), installed);
+    const bool newer = package_changed(state_, id, release);
     const bool busy =
         std::any_of(state_["jobs"].begin(), state_["jobs"].end(), [&](const auto &job) {
           return active(job) && ((job.value("moduleId", "") == id) ||
@@ -141,6 +167,8 @@ void LauncherService::project_online(Json &result) const {
         field = value.erase(field);
       else
         ++field;
+    if (value.contains("release") && value["release"].is_object())
+      value["release"].erase("_files");
   };
   for (auto &entry : result["catalog"]["entries"]) {
     const auto id = entry.at("id").get<std::string>();
@@ -170,9 +198,16 @@ void LauncherService::enqueue_network(Json &next, const std::string &kind,
     throw std::runtime_error("Online services are disabled in this launcher session");
   if (!network_job_kind(kind))
     throw std::runtime_error("Unsupported online operation");
+  if (kind == "module.download")
+    for (const auto &job : next["jobs"])
+      if (active(job) && job.value("_command", "") == "modules.uninstall")
+        throw std::runtime_error("Wait for module uninstall before downloading packages");
   unsigned pending = 0;
   for (const auto &job : next["jobs"])
     if (active(job)) {
+      if (cache_relocation_job(job))
+        throw std::runtime_error(
+            "Wait for cache relocation to finish before starting online operations");
       ++pending;
       if (job.value("kind", "") == kind && job.value("moduleId", "") == module_id)
         throw std::runtime_error("This online operation is already active");
@@ -209,7 +244,7 @@ void LauncherService::enqueue_network(Json &next, const std::string &kind,
                                  {"assetName", "xenon-launcher-next-" + host_key() + ".zip"}}
                           : row(next["catalog"]["entries"], id);
     if (entry.value("assetName", "").empty())
-      throw std::runtime_error("This module has no release package for " + host_key());
+      throw std::runtime_error("This module has no package for " + host_key());
     job["moduleId"] = id;
     job["_entry"] = entry;
     auto &value = update(next, id);
@@ -223,11 +258,13 @@ void LauncherService::enqueue_network(Json &next, const std::string &kind,
       if (!value.contains("release") || !value["release"].is_object() ||
           value["release"]["asset"].is_null() ||
           value["release"]["asset"].value("sha256", "").empty())
-        throw std::runtime_error(
-            "Check for a release with a SHA-256 package digest before downloading");
+        throw std::runtime_error(launcher
+            ? "Check for a release with a SHA-256 package digest before downloading"
+            : "Check and verify the module repository files before downloading");
       job["title"] = "Download " + entry.at("name").get<std::string>() + " " +
                      value["release"].at("version").get<std::string>();
       job["_release"] = value.at("release");
+      job["_cacheLocation"] = cache_location(storage_, next);
       value["state"] = "downloading";
     }
     value["jobId"] = job["id"];
@@ -294,10 +331,12 @@ void LauncherService::cleanup_download(const Json &job) {
   if (id.empty() || id.size() > 100 ||
       id.find_first_not_of("0123456789abcdef-") != std::string::npos)
     throw std::runtime_error("Invalid download identity");
-  const auto directory = fs::absolute(storage_ / "downloads" / id).lexically_normal();
-  if (!fs::exists(directory))
+  const auto location = job.value("_cacheLocation", cache_location(storage_, Json::object()));
+  const auto directory = cache_root(storage_, location) / "downloads" / id;
+  if (!fs::exists(io_path(directory)))
     return;
-  if (fs::weakly_canonical(directory) != directory ||
+  check_cache_location(storage_, location);
+  if (normal_path(fs::weakly_canonical(io_path(directory))) != directory ||
       read_document(directory / "owner.json", 4096) != download_owner(id))
     throw std::runtime_error("Download ownership changed; temporary files were retained");
   {
@@ -308,7 +347,8 @@ void LauncherService::cleanup_download(const Json &job) {
     if (state_["launcherUpdate"].value("_downloadId", "") == id)
       return;
   }
-  fs::remove_all(directory);
+  check_transfer_tree(directory);
+  fs::remove_all(io_path(directory));
 }
 void LauncherService::run_network(const Json &job,
                                   const std::shared_ptr<std::atomic_bool> &cancel) {
@@ -355,6 +395,21 @@ void LauncherService::run_network(const Json &job,
           {"errors", errors},
           {"lastChecked", now()},
           {"lastError", errors.empty() ? "" : "Some module entries could not be loaded"}};
+      refresh_module_presentations(next);
+      for (const auto &operation : next["jobs"])
+        if (operation.at("id") == id && operation.contains("_metadataRefresh"))
+          for (auto request = operation.at("_metadataRefresh").begin();
+               request != operation.at("_metadataRefresh").end(); ++request)
+            for (auto &game : next["games"])
+              if (game.at("id") == request.key() &&
+                  game.value("moduleId", "") == request.value().at("moduleId").get<std::string>() &&
+                  game.at("title") == request.value().at("expectedTitle"))
+                for (const auto &module : next["modules"])
+                  if (module.at("id") == request.value().at("moduleId"))
+                    apply_module_presentation(
+                        game, module,
+                        presentation_catalog_entry(next, module.at("id").get<std::string>()),
+                        next["revision"].get<std::int64_t>() + 1, true);
       if (job.value("_checkInstalled", false))
         enqueue_network(next, "module.checkAll");
     });
@@ -362,11 +417,19 @@ void LauncherService::run_network(const Json &job,
   }
   const auto check_release = [&](const Json &entry, bool prerelease) {
     const auto module_id = entry.at("id").get<std::string>();
-    const auto release = best_release(fetch_json("https://api.github.com/repos/" +
-                                                     entry.at("repository").get<std::string>() +
-                                                     "/releases?per_page=30",
-                                                 cancel),
-                                      entry.at("repository"), entry.at("assetName"), prerelease);
+    Json release = nullptr;
+    if (module_id == "launcher") {
+      release = best_release(fetch_json("https://api.github.com/repos/" +
+                                            entry.at("repository").get<std::string>() +
+                                            "/releases?per_page=30",
+                                        cancel),
+                             entry.at("repository"), entry.at("assetName"), prerelease);
+    } else {
+      release = repository_package(
+          fetch_json(registry + entry.at("sourcePath").get<std::string>() + "/package.json",
+                     cancel),
+          entry);
+    }
     cancelled();
     std::lock_guard lock(mutex_);
     auto next = state_;
@@ -382,7 +445,7 @@ void LauncherService::run_network(const Json &job,
       value["state"] = "package-unavailable";
     else if (release["asset"].value("sha256", "").empty())
       value["state"] = "digest-unavailable";
-    else if (!newer_version(release.at("version"), current))
+    else if (!package_changed(next, module_id, release))
       value["state"] = "up-to-date";
     else
       value["state"] = current.empty() ? "available" : "update-available";
@@ -392,7 +455,9 @@ void LauncherService::run_network(const Json &job,
     state_ = std::move(next);
   };
   if (kind == "module.check" || kind == "launcher.check") {
-    update_job(id, {{"phase", "Checking GitHub releases"}, {"progress", 10}});
+    update_job(id, {{"phase", kind == "launcher.check" ? "Checking GitHub releases"
+                                                       : "Checking module repository"},
+                    {"progress", 10}});
     check_release(job.at("_entry"), job.value("_prerelease", false));
     complete_job(id, [](Json &) {});
     return;
@@ -427,9 +492,16 @@ void LauncherService::run_network(const Json &job,
     const auto expected = sha256_digest(asset.at("sha256"));
     if (expected.empty())
       throw std::runtime_error("Missing SHA-256 package digest");
-    const auto directory = fs::absolute(storage_ / "downloads" / id).lexically_normal();
-    fs::create_directories(directory.parent_path());
-    if (!fs::create_directory(directory) || fs::weakly_canonical(directory) != directory)
+    const auto location = job.value("_cacheLocation", cache_location(storage_, Json::object()));
+    check_cache_location(storage_, location, true);
+    const auto directory = cache_root(storage_, location) / "downloads" / id;
+    fs::create_directories(io_path(directory.parent_path()));
+    if (redirected_path(directory.parent_path()) ||
+        normal_path(fs::weakly_canonical(io_path(directory.parent_path()))) !=
+            directory.parent_path())
+      throw std::runtime_error("Download cache was redirected");
+    if (!fs::create_directory(io_path(directory)) ||
+        normal_path(fs::weakly_canonical(io_path(directory))) != directory)
       throw std::runtime_error("Could not create a fresh download directory");
     write_document(directory / "owner.json", download_owner(id));
     const auto partial = directory / "package.part", complete = directory / "package.zip";
@@ -437,52 +509,105 @@ void LauncherService::run_network(const Json &job,
     auto last = std::chrono::steady_clock::time_point{};
     update_job(id, {{"phase", "Downloading package"}, {"progress", 1}});
     HttpResponse response;
-    {
-      std::ofstream output(partial, std::ios::binary);
-      if (!output)
-        throw std::runtime_error("Could not create a download file");
-      response = http_->get(
-          asset.at("url"),
-          {512ull * 1024 * 1024, "", [&] { return cancel->load(); },
-           [&](std::string_view bytes) {
-             output.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
-             if (!output)
-               throw std::runtime_error("Could not write the downloaded package");
-             hash.process(bytes.begin(), bytes.end());
-           },
-           [&](std::uint64_t done, std::uint64_t total) {
-             const auto current = std::chrono::steady_clock::now();
-             if (current - last < std::chrono::milliseconds(200))
-               return;
-             const auto size = total ? total : asset.at("size").get<std::uint64_t>();
-             update_job(id, {{"phase", "Downloading package"},
-                             {"progress", static_cast<int>(std::min<std::uint64_t>(
-                                              95, 95 * done / std::max<std::uint64_t>(1, size)))},
-                             {"bytesDone", done},
-                             {"bytesTotal", size}});
-             last = current;
-           }});
-      output.flush();
-      if (!output)
-        throw std::runtime_error("Could not flush the downloaded package");
+    std::string archive_digest = expected;
+    if (kind == "module.download") {
+      std::map<std::string, std::string> files;
+      std::uint64_t done = 0;
+      for (const auto &file : release.at("_files")) {
+        cancelled();
+        const auto path = file.at("path").get<std::string>();
+        std::string bytes;
+        const auto size = file.at("size").get<std::uint64_t>();
+        const auto result =
+            http_->get(registry + job.at("_entry").at("sourcePath").get<std::string>() + "/" + path,
+                       {size,
+                        "",
+                        [&] { return cancel->load(); },
+                        [&](std::string_view chunk) {
+                          if (chunk.size() > size - bytes.size())
+                            throw std::runtime_error("Repository file exceeds its declared size");
+                          bytes.append(chunk);
+                        },
+                        {}});
+        if (result.status < 200 || result.status >= 300 || bytes.size() != size ||
+            picosha2::hash256_hex_string(bytes.begin(), bytes.end()) !=
+                file.at("sha256").get<std::string>())
+          throw std::runtime_error(
+              "Repository file failed SHA-256 verification; check for updates and retry");
+        done += size;
+        files.emplace(path, std::move(bytes));
+        update_job(id,
+                   {{"phase", "Downloading module files"},
+                    {"progress", static_cast<int>(95 * done /
+                                                  std::max<std::uint64_t>(
+                                                      1, asset.at("size").get<std::uint64_t>()))},
+                    {"bytesDone", done},
+                    {"bytesTotal", asset.at("size")}});
+      }
+      cancelled();
+      write_zip(partial, files);
+      std::ifstream archive(io_path(partial), std::ios::binary);
+      std::array<char, 65536> buffer{};
+      while (archive) {
+        cancelled();
+        archive.read(buffer.data(), buffer.size());
+        hash.process(buffer.begin(), buffer.begin() + archive.gcount());
+      }
+      if (!archive.eof())
+        throw std::runtime_error("Could not verify staged module archive");
+      hash.finish();
+      archive_digest = picosha2::get_hash_hex_string(hash);
+    } else {
+      {
+        std::ofstream output(io_path(partial), std::ios::binary);
+        if (!output)
+          throw std::runtime_error("Could not create a download file");
+        response = http_->get(
+            asset.at("url"),
+            {512ull * 1024 * 1024, "", [&] { return cancel->load(); },
+             [&](std::string_view bytes) {
+               output.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+               if (!output)
+                 throw std::runtime_error("Could not write the downloaded package");
+               hash.process(bytes.begin(), bytes.end());
+             },
+             [&](std::uint64_t done, std::uint64_t total) {
+               const auto current = std::chrono::steady_clock::now();
+               if (current - last < std::chrono::milliseconds(200))
+                 return;
+               const auto size = total ? total : asset.at("size").get<std::uint64_t>();
+               update_job(id, {{"phase", "Downloading package"},
+                               {"progress", static_cast<int>(std::min<std::uint64_t>(
+                                                95, 95 * done / std::max<std::uint64_t>(1, size)))},
+                               {"bytesDone", done},
+                               {"bytesTotal", size}});
+               last = current;
+             }});
+        output.flush();
+        if (!output)
+          throw std::runtime_error("Could not flush the downloaded package");
+      }
+      cancelled();
+      if (response.status < 200 || response.status >= 300)
+        throw std::runtime_error("Package download returned HTTP " +
+                                 std::to_string(response.status));
+      if (response.bytes != asset.at("size").get<std::uint64_t>())
+        throw std::runtime_error("The package size does not match its release metadata");
+      hash.finish();
+      if (picosha2::get_hash_hex_string(hash) != expected)
+        throw std::runtime_error("The downloaded package failed SHA-256 verification");
     }
-    cancelled();
-    if (response.status < 200 || response.status >= 300)
-      throw std::runtime_error("Package download returned HTTP " + std::to_string(response.status));
-    if (response.bytes != asset.at("size").get<std::uint64_t>())
-      throw std::runtime_error("The package size does not match its release metadata");
-    hash.finish();
-    if (picosha2::get_hash_hex_string(hash) != expected)
-      throw std::runtime_error("The downloaded package failed SHA-256 verification");
-    fs::rename(partial, complete);
+    fs::rename(io_path(partial), io_path(complete));
     const auto module_id = job.at("moduleId").get<std::string>();
     complete_job(id, [&](Json &next) {
       auto &value = update(next, module_id);
       value["state"] = "ready-to-install";
       value["_packagePath"] = path_string(complete);
       value["_downloadId"] = id;
+      value["_cacheLocation"] = location;
       value["downloadVersion"] = release.at("version");
       value["downloadDigest"] = expected;
+      value["_archiveDigest"] = archive_digest;
       value["lastError"] = "";
       history(next, module_id, "download", "success", "Package downloaded and SHA-256 verified");
       notify(next, "Package ready",

@@ -6,6 +6,8 @@ import {
   type Transport,
 } from "../contracts/launcher";
 import definitions from "../contracts/settings.json";
+import { validateGameSettings } from "./gameSettings";
+import { profileNameKey, trimProfileName } from "./profileNames";
 import {
   normalizeProfile,
   duplicateProfileName,
@@ -47,6 +49,8 @@ const pages = [
   "Profiles",
   "Captures",
   "Downloads",
+  "Discover",
+  "Updates",
   "Settings",
   "Support",
   "Network",
@@ -114,14 +118,14 @@ export class PreviewTransport implements Transport {
       case "application.snapshot":
         return projectProfiles(this.state) as Commands[K]["output"];
       case "profiles.create": {
-        const name = (
-          input as Commands["profiles.create"]["input"]
-        ).name.trim();
+        const name = trimProfileName(
+          (input as Commands["profiles.create"]["input"]).name,
+        );
         if (!name || name.length > 48)
           throw new Error("Use a profile name between 1 and 48 characters.");
         if (
           next.profiles.some(
-            (p) => p.name.toLocaleLowerCase() === name.toLocaleLowerCase(),
+            (p) => profileNameKey(p.name) === profileNameKey(name),
           )
         )
           throw new Error("That profile name is already in use.");
@@ -171,6 +175,15 @@ export class PreviewTransport implements Transport {
         next.notifications ??= [];
         next.history ??= [];
         if (action === "settings.set") {
+          if (
+            data.key === "general/language" &&
+            (typeof data.value !== "string" ||
+              (data.value !== "auto" &&
+                !/^[a-z]{2,3}(?:-[A-Za-z0-9]{2,8})*$/.test(data.value)))
+          )
+            throw new Error(
+              "Choose an available language or the system default",
+            );
           if (
             data.key === "community/discordRichPresence" &&
             data.value !== false
@@ -239,19 +252,22 @@ export class PreviewTransport implements Transport {
         ) {
           const profile = next.profiles.find((p) => p.id === data.id);
           if (!profile) throw new Error("Profile no longer exists.");
-          const name = String(
-            action === "profiles.duplicate"
-              ? duplicateProfileName(next.profiles, profile.name)
-              : data.name,
-          ).trim();
+          const name = trimProfileName(
+            String(
+              action === "profiles.duplicate"
+                ? duplicateProfileName(next.profiles, profile.name)
+                : data.name,
+            ),
+          );
           if (
             !name ||
             name.length > 48 ||
-            next.profiles.some(
-              (p) =>
-                (action === "profiles.duplicate" || p.id !== profile.id) &&
-                p.name.toLocaleLowerCase() === name.toLocaleLowerCase(),
-            )
+            (!(action === "profiles.update" && name === profile.name) &&
+              next.profiles.some(
+                (p) =>
+                  (action === "profiles.duplicate" || p.id !== profile.id) &&
+                  profileNameKey(p.name) === profileNameKey(name),
+              ))
           )
             throw new Error(
               "Choose a unique profile name, up to 48 characters.",
@@ -264,6 +280,22 @@ export class PreviewTransport implements Transport {
           if (action === "profiles.duplicate")
             next.profiles.push({ ...edited, id: crypto.randomUUID(), name });
           else Object.assign(profile, edited);
+        } else if (action === "library.settings.save") {
+          const game = next.games.find((g) => g.id === data.id);
+          if (!game) throw Error("Unknown game");
+          if ((game.moduleId ?? "") !== data.moduleId)
+            throw Error("The game's module changed; reopen game settings");
+          const checked = validateGameSettings(
+            data.runtimeOverrides,
+            data.moduleOverrides,
+            next.modules?.find((m) => m.id === game.moduleId),
+          );
+          game.runtimeOverrides = structuredClone(checked.runtime);
+          if (game.moduleId)
+            game.moduleOverrides = {
+              ...game.moduleOverrides,
+              [game.moduleId]: structuredClone(checked.module),
+            };
         } else if (action === "navigation.remember") {
           if (!pages.includes(String(data.page)))
             throw new Error("Unknown navigation destination");

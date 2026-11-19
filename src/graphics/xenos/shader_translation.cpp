@@ -1,5 +1,7 @@
 #include "xenon/gpu/shader_translation.hpp"
 
+#include "xenon/memory/types.hpp"
+
 #include <algorithm>
 #include <array>
 #include <iomanip>
@@ -25,6 +27,44 @@ std::string swizzle(std::uint8_t value) {
   return result;
 }
 
+// Temporary registers. A shader that addresses any temporary relative to the
+// loop index aL keeps all 64 in an array it can index; every other shader
+// names each one as a variable of its own (r_N), which the compiler takes
+// straight to SSA values. Indexing the array, even by constants, made DXC's
+// SPIR-V legalization most of a shader's compile time: AC6's mission shaders
+// compiled in 46 ms on average instead of 174 ms, the slowest in 229 ms
+// instead of 2.1 s. Set by lower() for the shader it is emitting (lowering
+// runs on several compile workers at once).
+thread_local bool t_register_array = true;
+
+std::string temporary(unsigned index, bool relative) {
+  if (t_register_array || relative)
+    return "r[(" + std::to_string(index) + (relative ? " + aL" : "") + ") & 63]";
+  return "r_" + std::to_string(index & 63u);
+}
+
+// Whether any instruction of `shader` addresses a temporary relative to aL.
+bool uses_relative_temporaries(const DecodedShader& shader) {
+  for (const auto& instruction : shader.instructions) {
+    if (instruction.kind == ShaderInstructionKind::Alu) {
+      const auto& alu = instruction.alu;
+      for (const auto& source : alu.sources)
+        if (source.temporary && source.relative) return true;
+      if (!alu.export_data &&
+          (alu.vector_destination_relative || alu.scalar_destination_relative))
+        return true;
+    } else if (instruction.kind == ShaderInstructionKind::VertexFetch) {
+      if (instruction.vertex_fetch.source_relative ||
+          instruction.vertex_fetch.destination_relative)
+        return true;
+    } else if (instruction.texture_fetch.source_relative ||
+               instruction.texture_fetch.destination_relative) {
+      return true;
+    }
+  }
+  return false;
+}
+
 // Relative temporaries add the loop index aL. Relative constants add a0 when
 // the instruction's const_address_register_relative bit is set, otherwise aL.
 std::string source(const AluSource& value, ShaderStage stage,
@@ -33,9 +73,7 @@ std::string source(const AluSource& value, ShaderStage stage,
   if (value.negate) out << "-";
   if (value.absolute_value) out << "abs(";
   if (value.temporary) {
-    out << "r[(" << value.index;
-    if (value.relative) out << " + aL";
-    out << ") & 63]";
+    out << temporary(value.index, value.relative);
   } else {
     out << "XenonFloatConstants[((" << value.index;
     if (value.relative) out << (constant_address_register_relative ? " + a0" : " + aL");
@@ -79,11 +117,134 @@ std::string destination(const AluInstruction& alu, bool scalar) {
   if (alu.export_data) {
     out << "e[" << unsigned(index) << "]";
   } else {
-    out << "r[(" << unsigned(index);
-    if (relative) out << " + aL";
-    out << ") & 63]";
+    out << temporary(index, relative);
   }
   return out.str();
+}
+
+// The vector unit's operation, as HLSL for this opcode alone: sources s0, s1
+// and s2, result pv, and the p0, a0 and vector_killed side effects. Emitting
+// only the instruction's own operation - instead of a call to one function
+// holding every opcode, which DXC had to inline and fold again for each
+// instruction - is most of what a shader's compile time was. The semantics
+// are the Xenos ones the CPU twin (vertex_position_evaluator.cpp) evaluates.
+std::string vector_operation(unsigned op) {
+  switch (op) {
+    case 0: return "pv = s0 + s1;";
+    case 1: return "pv = xenon_legacy_mul4(s0, s1);";
+    case 2: return "pv = max(s0, s1);";
+    case 3: return "pv = min(s0, s1);";
+    case 4: return "pv = float4(s0 == s1);";
+    case 5: return "pv = float4(s0 > s1);";
+    case 6: return "pv = float4(s0 >= s1);";
+    case 7: return "pv = float4(s0 != s1);";
+    case 8: return "pv = frac(s0);";
+    case 9: return "pv = trunc(s0);";
+    case 10: return "pv = floor(s0);";
+    case 11: return "pv = xenon_legacy_mul4(s0, s1) + s2;";
+    case 12: return "pv = select(s0 == 0.0, s1, s2);";
+    case 13: return "pv = select(s0 >= 0.0, s1, s2);";
+    case 14: return "pv = select(s0 > 0.0, s1, s2);";
+    // Dot products are sums of Xenos multiplications, each with the Shader
+    // Model 3 rule (0 * anything = 0, infinity and NaN included). The host's
+    // dot() gives NaN for 0 * inf: AC6's luminance and bloom reductions
+    // weight channels by 0, and the NaN those products left spread through
+    // the downsample chain (8-pixel blocks on screen, the exposure collapsing).
+    case 15: return "{ float4 p = xenon_legacy_mul4(s0, s1); pv = (((p.x + p.y) + p.z) + p.w).xxxx; }";
+    case 16: return "{ float4 p = xenon_legacy_mul4(s0, s1); pv = ((p.x + p.y) + p.z).xxxx; }";
+    case 17: return "{ float4 p = xenon_legacy_mul4(s0, s1); pv = ((p.x + p.y) + s2.x).xxxx; }";
+    // cube: source 1 is the direction as .z_xy. Returns T, S, 2 * major axis
+    // and the D3DCUBEMAP_FACES face.
+    case 18:
+      return "{ float x = s0.z, y = s0.w, z = s0.x; float3 q = abs(float3(x, y, z));\n"
+             "            if (q.z >= q.x && q.z >= q.y) pv = float4(-y, z < 0.0 ? -x : x, 2.0 * z, z < 0.0 ? 5.0 : 4.0);\n"
+             "            else if (q.y >= q.x) pv = float4(y < 0.0 ? -z : z, x, 2.0 * y, y < 0.0 ? 3.0 : 2.0);\n"
+             "            else pv = float4(-y, x < 0.0 ? z : -z, 2.0 * x, x < 0.0 ? 1.0 : 0.0); }";
+    case 19: return "pv = max(max(s0.x, s0.y), max(s0.z, s0.w)).xxxx;";
+    case 20:
+    case 21:
+    case 22:
+    case 23: {
+      static constexpr const char* compare[] = {"== 0.0", "!= 0.0", "> 0.0", ">= 0.0"};
+      const std::string c = compare[op - 20u];
+      return "p0 = s0.w == 0.0 && s1.w " + c + "; pv = (s1.x " + c +
+             " && s0.x == 0.0) ? 0.0.xxxx : (s0.x + 1.0).xxxx;";
+    }
+    case 24:
+    case 25:
+    case 26:
+    case 27: {
+      static constexpr const char* compare[] = {"==", ">", ">=", "!="};
+      return std::string("vector_killed = any(s0 ") + compare[op - 24u] +
+             " s1); pv = (vector_killed ? 1.0 : 0.0).xxxx;";
+    }
+    case 28: return "pv = float4(1.0, xenon_legacy_mul(s0.y, s1.y), s0.z, s1.w);";
+    case 29: return "a0 = (int)clamp(floor(s0.w + 0.5), -256.0, 255.0); pv = max(s0, s1);";
+    default: return "pv = 0.0.xxxx;";
+  }
+}
+
+// The scalar unit's operation for this opcode: operand x is source 3's w
+// (s2.w), y its x (s2.x), b the mulsc/addsc/subsc temporary and ps the
+// previous scalar result; it sets v (written to ps_new as v.xxxx) and the
+// p0, a0 and scalar_killed side effects. retain_prev (50) sets ps_new itself.
+std::string scalar_operation(unsigned op) {
+  switch (op) {
+    case 0: return "v = x + y;";
+    case 1: return "v = x + pp;";
+    case 2: return "v = xenon_legacy_mul(x, y);";
+    case 3: return "v = xenon_legacy_mul(x, pp);";
+    case 4:
+      return "v = (pp == -XENON_FLT_MAX || !isfinite(pp) || !isfinite(y) || y <= 0.0) "
+             "? -XENON_FLT_MAX : xenon_legacy_mul(x, pp);";
+    case 5: return "v = x >= y ? x : y;";
+    case 6: return "v = x < y ? x : y;";
+    case 7: return "v = x == 0.0;";
+    case 8: return "v = x > 0.0;";
+    case 9: return "v = x >= 0.0;";
+    case 10: return "v = x != 0.0;";
+    case 11: return "v = x - floor(x);";
+    case 12: return "v = trunc(x);";
+    case 13: return "v = floor(x);";
+    case 14: return "v = exp2(x);";
+    case 15: return "v = x == 1.0 ? 0.0 : log2(x); if (isinf(v) && v < 0.0) v = -XENON_FLT_MAX;";
+    case 16: return "v = x == 1.0 ? 0.0 : log2(x);";
+    case 17: return "v = xenon_clamp_infinity(x == 1.0 ? 1.0 : 1.0 / x, false);";
+    case 18: return "v = xenon_clamp_infinity(x == 1.0 ? 1.0 : 1.0 / x, true);";
+    case 19: return "v = x == 1.0 ? 1.0 : 1.0 / x;";
+    case 20: return "v = xenon_clamp_infinity(x == 1.0 ? 1.0 : 1.0 / sqrt(x), false);";
+    case 21: return "v = xenon_clamp_infinity(x == 1.0 ? 1.0 : 1.0 / sqrt(x), true);";
+    case 22: return "v = x == 1.0 ? 1.0 : 1.0 / sqrt(x);";
+    case 23: return "a0 = (int)clamp(floor(x + 0.5), -256.0, 255.0); v = x >= y ? x : y;";
+    case 24: return "a0 = (int)clamp(floor(x), -256.0, 255.0); v = x >= y ? x : y;";
+    case 25: return "v = x - y;";
+    case 26: return "v = x - pp;";
+    case 27: return "p0 = x == 0.0; v = p0 ? 0.0 : 1.0;";
+    case 28: return "p0 = x != 0.0; v = p0 ? 0.0 : 1.0;";
+    case 29: return "p0 = x > 0.0; v = p0 ? 0.0 : 1.0;";
+    case 30: return "p0 = x >= 0.0; v = p0 ? 0.0 : 1.0;";
+    case 31: return "p0 = x == 1.0; v = p0 ? 0.0 : (x == 0.0 ? 1.0 : x);";
+    case 32: return "p0 = x - 1.0 <= 0.0; v = p0 ? 0.0 : x - 1.0;";
+    case 33: return "p0 = false; v = XENON_FLT_MAX;";
+    case 34: return "p0 = x == 0.0; v = p0 ? 0.0 : x;";
+    case 35: return "scalar_killed = x == 0.0; v = scalar_killed;";
+    case 36: return "scalar_killed = x > 0.0; v = scalar_killed;";
+    case 37: return "scalar_killed = x >= 0.0; v = scalar_killed;";
+    case 38: return "scalar_killed = x != 0.0; v = scalar_killed;";
+    case 39: return "scalar_killed = x == 1.0; v = scalar_killed;";
+    case 40: return "v = sqrt(x);";
+    case 42:
+    case 43: return "v = xenon_legacy_mul(x, b.x);";
+    case 44:
+    case 45: return "v = x + b.x;";
+    case 46:
+    case 47: return "v = x - b.x;";
+    case 48: return "v = sin(x);";
+    case 49: return "v = cos(x);";
+    // retain_prev: the whole previous result, not its X replicated.
+    case 50: return "ps_new = ps;";
+    default: return "v = 0.0;";
+  }
 }
 
 void emit_alu(std::ostringstream& out, const AluInstruction& alu,
@@ -105,10 +266,19 @@ void emit_alu(std::ostringstream& out, const AluInstruction& alu,
     scalar_b = "s3t";
   }
   out << "          bool vector_killed = false, scalar_killed = false;\n"
-      << "          float4 pv = xenon_vector_op(" << unsigned(alu.vector_opcode)
-      << ", s0, s1, s2, p0, a0, vector_killed);\n"
-      << "          float4 ps_new = xenon_scalar_op(" << unsigned(alu.scalar_opcode)
-      << ", s2, " << scalar_b << ", ps, p0, a0, scalar_killed);\n";
+      << "          // vector op " << unsigned(alu.vector_opcode) << ", scalar op "
+      << unsigned(alu.scalar_opcode) << "\n"
+      << "          float4 pv = 0.0.xxxx;\n"
+      << "          " << vector_operation(alu.vector_opcode) << "\n"
+      << "          float4 ps_new;\n";
+  if (alu.scalar_opcode == 50u) {
+    out << "          " << scalar_operation(alu.scalar_opcode) << "\n";
+  } else {
+    out << "          { float x = s2.w; float y = s2.x; float4 b = " << scalar_b
+        << "; float pp = ps.x; float v = 0.0;\n"
+        << "            " << scalar_operation(alu.scalar_opcode) << "\n"
+        << "            ps_new = v.xxxx; }\n";
+  }
   if (alu.vector_clamp) out << "          pv = saturate(pv);\n";
   if (alu.scalar_clamp) out << "          ps_new = saturate(ps_new);\n";
   // Both results of an export go to vector_dest. A component selected by both
@@ -148,19 +318,28 @@ void emit_alu(std::ostringstream& out, const AluInstruction& alu,
 void emit_fetch(std::ostringstream& out, const DecodedInstruction& instruction) {
   if (instruction.kind == ShaderInstructionKind::VertexFetch) {
     const auto& fetch = instruction.vertex_fetch;
-    out << "        if (" << predicate(fetch.predicate) << ") {\n"
-        << "          uint source_index = (uint)floor(r[(" << unsigned(fetch.source_register);
-    if (fetch.source_relative) out << " + aL";
-    out << ") & 63][" << unsigned(fetch.source_swizzle & 3u) << "] + "
-        << (fetch.index_rounded ? "0.5" : "0.0") << ");\n"
-        << "          float4 fetched = xenon_vertex_fetch(" << unsigned(fetch.fetch_constant)
-        << ", " << unsigned(fetch.fetch_constant_select) << ", source_index, " << unsigned(fetch.stride_dwords) << ", "
-        << fetch.offset_dwords << ", " << unsigned(fetch.data_format) << ", "
-        << (fetch.signed_data ? "true" : "false") << ", "
-        << (fetch.normalized ? "true" : "false") << ");\n"
-        << "          xenon_write_fetch(r[(" << unsigned(fetch.destination_register);
-    if (fetch.destination_relative) out << " + aL";
-    out << ") & 63], fetched, " << fetch.destination_swizzle << ");\n"
+    out << "        if (" << predicate(fetch.predicate) << ") {\n";
+    // A full vfetch computes and latches the element's address (the fetch
+    // constant's base plus index * stride); a vfetch_mini reads at that
+    // latched address plus its own offset and never reads an index register.
+    // Titles overwrite the index register with the full fetch's own result
+    // (r0 = vfetch r0.x), so re-reading it for the mini fetches that follow
+    // fetched the rest of the vertex from wherever that data pointed:
+    // AC6's characters came out contorted and its aircraft torn apart.
+    if (!fetch.mini_fetch) {
+      out << "          vfetch_base = xenon_vertex_fetch_base(" << unsigned(fetch.fetch_constant)
+          << ", " << unsigned(fetch.fetch_constant_select) << ", xenon_fetch_index("
+          << temporary(fetch.source_register, fetch.source_relative) << "["
+          << unsigned(fetch.source_swizzle & 3u) << "], "
+          << (fetch.index_rounded ? "true" : "false") << "), " << unsigned(fetch.stride_dwords)
+          << ");\n";
+    }
+    out << "          float4 fetched = xenon_vertex_decode(vfetch_base, " << fetch.offset_dwords
+        << ", " << unsigned(fetch.data_format) << ", " << (fetch.signed_data ? "true" : "false")
+        << ", " << (fetch.normalized ? "true" : "false") << ");\n"
+        << "          xenon_write_fetch("
+        << temporary(fetch.destination_register, fetch.destination_relative) << ", fetched, "
+        << fetch.destination_swizzle << ");\n"
         << "        }\n";
   } else {
     const auto& fetch = instruction.texture_fetch;
@@ -172,9 +351,9 @@ void emit_fetch(std::ostringstream& out, const DecodedInstruction& instruction) 
       return o.str();
     };
     out << "        if (" << predicate(fetch.predicate) << ") {\n"
-        << "          float4 coord = r[(" << unsigned(fetch.source_register);
-    if (fetch.source_relative) out << " + aL";
-    out << ") & 63]" << swizzle(fetch.source_swizzle) << ";\n";
+        << "          float4 coord = "
+        << temporary(fetch.source_register, fetch.source_relative)
+        << swizzle(fetch.source_swizzle) << ";\n";
     // Xenos setTextureLod / setTextureGradientsHorz / setTextureGradientsVert
     // write per-shader-invocation state that later tfetches read when their
     // use_register_lod / use_register_gradients flags are set.
@@ -218,11 +397,92 @@ void emit_fetch(std::ostringstream& out, const DecodedInstruction& instruction) 
           << ", coord, " << (fetch.unnormalized_coordinates ? "true" : "false") << ", "
           << offsets() << ");\n";
     }
-    out << "          xenon_write_fetch(r[(" << unsigned(fetch.destination_register);
-    if (fetch.destination_relative) out << " + aL";
-    out << ") & 63], fetched, " << fetch.destination_swizzle << ");\n"
+    out << "          xenon_write_fetch("
+        << temporary(fetch.destination_register, fetch.destination_relative) << ", fetched, "
+        << fetch.destination_swizzle << ");\n"
         << "        }\n";
   }
+}
+
+// The single guest-memory declaration emit_prelude() writes, which the
+// segmented binding replaces.
+constexpr std::string_view kGuestMemoryDeclaration =
+    "#ifdef XENON_MEMORY_RW\n"
+    "RWByteAddressBuffer XenonGuestMemory : register(u0);\n"
+    "#else\n"
+    "ByteAddressBuffer XenonGuestMemory : register(t0);\n"
+    "#endif\n";
+
+void replace_all(std::string& text, std::string_view from, std::string_view to) {
+  for (auto at = text.find(from); at != std::string::npos; at = text.find(from, at + to.size()))
+    text.replace(at, from.size(), to);
+}
+
+// Rewrites a lowered guest shader for segmented guest memory: one buffer per
+// segment (read-only segment 0 at t0 and segment i at t(128 + i), past the
+// texture arrays; read-write segment i at u(i)) and accessors that pick the
+// segment from the address's high bits with a branch. False, with a
+// diagnostic, when an access remains that no accessor covers.
+bool segment_guest_memory(std::string& hlsl, std::uint8_t shift, std::uint8_t count, bool rw,
+                          std::vector<std::string>& diagnostics) {
+  const auto declaration = hlsl.find(kGuestMemoryDeclaration);
+  if (declaration == std::string::npos) {
+    diagnostics.push_back("segmented guest memory: the prelude's declaration was not found");
+    return false;
+  }
+  std::ostringstream block;
+  block << "#define XENON_GUEST_SEGMENT_SHIFT " << unsigned(shift) << "u\n"
+        << "#define XENON_GUEST_SEGMENT_MASK " << ((1ull << shift) - 1ull) << "u\n"
+        << "#define XENON_GUEST_MEMORY_BYTES " << memory::kPhysicalMemorySize << "u\n";
+  for (unsigned i = 0; i < count; ++i) {
+    if (rw) block << "RWByteAddressBuffer XenonGuestMemory" << i << " : register(u" << i << ");\n";
+    else block << "ByteAddressBuffer XenonGuestMemory" << i << " : register(t" << (i ? 128u + i : 0u)
+               << ");\n";
+  }
+  const auto each_segment = [&](const char* statement) {
+    std::ostringstream cases;
+    cases << "  const uint offset = address & XENON_GUEST_SEGMENT_MASK;\n"
+          << "  [branch] switch (address >> XENON_GUEST_SEGMENT_SHIFT) {\n";
+    for (unsigned i = 0; i < count; ++i) {
+      std::string line = statement;
+      replace_all(line, "SEGMENT", "XenonGuestMemory" + std::to_string(i));
+      cases << "    case " << i << "u: " << line << "\n";
+    }
+    cases << "    default: break;\n  }\n";
+    return cases.str();
+  };
+  block << "uint4 xenon_guest_load4(uint address) {\n"
+        << each_segment("return SEGMENT.Load4(offset);")
+        << "  return uint4(0u, 0u, 0u, 0u);\n}\n";
+  if (rw) {
+    block << "void xenon_guest_store(uint address, uint value) {\n"
+          << each_segment("SEGMENT.Store(offset, value); break;") << "}\n"
+          << "void xenon_guest_store2(uint address, uint2 value) {\n"
+          << each_segment("SEGMENT.Store2(offset, value); break;") << "}\n"
+          << "void xenon_guest_store4(uint address, uint4 value) {\n"
+          << each_segment("SEGMENT.Store4(offset, value); break;") << "}\n"
+          << "void xenon_guest_interlocked_and(uint address, uint value, out uint original) {\n"
+          << "  original = 0u;\n"
+          << each_segment("SEGMENT.InterlockedAnd(offset, value, original); break;") << "}\n"
+          << "void xenon_guest_interlocked_or(uint address, uint value, out uint original) {\n"
+          << "  original = 0u;\n"
+          << each_segment("SEGMENT.InterlockedOr(offset, value, original); break;") << "}\n";
+  }
+  hlsl.replace(declaration, kGuestMemoryDeclaration.size(), block.str());
+  replace_all(hlsl, "XenonGuestMemory.Load4(", "xenon_guest_load4(");
+  replace_all(hlsl, "XenonGuestMemory.Store4(", "xenon_guest_store4(");
+  replace_all(hlsl, "XenonGuestMemory.Store2(", "xenon_guest_store2(");
+  replace_all(hlsl, "XenonGuestMemory.Store(", "xenon_guest_store(");
+  replace_all(hlsl, "XenonGuestMemory.InterlockedAnd(", "xenon_guest_interlocked_and(");
+  replace_all(hlsl, "XenonGuestMemory.InterlockedOr(", "xenon_guest_interlocked_or(");
+  replace_all(hlsl, "XenonGuestMemory.GetDimensions(memory_size);",
+              "memory_size = XENON_GUEST_MEMORY_BYTES;");
+  if (hlsl.find("XenonGuestMemory.") != std::string::npos) {
+    diagnostics.push_back(
+        "segmented guest memory: a guest-memory access has no segmented accessor");
+    return false;
+  }
+  return true;
 }
 
 void emit_prelude(std::ostringstream& out, bool guest_memory_rw,
@@ -236,7 +496,7 @@ cbuffer XenonShaderConstants : register(b0) {
   uint4 XenonBoolConstants[8];
   uint4 XenonLoopConstants[32];
   uint4 XenonVertexFetchConstants[32];
-  uint4 XenonDrawState[8];
+  uint4 XenonDrawState[24];
 };
 #ifdef XENON_MEMORY_RW
 RWByteAddressBuffer XenonGuestMemory : register(u0);
@@ -255,6 +515,47 @@ SamplerState XenonSamplers[32] : register(s0);
 uint xenon_vertex_index(uint index) {
   uint4 vgt = XenonDrawState[1];
   return clamp((index + vgt.y) & 0xFFFFFFu, vgt.z & 0xFFFFFFu, vgt.w & 0xFFFFFFu);
+}
+
+// The guest's exported position as host clip coordinates over the whole
+// render target. PA_CL_VTE_CNTL's formats first: VTX_W0_FMT clear means W
+// holds 1/W0, and VTX_XY_FMT/VTX_Z_FMT mean those components were already
+// divided by W0. Then the guest viewport transform (XenonDrawState[2], in
+// render-target pixels times W) and the host's pixels-to-NDC mapping
+// (XenonDrawState[3].yz = 2 / width, 2 / height; Y down in pixels, up in
+// NDC - Vulkan flips its viewport to match).
+float4 xenon_clip_position(float4 position) {
+  uint flags = XenonDrawState[3].x;
+  if ((flags & 4u) == 0u) position.w = 1.0 / position.w;
+  if ((flags & 1u) != 0u) position.xy *= position.w;
+  if ((flags & 2u) != 0u) position.z *= position.w;
+  return position;
+}
+float4 xenon_host_position(float4 position) {
+  position = xenon_clip_position(position);
+  // The host depth transform's Z part (XenonDrawState[4].xy, see
+  // host_depth_transform): OpenGL-style Z to 0...W, a reversed range flipped,
+  // or the whole viewport Z transform when the guest disables clipping.
+  float2 z_transform = asfloat(XenonDrawState[4].xy);
+  position.z = position.z * z_transform.x + z_transform.y * position.w;
+  float4 transform = asfloat(XenonDrawState[2]);
+  float2 pixels = position.xy * transform.xy + transform.zw * position.w;
+  float2 to_ndc = asfloat(XenonDrawState[3].yz);
+  return float4(pixels.x * to_ndc.x - position.w, position.w - pixels.y * to_ndc.y,
+                position.z, position.w);
+}
+
+// PA_CL_CLIP_CNTL UCP_ENA_n (XenonDrawState[4].w) with the planes in
+// XenonDrawState[5..10]: the guest clip-space position's distance to each
+// enabled plane; a disabled plane never clips.
+void xenon_user_clip_distances(float4 clip_position, out float4 clip0, out float2 clip1) {
+  uint enabled = XenonDrawState[4].w;
+  float distances[6];
+  [unroll] for (uint i = 0u; i < 6u; ++i)
+    distances[i] = ((enabled >> i) & 1u) != 0u
+                       ? dot(clip_position, asfloat(XenonDrawState[5u + i])) : 0.0;
+  clip0 = float4(distances[0], distances[1], distances[2], distances[3]);
+  clip1 = float2(distances[4], distances[5]);
 }
 
 bool xenon_bool(uint index) {
@@ -343,59 +644,6 @@ float4 xenon_legacy_mul4(float4 a, float4 b) {
                 xenon_legacy_mul(a.z,b.z), xenon_legacy_mul(a.w,b.w));
 }
 
-float4 xenon_vector_op(uint op, float4 a, float4 b, float4 c,
-                       inout bool p0, inout int a0, out bool killed) {
-  killed = false;
-  if (op == 0) return a + b;
-  if (op == 1) return xenon_legacy_mul4(a, b);
-  if (op == 2) return max(a, b);
-  if (op == 3) return min(a, b);
-  if (op == 4) return float4(a == b);
-  if (op == 5) return float4(a > b);
-  if (op == 6) return float4(a >= b);
-  if (op == 7) return float4(a != b);
-  if (op == 8) return frac(a);
-  if (op == 9) return trunc(a);
-  if (op == 10) return floor(a);
-  if (op == 11) return xenon_legacy_mul4(a, b) + c;
-  if (op == 12) return select(a == 0.0, b, c);
-  if (op == 13) return select(a >= 0.0, b, c);
-  if (op == 14) return select(a > 0.0, b, c);
-  if (op == 15) return dot(a, b).xxxx;
-  if (op == 16) return dot(a.xyz, b.xyz).xxxx;
-  if (op == 17) return (dot(a.xy, b.xy) + c.x).xxxx;
-  if (op == 18) {
-    // cube: source 1 is the direction as .z_xy. Returns T, S, 2 * major axis
-    // and the D3DCUBEMAP_FACES face.
-    float x = a.z, y = a.w, z = a.x;
-    float3 q = abs(float3(x, y, z));
-    if (q.z >= q.x && q.z >= q.y)
-      return float4(-y, z < 0.0 ? -x : x, 2.0 * z, z < 0.0 ? 5.0 : 4.0);
-    if (q.y >= q.x)
-      return float4(y < 0.0 ? -z : z, x, 2.0 * y, y < 0.0 ? 3.0 : 2.0);
-    return float4(-y, x < 0.0 ? z : -z, 2.0 * x, x < 0.0 ? 1.0 : 0.0);
-  }
-  if (op == 19) return max(max(a.x, a.y), max(a.z, a.w)).xxxx;
-  if (op >= 20 && op <= 23) {
-    p0 = op == 20 ? (a.w == 0.0 && b.w == 0.0) :
-         op == 21 ? (a.w == 0.0 && b.w != 0.0) :
-         op == 22 ? (a.w == 0.0 && b.w > 0.0) : (a.w == 0.0 && b.w >= 0.0);
-    return ((op == 20 ? b.x == 0.0 : op == 21 ? b.x != 0.0 :
-             op == 22 ? b.x > 0.0 : b.x >= 0.0) && a.x == 0.0) ? 0.0.xxxx : (a.x + 1.0).xxxx;
-  }
-  if (op >= 24 && op <= 27) {
-    killed = op == 24 ? any(a == b) : op == 25 ? any(a > b) :
-             op == 26 ? any(a >= b) : any(a != b);
-    return (killed ? 1.0 : 0.0).xxxx;
-  }
-  if (op == 28) return float4(1.0, a.y * b.y, a.z, b.w);
-  if (op == 29) {
-    a0 = (int)clamp(floor(a.w + 0.5), -256.0, 255.0);
-    return max(a, b);
-  }
-  return 0.0.xxxx;
-}
-
 )hlsl"  // MSVC limits one literal to 16 KB (C2026); adjacent literals join.
 R"hlsl(static const float XENON_FLT_MAX = 3.402823466e+38;
 // Infinite results of the clamping reciprocal forms: _CLAMP saturates to
@@ -404,52 +652,6 @@ float xenon_clamp_infinity(float value, bool to_zero) {
   if (!isinf(value)) return value;
   if (to_zero) return value < 0.0 ? -0.0 : 0.0;
   return value < 0.0 ? -XENON_FLT_MAX : XENON_FLT_MAX;
-}
-
-// `a` is the scalar operand (source 3) and `b` the mulsc/addsc/subsc
-// temporary. Operand `a` is a.w, operand `b` is a.x (or b.x for the constant
-// forms).
-float4 xenon_scalar_op(uint op, float4 a, float4 b, float4 previous,
-                       inout bool p0, inout int a0, out bool killed) {
-  killed = false; float x = a.w; float y = a.x; float ps = previous.x; float v = 0.0;
-  if (op == 0) v=x+y; else if (op == 1) v=x+ps;
-  else if (op == 2) v=xenon_legacy_mul(x,y); else if (op==3) v=xenon_legacy_mul(x,ps);
-  else if (op==4) v=(ps==-XENON_FLT_MAX || !isfinite(ps) || !isfinite(y) || y<=0.0)
-                    ? -XENON_FLT_MAX : xenon_legacy_mul(x,ps);
-  else if (op==5) v=x>=y?x:y; else if (op==6) v=x<y?x:y;
-  else if (op==7) v=x==0.0; else if (op==8) v=x>0.0; else if (op==9) v=x>=0.0; else if (op==10) v=x!=0.0;
-  else if (op==11) v=x-floor(x); else if (op==12) v=trunc(x); else if (op==13) v=floor(x);
-  else if (op==14) v=exp2(x);
-  else if (op==15 || op==16) {
-    v=x==1.0 ? 0.0 : log2(x);
-    if (op==15 && isinf(v) && v<0.0) v=-XENON_FLT_MAX;
-  }
-  else if (op>=17 && op<=19) {
-    v=x==1.0 ? 1.0 : 1.0/x;
-    if (op!=19) v=xenon_clamp_infinity(v, op==18);
-  }
-  else if (op>=20 && op<=22) {
-    v=x==1.0 ? 1.0 : 1.0/sqrt(x);
-    if (op!=22) v=xenon_clamp_infinity(v, op==21);
-  }
-  else if (op==23 || op==24) {
-    a0=(int)clamp(floor(x + (op==23 ? 0.5 : 0.0)), -256.0, 255.0);
-    v=x>=y?x:y;
-  }
-  else if (op==25) v=x-y; else if (op==26) v=x-ps;
-  else if (op>=27 && op<=30) {
-    p0=op==27?x==0.0:op==28?x!=0.0:op==29?x>0.0:x>=0.0;
-    v=p0 ? 0.0 : 1.0;
-  }
-  else if (op==31) { p0=x==1.0; v=p0 ? 0.0 : (x==0.0 ? 1.0 : x); }
-  else if (op==32) { p0=x-1.0<=0.0; v=p0 ? 0.0 : x-1.0; }
-  else if (op==33) { p0=false; v=XENON_FLT_MAX; }
-  else if (op==34) { p0=x==0.0; v=p0 ? 0.0 : x; }
-  else if (op>=35 && op<=39) { killed=op==35?x==0.0:op==36?x>0.0:op==37?x>=0.0:op==38?x!=0.0:x==1.0; v=killed; }
-  else if (op==40) v=sqrt(x); else if (op==42 || op==43) v=xenon_legacy_mul(x, b.x);
-  else if (op==44 || op==45) v=x+b.x; else if (op==46 || op==47) v=x-b.x;
-  else if (op==48) v=sin(x); else if (op==49) v=cos(x); else if (op==50) return previous;
-  return v.xxxx;
 }
 
 )hlsl"  // MSVC limits one literal to 16 KB (C2026); adjacent literals join.
@@ -463,14 +665,38 @@ uint4 xenon_endian_swap(uint4 value, uint endian) {
   return value;
 }
 
-float4 xenon_vertex_fetch(uint fetch_constant, uint select, uint index, uint stride,
-                          int offset, uint format, bool is_signed, bool normalized) {
+// The vertex a vfetch reads: its index operand floored, or rounded to the
+// nearest (floor(x + 0.5)) for the rounded form. Titles compute indices with
+// reciprocals (index = a * rcp(b)); the host's reciprocal may land a few ULPs
+// below the Xenos result, so an index that is exactly 3 on the console
+// arrives as 2.9999998 and floors to the previous vertex. Ring and grid
+// indices (AC6's terrain and sea pick a slot as frac(n / 40) * 40) carry the
+// error of the larger value they came from, so a slot of 1 arrives as
+// 0.999999. The floor therefore tolerates 2.5e-4 - the fixed bias sal063's
+// AC6 recomp cured the game's black-triangle terrain with - or 2^-21 of the
+// index's magnitude where float spacing outgrows that, capped at a quarter,
+// so an exact integer never floors up where floats grow sparse; both stay far
+// below any fraction an index carries on purpose.
+uint xenon_fetch_index(float index, bool rounded) {
+  if (rounded) return (uint)floor(index + 0.5);
+  return (uint)floor(index + min(max(2.5e-4, abs(index) * 4.76837158203125e-7), 0.25));
+}
+
+// A full vfetch's latched element: its byte address (the fetch constant's
+// base plus index * stride dwords) and the constant's endian mode. vfetch_mini
+// instructions read at this address plus their own offset.
+uint2 xenon_vertex_fetch_base(uint fetch_constant, uint select, uint index, uint stride) {
   // Three vertex fetch constants share each fetch slot, packed by the host as
   // (dword address << 2) | endian in .x/.z/.w for selects 0/1/2.
   uint4 slot = XenonVertexFetchConstants[fetch_constant & 31];
   uint packed = select == 0u ? slot.x : (select == 1u ? slot.z : slot.w);
-  uint address = (packed & ~3u) + 4 * (index * stride + offset);
-  uint4 raw = xenon_endian_swap(XenonGuestMemory.Load4(address), packed & 3u);
+  return uint2((packed & ~3u) + 4 * index * stride, packed & 3u);
+}
+
+float4 xenon_vertex_decode(uint2 base, int offset, uint format, bool is_signed,
+                           bool normalized) {
+  uint address = base.x + 4 * offset;
+  uint4 raw = xenon_endian_swap(XenonGuestMemory.Load4(address), base.y);
   if (format == 36) return asfloat(raw.x).xxxx;
   if (format == 37) return float4(asfloat(raw.xy), 0.0, 1.0);
   if (format == 57) return float4(asfloat(raw.xyz), 1.0);
@@ -992,12 +1218,20 @@ LoweredShader HlslShaderLowerer::lower(const DecodedShader& shader,
   if (shader.stage == ShaderStage::Pixel) out << "#define XENON_PIXEL_SHADER 1\n";
   emit_prelude(out, guest_memory_rw, memexport_enabled);
   if (shader.stage == ShaderStage::Vertex) {
+    // i16 carries the second position export (point size, edge flag, kill)
+    // to a point sprite geometry shader, which turns it into the sprite
+    // coordinates; the user clip distances come last.
     out << "struct XenonOutput { float4 position : SV_Position;";
-    for (unsigned i=0;i<16;++i) out << " float4 i" << i << " : TEXCOORD" << i << ";";
+    for (unsigned i=0;i<17;++i) out << " float4 i" << i << " : TEXCOORD" << i << ";";
+    out << " float4 clip0 : SV_ClipDistance0; float2 clip1 : SV_ClipDistance1;";
     out << " };\nXenonOutput " << options.entry_point << "(uint vertex_id : SV_VertexID) {\n";
   } else {
     out << "struct XenonInput { float4 position : SV_Position;";
     for (unsigned i=0;i<16;++i) out << " float4 i" << i << " : TEXCOORD" << i << ";";
+    // A point's PsParamGen takes its sprite coordinates from i16.
+    if (options.param_gen_point) out << " float4 i16 : TEXCOORD16;";
+    if (options.param_gen_interpolator < 16u && !options.param_gen_point)
+      out << " bool front_face : SV_IsFrontFace;";
     if (options.force_sample_frequency)
       out << " uint sample_index : SV_SampleIndex;";
     out << " };\nstruct XenonOutput {";
@@ -1006,16 +1240,56 @@ LoweredShader HlslShaderLowerer::lower(const DecodedShader& shader,
     out << " uint coverage : SV_Coverage;";
     out << " };\nXenonOutput " << options.entry_point << "(XenonInput input) {\n";
   }
-  out << "  float4 r[64]; float4 e[64];\n"
-      << "  [unroll] for (uint i=0;i<64;++i) { r[i]=0.0.xxxx; e[i]=0.0.xxxx; }\n"
+  // The temporaries: an array only for a shader that indexes them (see
+  // temporary()).
+  struct RegisterMode {
+    explicit RegisterMode(bool array) { t_register_array = array; }
+    ~RegisterMode() { t_register_array = true; }
+  } register_mode{uses_relative_temporaries(shader)};
+  if (t_register_array) {
+    out << "  float4 r[64];\n"
+        << "  [unroll] for (uint i=0;i<64;++i) r[i]=0.0.xxxx;\n";
+  } else {
+    out << "  float4";
+    for (unsigned i = 0; i < 64; ++i) out << (i ? ", r_" : " r_") << i << "=0.0.xxxx";
+    out << ";\n";
+  }
+  out << "  float4 e[64];\n"
+      << "  [unroll] for (uint i=0;i<64;++i) e[i]=0.0.xxxx;\n"
       << "  bool p0=false; int a0=0; int aL=0; float4 ps=0.0.xxxx;\n"
+      << "  uint2 vfetch_base=uint2(0u, 0u);\n"
       << "  float4 xenon_grad_h=0.0.xxxx, xenon_grad_v=0.0.xxxx; float xenon_register_lod=0.0;\n"
       << "  uint pc=0, guard=0, call_depth=0, loop_depth=0; bool running=true;\n"
       << "  uint call_stack[4], loop_remaining[4]; int loop_value[4], loop_step[4];\n";
   if (memexport_enabled) out << "  uint memexport_written_mask=0u;\n";
   if (shader.stage == ShaderStage::Vertex)
-    out << "  r[0].x = (float)xenon_vertex_index(vertex_id);\n";
-  else for (unsigned i=0;i<16;++i) out << "  r[" << i << "] = input.i" << i << ";\n";
+    out << "  " << temporary(0, false) << ".x = (float)xenon_vertex_index(vertex_id);\n";
+  else {
+    for (unsigned i=0;i<16;++i) {
+      if (i == options.param_gen_interpolator) continue;
+      out << "  " << temporary(i, false) << " = input.i" << i << ";\n";
+    }
+    if (options.param_gen_interpolator < 16u) {
+      // PsParamGen (SQ_PROGRAM_CNTL.PARAM_GEN): |XY| the pixel's position
+      // (whole numbers, as Direct3D 9's vPos), X's sign set for a back face,
+      // Y's for a point, Z's for a line; a point's ZW are its sprite
+      // coordinates. XenonDrawState[4].z holds the primitive class.
+      out << "  {\n"
+          << "    uint xenon_primitive = XenonDrawState[4].z;\n"
+          << "    float2 xenon_pixel = abs(floor(input.position.xy));\n"
+          << "    float4 xenon_param = float4(xenon_pixel, 0.0, 0.0);\n";
+      if (options.param_gen_point) {
+        out << "    xenon_param.y = asfloat(asuint(xenon_param.y) | 0x80000000u);\n"
+            << "    xenon_param.zw = saturate(input.i16.xy);\n";
+      } else {
+        out << "    if ((xenon_primitive & 1u) != 0u && !input.front_face)\n"
+            << "      xenon_param.x = asfloat(asuint(xenon_param.x) | 0x80000000u);\n"
+            << "    if ((xenon_primitive & 2u) != 0u) xenon_param.z = asfloat(0x80000000u);\n";
+      }
+      out << "    " << temporary(options.param_gen_interpolator, false) << " = xenon_param;\n"
+          << "  }\n";
+    }
+  }
 
   out << "  [loop] while (running && guard++ < 65536) {\n"
       << "    switch (pc) {\n";
@@ -1131,8 +1405,10 @@ LoweredShader HlslShaderLowerer::lower(const DecodedShader& shader,
   }
   out << "  XenonOutput output;\n";
   if (shader.stage == ShaderStage::Vertex) {
-    out << "  output.position=e[62];\n";
+    out << "  output.position=xenon_host_position(e[62]);\n";
     for (unsigned i=0;i<16;++i) out << "  output.i" << i << "=e[" << i << "];\n";
+    out << "  output.i16=e[63];\n"
+        << "  xenon_user_clip_distances(xenon_clip_position(e[62]), output.clip0, output.clip1);\n";
   } else {
     for (unsigned i=0;i<4;++i) out << "  output.c" << i << "=e[" << i << "];\n";
     if (writes_color_target_zero) {
@@ -1154,16 +1430,30 @@ LoweredShader HlslShaderLowerer::lower(const DecodedShader& shader,
         // sample index, but intentionally prevents the input from being DCE'd.
         out << "  if (input.sample_index == 0xFFFFFFFFu) xenon_depth = 0.0;\n";
       }
-      if (options.pixel_depth_output == PixelDepthOutputMode::Float20e4NearestEven) {
-        out << "  xenon_depth = xenon_quantize_float20e4(xenon_depth, true);\n";
-      } else if (options.pixel_depth_output == PixelDepthOutputMode::Float20e4Truncate) {
-        out << "  xenon_depth = xenon_quantize_float20e4(xenon_depth, false);\n";
+      if (options.pixel_depth_output != PixelDepthOutputMode::Native) {
+        // A D24FS8 target holds half the guest depth on the host, as its
+        // clears, loads and readbacks do, and its viewport range is halved to
+        // match (host_viewport_depth). Interpolated Z is doubled back to guest
+        // depth, an exported depth is guest depth clamped as the viewport
+        // would, and either is rounded to 20e4 before being halved again.
+        out << (shader.reflection.writes_depth ? "  xenon_depth = saturate(xenon_depth);\n"
+                                               : "  xenon_depth *= 2.0;\n");
+        out << "  xenon_depth = xenon_quantize_float20e4(xenon_depth, "
+            << (options.pixel_depth_output == PixelDepthOutputMode::Float20e4NearestEven
+                    ? "true"
+                    : "false")
+            << ") * 0.5;\n";
       }
       out << "  output.depth=xenon_depth;\n";
     }
   }
   out << "  return output;\n}\n";
   result.hlsl = out.str();
+  if (options.guest_memory_segment_count > 1u &&
+      !segment_guest_memory(result.hlsl, options.guest_memory_segment_shift,
+                            options.guest_memory_segment_count, guest_memory_rw,
+                            result.diagnostics))
+    ++result.unsupported_features;
   result.translation_hash = hash_text(result.hlsl);
   result.complete = result.diagnostics.empty();
   return result;
@@ -1186,6 +1476,8 @@ struct XenonVertex {
   float4 i10 : TEXCOORD10; float4 i11 : TEXCOORD11;
   float4 i12 : TEXCOORD12; float4 i13 : TEXCOORD13;
   float4 i14 : TEXCOORD14; float4 i15 : TEXCOORD15;
+  float4 i16 : TEXCOORD16;
+  float4 clip0 : SV_ClipDistance0; float2 clip1 : SV_ClipDistance1;
 };
 
 XenonVertex xenon_rectangle_corner(XenonVertex a, XenonVertex b,
@@ -1209,6 +1501,8 @@ XenonVertex xenon_rectangle_corner(XenonVertex a, XenonVertex b,
   d.i10=a.i10+b.i10-c.i10; d.i11=a.i11+b.i11-c.i11;
   d.i12=a.i12+b.i12-c.i12; d.i13=a.i13+b.i13-c.i13;
   d.i14=a.i14+b.i14-c.i14; d.i15=a.i15+b.i15-c.i15;
+  d.i16=a.i16+b.i16-c.i16;
+  d.clip0=a.clip0+b.clip0-c.clip0; d.clip1=a.clip1+b.clip1-c.clip1;
   return d;
 }
 
@@ -1237,7 +1531,65 @@ void main(triangle XenonVertex input[3],
   stream.RestartStrip();
 }
 )hlsl";
-  result.source_hash = hash_text("xenon.rectangle-list.geometry.v2");
+  result.source_hash = hash_text("xenon.rectangle-list.geometry.v3");
+  result.translation_hash = hash_text(result.hlsl);
+  result.complete = true;
+  return result;
+}
+
+LoweredShader make_point_sprite_geometry_shader() {
+  LoweredShader result{};
+  result.stage = ShaderStage::Geometry;
+  result.entry_point = "main";
+  result.profile = "gs_6_0";
+  result.hlsl = R"hlsl(
+// Project Xenon native point sprite expansion. Xenos draws every point as a
+// screen-aligned square: its diameter is the vertex shader's exported size
+// (second position export X, in the sprite export modes) clamped to
+// PA_SU_POINT_MINMAX, or PA_SU_POINT_SIZE's. The sprite coordinates run from
+// 0 at the top left to 1 at the bottom right, in i16.xy for PsParamGen.
+cbuffer XenonShaderConstants : register(b0) {
+  float4 XenonFloatConstants[512];
+  uint4 XenonBoolConstants[8];
+  uint4 XenonLoopConstants[32];
+  uint4 XenonVertexFetchConstants[32];
+  uint4 XenonDrawState[24];
+};
+struct XenonVertex {
+  float4 position : SV_Position;
+  float4 i0 : TEXCOORD0; float4 i1 : TEXCOORD1;
+  float4 i2 : TEXCOORD2; float4 i3 : TEXCOORD3;
+  float4 i4 : TEXCOORD4; float4 i5 : TEXCOORD5;
+  float4 i6 : TEXCOORD6; float4 i7 : TEXCOORD7;
+  float4 i8 : TEXCOORD8; float4 i9 : TEXCOORD9;
+  float4 i10 : TEXCOORD10; float4 i11 : TEXCOORD11;
+  float4 i12 : TEXCOORD12; float4 i13 : TEXCOORD13;
+  float4 i14 : TEXCOORD14; float4 i15 : TEXCOORD15;
+  float4 i16 : TEXCOORD16;
+  float4 clip0 : SV_ClipDistance0; float2 clip1 : SV_ClipDistance1;
+};
+
+[maxvertexcount(4)]
+void main(point XenonVertex input[1], inout TriangleStream<XenonVertex> stream) {
+  XenonVertex v = input[0];
+  float4 sizes = asfloat(XenonDrawState[11]);
+  float2 diameter = sizes.xy;
+  if ((XenonDrawState[4].z & 8u) != 0u) diameter = clamp(v.i16.xx, sizes.z, sizes.w);
+  // Pixels to clip space: half the diameter, times 2 / render-target size,
+  // times W. NDC Y points up, so the top row is +Y.
+  float2 radius = diameter * 0.5 * asfloat(XenonDrawState[3].yz) * v.position.w;
+  const float2 corners[4] = {float2(-1.0, 1.0), float2(1.0, 1.0),
+                             float2(-1.0, -1.0), float2(1.0, -1.0)};
+  [unroll] for (uint i = 0u; i < 4u; ++i) {
+    XenonVertex corner = v;
+    corner.position.xy = v.position.xy + corners[i] * radius;
+    corner.i16 = float4(corners[i].x * 0.5 + 0.5, 0.5 - corners[i].y * 0.5, 0.0, 0.0);
+    stream.Append(corner);
+  }
+  stream.RestartStrip();
+}
+)hlsl";
+  result.source_hash = hash_text("xenon.point-sprite.geometry.v1");
   result.translation_hash = hash_text(result.hlsl);
   result.complete = true;
   return result;
@@ -1374,27 +1726,13 @@ float main(float4 position : SV_Position,
   return result;
 }
 
-LoweredShader make_edram_color_transfer_shader(MsaaSamples source_host_samples) {
-  const auto count = 1u << static_cast<unsigned>(source_host_samples);
-  LoweredShader result{};
-  result.stage = ShaderStage::Pixel;
-  result.entry_point = "main";
-  result.profile = "ps_6_0";
-  std::ostringstream out;
-  out << R"hlsl(struct TransferConstants { uint4 destination; uint4 source; uint4 extent; };
-#ifdef __spirv__
-[[vk::push_constant]] TransferConstants transfer;
-#else
-ConstantBuffer<TransferConstants> transfer : register(b0);
-#endif
-)hlsl";
-  if (count == 1)
-    out << "Texture2D<float4> Source : register(t0);\n";
-  else
-    out << "Texture2DMS<float4," << count << "> Source : register(t0);\n";
-  out << R"hlsl(float4 main(float4 position : SV_Position,
-            uint host_sample : SV_SampleIndex) : SV_Target0 {
-  const uint x = uint(position.x);
+namespace {
+
+// The body shared by the direct EDRAM transfer shaders: from the destination
+// host sample at SV_Position, the source sample holding the same EDRAM word
+// (source_x, source_y, source_host), discarding samples that hold none.
+// edram_transfer_source() is its CPU reference.
+constexpr std::string_view kEdramTransferMappingHlsl = R"hlsl(  const uint x = uint(position.x);
   const uint y = uint(position.y);
   const uint dst_base = transfer.destination.x, dst_pitch = transfer.destination.y;
   const uint dst_msaa = transfer.destination.z, dst_mode = transfer.destination.w;
@@ -1418,7 +1756,7 @@ ConstantBuffer<TransferConstants> transfer : register(b0);
   if ((depth_flags & 1u) != 0u) in_tile_x = (in_tile_x + 40u) % 80u;
   const uint row_in_tile = sample_y % 16u;
   const uint tile = (dst_base + (sample_y / 16u) * dst_pitch + (sample_x / 80u) * stride) % 2048u;
-  // The source sample holding that word.
+)hlsl" R"hlsl(  // The source sample holding that word.
   const uint relative = (tile + 2048u - src_base) % 2048u;
   if ((depth_flags & 2u) != 0u) in_tile_x = (in_tile_x + 40u) % 80u;
   const uint source_sample_x = ((relative % src_pitch) / stride) * 80u + in_tile_x;
@@ -1432,15 +1770,500 @@ ConstantBuffer<TransferConstants> transfer : register(b0);
   const uint source_host = src_mode == 1u ? (source_guest != 0u ? 0u : 1u)
                          : (src_mode == 2u ? (source_guest != 0u ? 3u : 0u) : source_guest);
 )hlsl";
+
+constexpr std::string_view kEdramTransferConstantsBinding = R"hlsl(#ifdef __spirv__
+[[vk::push_constant]] TransferConstants transfer;
+#else
+ConstantBuffer<TransferConstants> transfer : register(b0);
+#endif
+)hlsl";
+
+}  // namespace
+
+std::string unorm24_depth_write_hlsl(Unorm24DepthWrite write) {
+  // uint -> float rounds to nearest even, as unorm24_depth_for_write() does;
+  // the power-of-two scales are exact.
+  if (write == Unorm24DepthWrite::PowerOfTwo)
+    return R"hlsl(float xe_unorm24_depth_out(uint code) {
+  return float(code & 0xFFFFFFu) * (1.0 / 16777216.0);
+}
+)hlsl";
+  if (write == Unorm24DepthWrite::Split)
+    return R"hlsl(float xe_unorm24_depth_out(uint code) {
+  code &= 0xFFFFFFu;
+  if (code < 0x800000u) return float(code) * (1.0 / 16777216.0);
+  return float(2u * code + 1u + (code >> 23u)) * (1.0 / 33554432.0);
+}
+)hlsl";
+  return R"hlsl(float xe_unorm24_depth_out(uint code) {
+  code &= 0xFFFFFFu;
+  return float(2u * code + 1u + (code >> 23u)) * (1.0 / 33554432.0);
+}
+)hlsl";
+}
+
+LoweredShader make_edram_depth_transfer_shader(MsaaSamples source_host_samples,
+                                               EdramDepthTransferPass pass,
+                                               DepthRenderTargetFormat format,
+                                               Unorm24DepthWrite unorm24_write) {
+  const auto count = 1u << static_cast<unsigned>(source_host_samples);
+  const bool unorm24 = format == DepthRenderTargetFormat::D24S8;
+  LoweredShader result{};
+  result.stage = ShaderStage::Pixel;
+  result.entry_point = "main";
+  result.profile = "ps_6_0";
+  std::ostringstream out;
+  out << "struct TransferConstants { uint4 destination; uint4 source; uint4 extent; "
+         "uint4 stencil; };\n"
+      << kEdramTransferConstantsBinding;
+  if (count == 1) {
+    out << "Texture2D<float> SourceDepth : register(t0);\n"
+        << "Texture2D<uint4> SourceStencil : register(t1);\n";
+  } else {
+    out << "Texture2DMS<float," << count << "> SourceDepth : register(t0);\n"
+        << "Texture2DMS<uint4," << count << "> SourceStencil : register(t1);\n";
+  }
+  if (unorm24) out << edram_word_codec_hlsl() << unorm24_depth_write_hlsl(unorm24_write);
+  switch (pass) {
+    case EdramDepthTransferPass::DepthAndStencil:
+      out << "struct Output { float depth : SV_Depth; uint stencil : SV_StencilRef; };\n"
+             "Output main(float4 position : SV_Position, uint host_sample : SV_SampleIndex) {\n";
+      break;
+    case EdramDepthTransferPass::Depth:
+      out << "float main(float4 position : SV_Position,\n"
+             "           uint host_sample : SV_SampleIndex) : SV_Depth {\n";
+      break;
+    case EdramDepthTransferPass::StencilBit:
+      out << "void main(float4 position : SV_Position, uint host_sample : SV_SampleIndex) {\n";
+      break;
+  }
+  out << kEdramTransferMappingHlsl;
+  const std::string at = count == 1 ? "int3(int2(source_x, source_y), 0)"
+                                    : "int2(source_x, source_y), source_host";
+  // A D24 source samples as code / (2^24 - 1); its code (xe_pack_unorm24, as
+  // resolves read it) is written back as this device stores it.
+  const std::string sampled = "SourceDepth.Load(" + at + ")";
+  const std::string depth =
+      unorm24 ? "xe_unorm24_depth_out(xe_pack_unorm24(" + sampled + "))" : sampled;
+  const std::string stencil = "SourceStencil.Load(" + at + ").y";
+  switch (pass) {
+    case EdramDepthTransferPass::DepthAndStencil:
+      out << "  Output o; o.depth = " << depth << "; o.stencil = " << stencil
+          << "; return o;\n}\n";
+      break;
+    case EdramDepthTransferPass::Depth:
+      out << "  return " << depth << ";\n}\n";
+      break;
+    case EdramDepthTransferPass::StencilBit:
+      out << "  if ((" << stencil << " & transfer.stencil.x) == 0u) discard;\n}\n";
+      break;
+  }
+  result.hlsl = out.str();
+  result.source_hash = hash_text("xenon.transfer.edram.depth.v2") ^ count ^
+                       (std::uint64_t(pass) << 8u) ^ (std::uint64_t(unorm24) << 16u) ^
+                       (std::uint64_t(unorm24_write) << 17u);
+  result.translation_hash = hash_text(result.hlsl);
+  result.complete = count == 1 || count == 2 || count == 4;
+  if (!result.complete) result.diagnostics.emplace_back("unsupported EDRAM transfer sample count");
+  return result;
+}
+
+LoweredShader make_edram_color_transfer_shader(MsaaSamples source_host_samples, bool integer) {
+  const auto count = 1u << static_cast<unsigned>(source_host_samples);
+  const std::string_view type = integer ? "uint4" : "float4";
+  LoweredShader result{};
+  result.stage = ShaderStage::Pixel;
+  result.entry_point = "main";
+  result.profile = "ps_6_0";
+  std::ostringstream out;
+  out << "struct TransferConstants { uint4 destination; uint4 source; uint4 extent; };\n"
+      << kEdramTransferConstantsBinding;
+  if (count == 1)
+    out << "Texture2D<" << type << "> Source : register(t0);\n";
+  else
+    out << "Texture2DMS<" << type << "," << count << "> Source : register(t0);\n";
+  out << type << R"hlsl( main(float4 position : SV_Position,
+            uint host_sample : SV_SampleIndex) : SV_Target0 {
+)hlsl" << kEdramTransferMappingHlsl;
   if (count == 1)
     out << "  return Source.Load(int3(int2(source_x, source_y), 0));\n}\n";
   else
     out << "  return Source.Load(int2(source_x, source_y), source_host);\n}\n";
   result.hlsl = out.str();
-  result.source_hash = hash_text("xenon.transfer.edram.color.v1") ^ count;
+  result.source_hash = hash_text(integer ? "xenon.transfer.edram.color.uint.v1"
+                                         : "xenon.transfer.edram.color.v1") ^
+                       count;
   result.translation_hash = hash_text(result.hlsl);
   result.complete = count == 1 || count == 2 || count == 4;
   if (!result.complete) result.diagnostics.emplace_back("unsupported EDRAM transfer sample count");
+  return result;
+}
+
+namespace {
+
+// HLSL ports of the CPU conversions between an EDRAM word and a host value
+// (pack_color_sample / unpack_color_sample for the formats whose host storage
+// is the word's own encoding, host_to_depth_stencil / depth_stencil_to_host),
+// for the formats edram_converting_transfer_supported() accepts.
+constexpr std::string_view kEdramWordCodecHlsl = R"hlsl(uint xe_unorm_bits(float v, float scale) {
+  return uint(floor(saturate(v) * scale + 0.5));
+}
+uint xe_pack_rgba8(float4 v) {
+  return xe_unorm_bits(v.x, 255.0) | (xe_unorm_bits(v.y, 255.0) << 8u) |
+         (xe_unorm_bits(v.z, 255.0) << 16u) | (xe_unorm_bits(v.w, 255.0) << 24u);
+}
+float4 xe_unpack_rgba8(uint w) {
+  return float4(uint4(w, w >> 8u, w >> 16u, w >> 24u) & 0xFFu) / 255.0;
+}
+uint xe_pack_rgb10a2(float4 v) {
+  return xe_unorm_bits(v.x, 1023.0) | (xe_unorm_bits(v.y, 1023.0) << 10u) |
+         (xe_unorm_bits(v.z, 1023.0) << 20u) | (xe_unorm_bits(v.w, 3.0) << 30u);
+}
+float4 xe_unpack_rgb10a2(uint w) {
+  return float4(float3(uint3(w, w >> 10u, w >> 20u) & 0x3FFu) / 1023.0, float(w >> 30u) / 3.0);
+}
+// 16_16_FLOAT through the image's R16G16_UINT view: the halves are the word.
+uint xe_pack_rg16(uint4 v) { return (v.x & 0xFFFFu) | (v.y << 16u); }
+uint4 xe_unpack_rg16(uint w) { return uint4(w & 0xFFFFu, w >> 16u, 0u, 0u); }
+uint xe_pack_r32f(float4 v) { return asuint(v.x); }
+float4 xe_unpack_r32f(uint w) { return float4(asfloat(w), 0.0, 0.0, 1.0); }
+// nearbyint(clamp(d, 0, 1) * 16777215) without doubles: x = i + (f - d) with
+// a = d * 2^24 = i + f exact, rounding half to even.
+uint xe_pack_unorm24(float d) {
+  if (!(d > 0.0)) return 0u;
+  d = min(d, 1.0);
+  const float a = d * 16777216.0;
+  const float i = floor(a);
+  const float g = (a - i) - d;
+  const uint base = uint(i);
+  int r = 0;
+  if (g > 0.5 || (g == 0.5 && (base & 1u) != 0u)) r = 1;
+  else if (g < -0.5 || (g == -0.5 && (base & 1u) != 0u)) r = -1;
+  return min(uint(int(base) + r), 0xFFFFFFu);
+}
+float xe_unpack_unorm24(uint bits) { return float(bits + (bits >> 23u)) * (1.0 / 16777216.0); }
+uint xe_pack_float20e4(float v) {
+  if (!(v > 0.0)) return 0u;
+  uint bits = asuint(v);
+  if (bits >= 0x3FFFFFF8u) return 0xFFFFFFu;
+  if (bits < 0x38800000u) {
+    const uint shift = min(113u - (bits >> 23u), 24u);
+    bits = (0x00800000u | (bits & 0x007FFFFFu)) >> shift;
+  } else {
+    bits += 0xC8000000u;
+  }
+  bits += 3u + ((bits >> 3u) & 1u);
+  return (bits >> 3u) & 0xFFFFFFu;
+}
+float xe_unpack_float20e4(uint value) {
+  value &= 0xFFFFFFu;
+  if (value == 0u) return 0.0;
+  uint mantissa = value & 0xFFFFFu;
+  int exponent = int(value >> 20u);
+  if (exponent == 0) {
+    const uint shift = (31u - firstbithigh(mantissa)) - 11u;
+    exponent = 1 - int(shift);
+    mantissa = (mantissa << shift) & 0xFFFFFu;
+  }
+  return asfloat((uint(exponent + 112) << 23u) | (mantissa << 3u));
+}
+)hlsl";
+
+// The packing and unpacking functions for a color format the converting
+// transfer accepts.
+std::pair<std::string_view, std::string_view> color_word_codec(ColorRenderTargetFormat format) {
+  switch (storage_color_format(format)) {
+    case ColorRenderTargetFormat::R8G8B8A8: return {"xe_pack_rgba8", "xe_unpack_rgba8"};
+    case ColorRenderTargetFormat::R10G10B10A2: return {"xe_pack_rgb10a2", "xe_unpack_rgb10a2"};
+    case ColorRenderTargetFormat::R16G16Float: return {"xe_pack_rg16", "xe_unpack_rg16"};
+    case ColorRenderTargetFormat::R32Float: return {"xe_pack_r32f", "xe_unpack_r32f"};
+    default: return {};
+  }
+}
+
+// Declares the converting transfer's source and computes `word`, the EDRAM
+// word the selected source sample holds, after the shared mapping.
+bool write_converting_source(std::ostringstream& out, MsaaSamples source_host_samples,
+                             EdramTransferEndpoint source, bool declarations) {
+  const auto count = 1u << static_cast<unsigned>(source_host_samples);
+  const std::string at = count == 1 ? "int3(int2(source_x, source_y), 0)"
+                                    : "int2(source_x, source_y), source_host";
+  if (source.depth) {
+    if (declarations) {
+      if (count == 1)
+        out << "Texture2D<float> SourceDepth : register(t0);\n"
+            << "Texture2D<uint4> SourceStencil : register(t1);\n";
+      else
+        out << "Texture2DMS<float," << count << "> SourceDepth : register(t0);\n"
+            << "Texture2DMS<uint4," << count << "> SourceStencil : register(t1);\n";
+      return true;
+    }
+    const auto format = static_cast<DepthRenderTargetFormat>(source.format);
+    const std::string depth = "SourceDepth.Load(" + at + ")";
+    out << "  const uint depth_bits = "
+        << (format == DepthRenderTargetFormat::D24FS8
+                ? "xe_pack_float20e4(" + depth + " * 2.0)"
+                : "xe_pack_unorm24(" + depth + ")")
+        << ";\n  const uint word = (depth_bits << 8u) | (SourceStencil.Load(" << at
+        << ").y & 0xFFu);\n";
+    return format == DepthRenderTargetFormat::D24S8 || format == DepthRenderTargetFormat::D24FS8;
+  }
+  if (declarations) {
+    const std::string_view type =
+        color_host_transfers_as_integer(static_cast<ColorRenderTargetFormat>(source.format))
+            ? "uint4"
+            : "float4";
+    if (count == 1)
+      out << "Texture2D<" << type << "> Source : register(t0);\n";
+    else
+      out << "Texture2DMS<" << type << "," << count << "> Source : register(t0);\n";
+    return true;
+  }
+  const auto pack = color_word_codec(static_cast<ColorRenderTargetFormat>(source.format)).first;
+  if (pack.empty()) return false;
+  out << "  const uint word = " << pack << "(Source.Load(" << at << "));\n";
+  return true;
+}
+
+std::uint64_t converting_transfer_hash(MsaaSamples source_host_samples,
+                                       EdramTransferEndpoint source,
+                                       EdramTransferEndpoint destination,
+                                       std::uint32_t pass) {
+  return (std::uint64_t(1u) << static_cast<unsigned>(source_host_samples)) |
+         (std::uint64_t(source.depth) << 8u) | (std::uint64_t(source.format) << 16u) |
+         (std::uint64_t(destination.depth) << 24u) | (std::uint64_t(destination.format) << 32u) |
+         (std::uint64_t(pass) << 40u);
+}
+
+}  // namespace
+
+std::string_view edram_word_codec_hlsl() noexcept { return kEdramWordCodecHlsl; }
+
+LoweredShader make_edram_converting_color_transfer_shader(MsaaSamples source_host_samples,
+                                                          EdramTransferEndpoint source,
+                                                          ColorRenderTargetFormat destination) {
+  const auto count = 1u << static_cast<unsigned>(source_host_samples);
+  LoweredShader result{};
+  result.stage = ShaderStage::Pixel;
+  result.entry_point = "main";
+  result.profile = "ps_6_0";
+  const auto unpack = color_word_codec(destination).second;
+  std::ostringstream out;
+  out << "struct TransferConstants { uint4 destination; uint4 source; uint4 extent; };\n"
+      << kEdramTransferConstantsBinding;
+  write_converting_source(out, source_host_samples, source, true);
+  out << kEdramWordCodecHlsl << (color_host_transfers_as_integer(destination) ? "uint4" : "float4")
+      << " main(float4 position : SV_Position, uint host_sample : SV_SampleIndex)"
+         " : SV_Target0 {\n"
+      << kEdramTransferMappingHlsl;
+  const bool source_ok = write_converting_source(out, source_host_samples, source, false);
+  out << "  return " << unpack << "(word);\n}\n";
+  result.hlsl = out.str();
+  const EdramTransferEndpoint destination_endpoint{false, static_cast<std::uint8_t>(destination)};
+  result.source_hash = hash_text("xenon.transfer.edram.converting.color.v2") ^
+                       converting_transfer_hash(source_host_samples, source,
+                                                destination_endpoint, 0u);
+  result.translation_hash = hash_text(result.hlsl);
+  result.complete = (count == 1 || count == 2 || count == 4) && source_ok && !unpack.empty() &&
+                    edram_converting_transfer_supported(source, destination_endpoint);
+  if (!result.complete)
+    result.diagnostics.emplace_back("unsupported converting EDRAM color transfer");
+  return result;
+}
+
+LoweredShader make_edram_converting_depth_transfer_shader(MsaaSamples source_host_samples,
+                                                          EdramTransferEndpoint source,
+                                                          DepthRenderTargetFormat destination,
+                                                          EdramDepthTransferPass pass,
+                                                          Unorm24DepthWrite unorm24_write) {
+  const auto count = 1u << static_cast<unsigned>(source_host_samples);
+  LoweredShader result{};
+  result.stage = ShaderStage::Pixel;
+  result.entry_point = "main";
+  result.profile = "ps_6_0";
+  std::ostringstream out;
+  out << "struct TransferConstants { uint4 destination; uint4 source; uint4 extent; "
+         "uint4 stencil; };\n"
+      << kEdramTransferConstantsBinding;
+  write_converting_source(out, source_host_samples, source, true);
+  out << kEdramWordCodecHlsl << unorm24_depth_write_hlsl(unorm24_write);
+  switch (pass) {
+    case EdramDepthTransferPass::DepthAndStencil:
+      out << "struct Output { float depth : SV_Depth; uint stencil : SV_StencilRef; };\n"
+             "Output main(float4 position : SV_Position, uint host_sample : SV_SampleIndex) {\n";
+      break;
+    case EdramDepthTransferPass::Depth:
+      out << "float main(float4 position : SV_Position,\n"
+             "           uint host_sample : SV_SampleIndex) : SV_Depth {\n";
+      break;
+    case EdramDepthTransferPass::StencilBit:
+      out << "void main(float4 position : SV_Position, uint host_sample : SV_SampleIndex) {\n";
+      break;
+  }
+  out << kEdramTransferMappingHlsl;
+  const bool source_ok = write_converting_source(out, source_host_samples, source, false);
+  // The host stores D24FS8 depth at half its guest value (depth_stencil_to_host).
+  const std::string depth = destination == DepthRenderTargetFormat::D24FS8
+                                ? "xe_unpack_float20e4(word >> 8u) * 0.5"
+                                : "xe_unorm24_depth_out(word >> 8u)";
+  switch (pass) {
+    case EdramDepthTransferPass::DepthAndStencil:
+      out << "  Output o; o.depth = " << depth << "; o.stencil = word & 0xFFu; return o;\n}\n";
+      break;
+    case EdramDepthTransferPass::Depth:
+      out << "  return " << depth << ";\n}\n";
+      break;
+    case EdramDepthTransferPass::StencilBit:
+      out << "  if ((word & transfer.stencil.x) == 0u) discard;\n}\n";
+      break;
+  }
+  result.hlsl = out.str();
+  const EdramTransferEndpoint destination_endpoint{true, static_cast<std::uint8_t>(destination)};
+  result.source_hash = hash_text("xenon.transfer.edram.converting.depth.v3") ^
+                       converting_transfer_hash(source_host_samples, source,
+                                                destination_endpoint, std::uint32_t(pass)) ^
+                       (std::uint64_t(unorm24_write) << 60u);
+  result.translation_hash = hash_text(result.hlsl);
+  result.complete = (count == 1 || count == 2 || count == 4) && source_ok &&
+                    edram_converting_transfer_supported(source, destination_endpoint);
+  if (!result.complete)
+    result.diagnostics.emplace_back("unsupported converting EDRAM depth transfer");
+  return result;
+}
+
+namespace {
+
+// The canonical load's source: the EDRAM image as a raw buffer, and `word`,
+// the word of the destination sample (the mapping's EDRAM half - tile, row
+// and in-tile column - with the byte layout edram_sample_address() gives).
+constexpr std::string_view kCanonicalEdramSourceHlsl =
+    "ByteAddressBuffer CanonicalEdram : register(t0);\n";
+constexpr std::string_view kCanonicalEdramWordHlsl =
+    "  const uint word = CanonicalEdram.Load(tile * 5120u + (row_in_tile * 80u + in_tile_x) * 4u);\n";
+
+std::string_view edram_destination_word_hlsl() {
+  // kEdramTransferMappingHlsl up to the destination's EDRAM word.
+  constexpr std::string_view marker = "  // The source sample holding that word.";
+  return kEdramTransferMappingHlsl.substr(0, kEdramTransferMappingHlsl.find(marker));
+}
+
+}  // namespace
+
+LoweredShader make_edram_canonical_color_load_shader(ColorRenderTargetFormat destination) {
+  LoweredShader result{};
+  result.stage = ShaderStage::Pixel;
+  result.entry_point = "main";
+  result.profile = "ps_6_0";
+  const auto unpack = color_word_codec(destination).second;
+  std::ostringstream out;
+  out << "struct TransferConstants { uint4 destination; uint4 source; uint4 extent; };\n"
+      << kEdramTransferConstantsBinding << kCanonicalEdramSourceHlsl << kEdramWordCodecHlsl
+      << (color_host_transfers_as_integer(destination) ? "uint4" : "float4")
+      << " main(float4 position : SV_Position, uint host_sample : SV_SampleIndex)"
+         " : SV_Target0 {\n"
+      << edram_destination_word_hlsl() << kCanonicalEdramWordHlsl << "  return " << unpack
+      << "(word);\n}\n";
+  result.hlsl = out.str();
+  const EdramTransferEndpoint endpoint{false, static_cast<std::uint8_t>(destination)};
+  result.source_hash = hash_text("xenon.transfer.edram.canonical.color.v1") ^
+                       (std::uint64_t(destination) << 32u);
+  result.translation_hash = hash_text(result.hlsl);
+  result.complete = !unpack.empty() && edram_canonical_load_supported(endpoint);
+  if (!result.complete) result.diagnostics.emplace_back("unsupported canonical EDRAM color load");
+  return result;
+}
+
+LoweredShader make_edram_canonical_depth_load_shader(DepthRenderTargetFormat destination,
+                                                     EdramDepthTransferPass pass,
+                                                     Unorm24DepthWrite unorm24_write) {
+  LoweredShader result{};
+  result.stage = ShaderStage::Pixel;
+  result.entry_point = "main";
+  result.profile = "ps_6_0";
+  std::ostringstream out;
+  out << "struct TransferConstants { uint4 destination; uint4 source; uint4 extent; "
+         "uint4 stencil; };\n"
+      << kEdramTransferConstantsBinding << kCanonicalEdramSourceHlsl << kEdramWordCodecHlsl
+      << unorm24_depth_write_hlsl(unorm24_write);
+  switch (pass) {
+    case EdramDepthTransferPass::DepthAndStencil:
+      out << "struct Output { float depth : SV_Depth; uint stencil : SV_StencilRef; };\n"
+             "Output main(float4 position : SV_Position, uint host_sample : SV_SampleIndex) {\n";
+      break;
+    case EdramDepthTransferPass::Depth:
+      out << "float main(float4 position : SV_Position,\n"
+             "           uint host_sample : SV_SampleIndex) : SV_Depth {\n";
+      break;
+    case EdramDepthTransferPass::StencilBit:
+      out << "void main(float4 position : SV_Position, uint host_sample : SV_SampleIndex) {\n";
+      break;
+  }
+  out << edram_destination_word_hlsl() << kCanonicalEdramWordHlsl;
+  // As the converting transfer writes a word: D24FS8 at half its guest value
+  // (depth_stencil_to_host), D24S8 as this device stores the code.
+  const std::string depth = destination == DepthRenderTargetFormat::D24FS8
+                                ? "xe_unpack_float20e4(word >> 8u) * 0.5"
+                                : "xe_unorm24_depth_out(word >> 8u)";
+  switch (pass) {
+    case EdramDepthTransferPass::DepthAndStencil:
+      out << "  Output o; o.depth = " << depth << "; o.stencil = word & 0xFFu; return o;\n}\n";
+      break;
+    case EdramDepthTransferPass::Depth:
+      out << "  return " << depth << ";\n}\n";
+      break;
+    case EdramDepthTransferPass::StencilBit:
+      out << "  if ((word & transfer.stencil.x) == 0u) discard;\n}\n";
+      break;
+  }
+  result.hlsl = out.str();
+  const EdramTransferEndpoint endpoint{true, static_cast<std::uint8_t>(destination)};
+  result.source_hash = hash_text("xenon.transfer.edram.canonical.depth.v1") ^
+                       (std::uint64_t(destination) << 32u) ^ (std::uint64_t(pass) << 40u) ^
+                       (std::uint64_t(unorm24_write) << 48u);
+  result.translation_hash = hash_text(result.hlsl);
+  result.complete = edram_canonical_load_supported(endpoint);
+  if (!result.complete) result.diagnostics.emplace_back("unsupported canonical EDRAM depth load");
+  return result;
+}
+
+LoweredShader make_edram_canonical_store_shader(MsaaSamples source_host_samples,
+                                                EdramTransferEndpoint source) {
+  const auto count = 1u << static_cast<unsigned>(source_host_samples);
+  LoweredShader result{};
+  result.stage = ShaderStage::Compute;
+  result.entry_point = "main";
+  result.profile = "cs_6_0";
+  // The mapping's EDRAM half, run per host sample of the source image (which
+  // is this surface's own image): a host sample that holds no guest sample
+  // (2x in a 4x image) has nothing to store.
+  std::string mapping(edram_destination_word_hlsl());
+  for (std::size_t at = mapping.find("discard;"); at != std::string::npos;
+       at = mapping.find("discard;", at))
+    mapping.replace(at, 8, "return;");
+  std::ostringstream out;
+  out << "struct TransferConstants { uint4 destination; uint4 source; uint4 extent; };\n"
+      << kEdramTransferConstantsBinding;
+  write_converting_source(out, source_host_samples, source, true);
+  out << kEdramWordCodecHlsl
+      << "RWByteAddressBuffer CanonicalEdram : register(u0, space1);\n"
+         "[numthreads(8, 8, 1)]\n"
+         "void main(uint3 id : SV_DispatchThreadID) {\n"
+         "  if (id.x >= transfer.source.z || id.y >= transfer.source.w) return;\n"
+         "  const float4 position = float4(float(transfer.source.x + id.x),\n"
+         "                                 float(transfer.source.y + id.y), 0.0, 1.0);\n"
+         "  const uint host_sample = id.z;\n"
+      << mapping
+      << "  const uint source_x = x, source_y = y, source_host = host_sample;\n";
+  const bool source_ok = write_converting_source(out, source_host_samples, source, false);
+  out << "  CanonicalEdram.Store(tile * 5120u + (row_in_tile * 80u + in_tile_x) * 4u, word);\n}\n";
+  result.hlsl = out.str();
+  result.source_hash = hash_text("xenon.transfer.edram.canonical.store.v1") ^
+                       (std::uint64_t(count) << 8u) ^ (std::uint64_t(source.depth) << 16u) ^
+                       (std::uint64_t(source.format) << 24u);
+  result.translation_hash = hash_text(result.hlsl);
+  result.complete = (count == 1 || count == 2 || count == 4) && source_ok &&
+                    edram_canonical_load_supported(source);
+  if (!result.complete) result.diagnostics.emplace_back("unsupported canonical EDRAM store");
   return result;
 }
 

@@ -195,7 +195,21 @@ void finalize_candidate(CandidateScan& scan) {
     for (const auto& range : inferred_local_ranges)
       compile_ranges.push_back({range.start, range.words});
 
-    auto region = graph::compile_region(graph::Store(ctx.graph_cache), ctx.graph_versions, start, compile_ranges);
+    // Resolved indirect branch targets (switch cases) are entered only
+    // through the dispatch: no direct branch makes them block starts.
+    std::vector<GuestAddress> indirect_leaders;
+    for (const auto& branch : function.branches)
+      if (branch.indirect && !branch.linked) indirect_leaders.push_back(branch.target);
+    std::sort(indirect_leaders.begin(), indirect_leaders.end());
+    indirect_leaders.erase(std::unique(indirect_leaders.begin(), indirect_leaders.end()),
+                           indirect_leaders.end());
+    std::vector<cpu::InstructionHook> hooks;
+    for (const auto& range : compile_ranges)
+      ctx.instruction_hooks.collect(range.base,
+                                    static_cast<GuestAddress>(range.base + range.words.size() * 4u),
+                                    hooks);
+    auto region = graph::compile_region(graph::Store(ctx.graph_cache), ctx.graph_versions, start,
+                                        compile_ranges, indirect_leaders, hooks);
     function.compilation_nodes = std::move(region.nodes);
     function.ir_cache_hit = region.ir_hit;
     const auto& compile_result = region.compiled;

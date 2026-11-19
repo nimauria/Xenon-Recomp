@@ -1,8 +1,8 @@
 # Xenon implementation coverage dashboard
 
-![Source-declared coverage treemaps](dashboard.svg)
+<a href="dashboard.html"><img src="summary.svg" alt="Open the interactive Xenon coverage dashboard"></a>
 
-The compact [README summary](summary.svg) and this detailed treemap are generated from the same source inventory and sparse audited manifest. The summary groups operations into readable status bars; the detailed cells retain per-operation tooltips.
+The [interactive dashboard](dashboard.html) follows the AnyPS5 progress-report pattern: it is a self-contained HTML page with searchable operations, area filters, status filters, grouped coverage maps and exact evidence paths. The compact [README summary](summary.svg) and legacy [SVG map](dashboard.svg) remain generated from the same source inventory and sparse audited manifest for embeds and no-JavaScript viewers.
 
 The [generated coverage report](REPORT.md) gives exact counts and limitations. The separate [kernel export reference reconciliation](KERNEL_REFERENCE.md) compares Xenon's source registrations with a pinned Xenia research table. Its registration percentage does not measure implementation. This audit measures traced operations in selected Xenon source inventories. It does **not** measure game compatibility or the complete Xbox 360 API/ISA. An unassessed purple cell means the implementation and tests have not yet been audited; it does not assert that the operation is missing. Green requires a reviewed behavior-oriented test whose CTest target passed in the recorded CI evidence, blue has an implementation trace without test verification, amber is partial, orange is a stub, and grey is explicitly unimplemented. Each panel also lists its count per state, and the header shows the assessed source revision.
 

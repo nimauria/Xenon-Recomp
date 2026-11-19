@@ -1,14 +1,22 @@
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cassert>
+#include <stdexcept>
+#include <thread>
+#include <atomic>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <filesystem>
+#include <system_error>
 #include <iostream>
 #include <memory>
 #include <vector>
 
 #include "xenon/gpu/dxc_shader_compiler.hpp"
+#include "xenon/gpu/shader_compile_queue.hpp"
 #include "xenon/gpu/shader_translation.hpp"
 
 namespace {
@@ -57,7 +65,7 @@ void test_lowering_is_deterministic() {
   assert(first.translation_hash == second.translation_hash);
   assert(first.profile == "vs_6_0");
   assert(first.hlsl.find("XenonFloatConstants") != std::string::npos);
-  assert(first.hlsl.find("output.position=e[62]") != std::string::npos);
+  assert(first.hlsl.find("output.position=xenon_host_position(e[62])") != std::string::npos);
 }
 
 void test_dxc_dual_target_and_cache() {
@@ -237,14 +245,17 @@ void test_vertex_fetch_select_endian_and_packed_formats() {
   }
   assert(lowered.complete);
   assert(lowered.hlsl.find(
-             "uint source_index = (uint)floor(r[(0) & 63][0] + 0.0);") !=
+             "vfetch_base = xenon_vertex_fetch_base(5, 2, xenon_fetch_index(r_0[0], "
+             "false), 3);") != std::string::npos);
+  assert(lowered.hlsl.find("asuint(r[") == std::string::npos);
+  assert(lowered.hlsl.find("asuint(r_") == std::string::npos);
+  assert(lowered.hlsl.find("xenon_vertex_decode(vfetch_base, 0, 16, true, true)") !=
          std::string::npos);
-  assert(lowered.hlsl.find("source_index = asuint") == std::string::npos);
-  assert(lowered.hlsl.find("xenon_vertex_fetch(5, 2, source_index") != std::string::npos);
   assert(lowered.hlsl.find("select == 0u ? slot.x : (select == 1u ? slot.z : slot.w)") !=
          std::string::npos);
-  assert(lowered.hlsl.find("(packed & ~3u)") != std::string::npos);
-  assert(lowered.hlsl.find("xenon_endian_swap(XenonGuestMemory.Load4(address), packed & 3u)") !=
+  assert(lowered.hlsl.find("uint2((packed & ~3u) + 4 * index * stride, packed & 3u)") !=
+         std::string::npos);
+  assert(lowered.hlsl.find("xenon_endian_swap(XenonGuestMemory.Load4(address), base.y)") !=
          std::string::npos);
   DxcShaderCompiler compiler;
   assert(compiler.compile(lowered, {}).succeeded);
@@ -258,10 +269,123 @@ void test_vertex_fetch_select_endian_and_packed_formats() {
   const auto rounded = HlslShaderLowerer::lower(shader);
   assert(rounded.complete);
   assert(rounded.hlsl.find(
-             "uint source_index = (uint)floor(r[(0) & 63][0] + 0.5);") !=
+             "xenon_fetch_index(r_0[0], true), 3);") !=
          std::string::npos);
   shader.instructions[0].vertex_fetch.data_format = 63;  // not a vertex format
   assert(!HlslShaderLowerer::lower(shader).complete);
+}
+
+// Regression (AC6 contorted characters, torn aircraft): a vfetch_mini reads
+// at the address its preceding full vfetch latched, plus its own offset; it
+// never reads an index register. AC6 overwrites the index register with the
+// full fetch's own result (r0 = vfetch r0.x, then vfetch_mini +4 into r1), so
+// re-reading r0.x for the mini fetch took the rest of the vertex from wherever
+// the first fetched value pointed.
+void test_vertex_fetch_mini_reuses_the_full_fetch_address() {
+  using namespace xenon::gpu;
+  auto shader = make_shader(ShaderStage::Vertex);
+  DecodedInstruction full{};
+  full.kind = ShaderInstructionKind::VertexFetch;
+  full.vertex_fetch.address = 1;
+  full.vertex_fetch.fetch_constant = 31;
+  full.vertex_fetch.fetch_constant_select = 2;
+  full.vertex_fetch.source_register = 0;
+  full.vertex_fetch.destination_register = 0;  // overwrites its own index
+  full.vertex_fetch.destination_swizzle = 0x688;
+  full.vertex_fetch.stride_dwords = 8;
+  full.vertex_fetch.data_format = 38;  // 32_32_32_32_FLOAT
+  auto mini = full;
+  mini.vertex_fetch.address = 2;
+  mini.vertex_fetch.mini_fetch = true;
+  mini.vertex_fetch.destination_register = 1;
+  mini.vertex_fetch.offset_dwords = 4;
+  mini.vertex_fetch.stride_dwords = 0;  // a mini fetch encodes no stride
+  shader.instructions.insert(shader.instructions.begin(), {full, mini});
+  shader.instructions[2].alu.address = 3;
+  shader.control_flow[0].count = 3;
+  const auto lowered = HlslShaderLowerer::lower(shader);
+  assert(lowered.complete);
+  const auto first = lowered.hlsl.find(
+      "vfetch_base = xenon_vertex_fetch_base(31, 2, xenon_fetch_index(r_0[0], false), 8);");
+  assert(first != std::string::npos);
+  // The base is latched once - the mini fetch does not read r0.x again.
+  assert(lowered.hlsl.find("vfetch_base = xenon_vertex_fetch_base(", first + 1) ==
+         std::string::npos);
+  const auto full_decode = lowered.hlsl.find("xenon_vertex_decode(vfetch_base, 0, 38,", first);
+  const auto mini_decode = lowered.hlsl.find("xenon_vertex_decode(vfetch_base, 4, 38,", first);
+  assert(full_decode != std::string::npos && mini_decode != std::string::npos &&
+         full_decode < mini_decode);
+  assert(lowered.hlsl.find("uint2 vfetch_base=uint2(0u, 0u);") != std::string::npos);
+  DxcShaderCompiler compiler;
+  assert(compiler.compile(lowered, {}).succeeded);
+  ShaderCompileOptions spirv{};
+  spirv.format = ShaderBinaryFormat::Spirv;
+  assert(compiler.compile(lowered, spirv).succeeded);
+  std::cout << "  [PASS] vfetch_mini reuses the full fetch's address\n";
+}
+
+// The emitted xenon_fetch_index, evaluated as the host GPU does (fp32).
+std::uint32_t host_fetch_index(float index, bool rounded) {
+  if (rounded) return static_cast<std::uint32_t>(std::floor(index + 0.5f));
+  return static_cast<std::uint32_t>(
+      std::floor(index + std::min(std::max(2.5e-4f, std::fabs(index) * 4.76837158203125e-7f), 0.25f)));
+}
+
+// Regression (AC6 black-triangle terrain, see-through aircraft): a vfetch
+// index the title computes as a * rcp(b) can reach the host a few ULPs below
+// the integer the console computes; flooring it fetched the previous vertex.
+// The floor tolerates host reciprocal error at any magnitude and leaves
+// intended fractions and the rounded form alone.
+void test_vertex_fetch_index_tolerates_host_reciprocal_error() {
+  using namespace xenon::gpu;
+  const auto lowered = HlslShaderLowerer::lower(make_shader(ShaderStage::Vertex));
+  assert(lowered.complete);
+  assert(lowered.hlsl.find(
+             "return (uint)floor(index + min(max(2.5e-4, abs(index) * 4.76837158203125e-7), 0.25));") !=
+         std::string::npos);
+  // 6 * (one ULP below 1/3), the product a low reciprocal yields: 1.9999999.
+  const float low_third = std::nextafter(1.0f / 3.0f, 0.0f);
+  assert(std::floor(6.0f * low_third) == 1.0f);
+  assert(host_fetch_index(6.0f * low_third, false) == 2u);
+  for (const float integer :
+       {1.0f, 3.0f, 255.0f, 4096.0f, 65535.0f, 1048575.0f, 4194303.0f, 16777215.0f}) {
+    for (int ulps = 0; ulps <= 4; ++ulps) {
+      float below = integer;
+      for (int i = 0; i < ulps; ++i) below = std::nextafter(below, 0.0f);
+      // Where floats are a quarter or more apart, a step down is another
+      // index, not error.
+      if (integer - below >= 0.25f) break;
+      assert(host_fetch_index(below, false) == static_cast<std::uint32_t>(integer));
+    }
+    assert(host_fetch_index(integer, false) == static_cast<std::uint32_t>(integer));
+  }
+  // Fractions an index carries on purpose still floor.
+  assert(host_fetch_index(0.0f, false) == 0u);
+  assert(host_fetch_index(2.5f, false) == 2u);
+  assert(host_fetch_index(1.75f, false) == 1u);
+  assert(host_fetch_index(1023.99f, false) == 1023u);
+  // The rounded form rounds to the nearest, halves up.
+  assert(host_fetch_index(2.5f, true) == 3u);
+  assert(host_fetch_index(2.4999998f, true) == 2u);
+  // Regression (AC6 black triangles on terrain, runway and sea): a ring slot
+  // worked out as frac(n * rcp(40)) * 40 carries the error of n / 40, so slot
+  // 1 arrived as 0.999999 and fetched the wrong ring entry. Every slot of the
+  // first hundred rows of a 40-entry ring resolves (slot 0 wraps from 40 and
+  // is the console's own ambiguity, so it is left out).
+  const float rcp40 = 1.0f / 40.0f;
+  unsigned slots = 0;
+  for (unsigned row = 0; row < 100; ++row) {
+    for (unsigned k = 0; k < 40; ++k) {
+      const unsigned n = 10u * row + 1u + k;
+      if (n % 40u == 0u) continue;
+      const float scaled = static_cast<float>(n) * rcp40;
+      const float slot = (scaled - std::floor(scaled)) * 40.0f;
+      assert(host_fetch_index(slot, false) == n % 40u);
+      ++slots;
+    }
+  }
+  assert(slots == 3900u);
+  std::cout << "  [PASS] vfetch index tolerates host reciprocal error\n";
 }
 
 // Regression (Ace Combat 6 logos): the vertex shader's r0.x is the vertex
@@ -272,12 +396,24 @@ void test_vertex_index_applies_grouper_offset_and_clamp() {
   using namespace xenon::gpu;
   const auto lowered = HlslShaderLowerer::lower(make_shader(ShaderStage::Vertex));
   assert(lowered.complete);
-  assert(lowered.hlsl.find("r[0].x = (float)xenon_vertex_index(vertex_id);") !=
+  assert(lowered.hlsl.find("r_0.x = (float)xenon_vertex_index(vertex_id);") !=
          std::string::npos);
-  assert(lowered.hlsl.find("r[0].x = (float)vertex_id;") == std::string::npos);
+  assert(lowered.hlsl.find("r_0.x = (float)vertex_id;") == std::string::npos);
   assert(lowered.hlsl.find("uint4 vgt = XenonDrawState[1];") != std::string::npos);
   assert(lowered.hlsl.find(
              "clamp((index + vgt.y) & 0xFFFFFFu, vgt.z & 0xFFFFFFu, vgt.w & 0xFFFFFFu)") !=
+         std::string::npos);
+  // Regression (Ace Combat 6 age-rating screen): the guest viewport
+  // transform runs in the shader, so a pre-transformed Clear rectangle in
+  // render-target pixels lands where the guest put it instead of being
+  // scaled by a stale viewport and clipped.
+  assert(lowered.hlsl.find("output.position=xenon_host_position(e[62]);") != std::string::npos);
+  assert(lowered.hlsl.find("if ((flags & 4u) == 0u) position.w = 1.0 / position.w;") !=
+         std::string::npos);
+  assert(lowered.hlsl.find(
+             "float2 pixels = position.xy * transform.xy + transform.zw * position.w;") !=
+         std::string::npos);
+  assert(lowered.hlsl.find("pixels.x * to_ndc.x - position.w, position.w - pixels.y * to_ndc.y") !=
          std::string::npos);
   DxcShaderCompiler compiler;
   assert(compiler.compile(lowered, {}).succeeded);
@@ -515,6 +651,153 @@ void test_sample_transfer_shaders() {
     assert(compiler.compile(fallback, {}).succeeded);
     assert(compiler.compile(fallback, spirv).succeeded);
   }
+  // Direct EDRAM depth transfers: every pass at every source sample count,
+  // for both depth formats and each D24 encoding. D24S8 depth is re-encoded
+  // as its code under the device's encoding (the CI regression: a sampled
+  // value passed through lands a code off where the conversion truncates);
+  // D24FS8's float passes through.
+  for (const auto samples : {MsaaSamples::X1, MsaaSamples::X2, MsaaSamples::X4}) {
+    for (const auto pass : {EdramDepthTransferPass::DepthAndStencil, EdramDepthTransferPass::Depth,
+                            EdramDepthTransferPass::StencilBit})
+    for (const auto format : {DepthRenderTargetFormat::D24S8, DepthRenderTargetFormat::D24FS8})
+    for (const auto write : kUnorm24DepthWrites) {
+      const auto shader = make_edram_depth_transfer_shader(samples, pass, format, write);
+      assert(shader.complete);
+      const bool unorm24 = format == DepthRenderTargetFormat::D24S8;
+      assert((shader.hlsl.find(unorm24_depth_write_hlsl(write)) != std::string::npos) == unorm24);
+      if (pass != EdramDepthTransferPass::StencilBit)
+        assert((shader.hlsl.find("xe_unorm24_depth_out(xe_pack_unorm24(") != std::string::npos) ==
+               unorm24);
+      // Each format and encoding is its own shader.
+      if (write != kUnorm24DepthWrites[0] && unorm24)
+        assert(shader.source_hash !=
+               make_edram_depth_transfer_shader(samples, pass, format, kUnorm24DepthWrites[0])
+                   .source_hash);
+      assert(shader.hlsl.find("SV_SampleIndex") != std::string::npos);
+      assert((shader.hlsl.find("SV_StencilRef") != std::string::npos) ==
+             (pass == EdramDepthTransferPass::DepthAndStencil));
+      assert((shader.hlsl.find("SV_Depth") != std::string::npos) ==
+             (pass != EdramDepthTransferPass::StencilBit));
+      const auto dxil = compiler.compile(shader, {});
+      if (!dxil.succeeded) {
+        for (const auto& line : dxil.diagnostics) std::cerr << line << '\n';
+        assert(false);
+      }
+      auto options = spirv;
+      options.spirv_stencil_export = pass == EdramDepthTransferPass::DepthAndStencil;
+      assert(compiler.compile(shader, options).succeeded);
+    }
+  }
+  // It shares the color transfer's EDRAM mapping verbatim.
+  const auto color = make_edram_color_transfer_shader(MsaaSamples::X1).hlsl;
+  const auto depth = make_edram_depth_transfer_shader(MsaaSamples::X1, EdramDepthTransferPass::Depth,
+                                                      DepthRenderTargetFormat::D24S8,
+                                                      Unorm24DepthWrite::Midpoint)
+                         .hlsl;
+  const auto mapping_at = [](const std::string& hlsl) {
+    const auto begin = hlsl.find("  const uint x = uint(position.x);");
+    const auto end = hlsl.find(": source_guest);");
+    assert(begin != std::string::npos && end != std::string::npos);
+    return hlsl.substr(begin, end - begin);
+  };
+  assert(mapping_at(color) == mapping_at(depth));
+
+  // Converting transfers between different views: every accepted source
+  // (color or depth) into every accepted destination, at every source sample
+  // count, compile to DXIL and SPIR-V and share the same mapping.
+  const std::array<EdramTransferEndpoint, 5> endpoints{{
+      {false, std::uint8_t(ColorRenderTargetFormat::R8G8B8A8)},
+      {false, std::uint8_t(ColorRenderTargetFormat::R10G10B10A2)},
+      {false, std::uint8_t(ColorRenderTargetFormat::R32Float)},
+      {true, std::uint8_t(DepthRenderTargetFormat::D24S8)},
+      {true, std::uint8_t(DepthRenderTargetFormat::D24FS8)},
+  }};
+  const auto require = [&](const LoweredShader& shader, bool stencil_export) {
+    assert(shader.complete);
+    assert(mapping_at(shader.hlsl) == mapping_at(color));
+    const auto dxil = compiler.compile(shader, {});
+    if (!dxil.succeeded) {
+      for (const auto& line : dxil.diagnostics) std::cerr << line << '\n';
+      std::cerr << shader.hlsl << '\n';
+      assert(false);
+    }
+    auto options = spirv;
+    options.spirv_stencil_export = stencil_export;
+    const auto spirv_binary = compiler.compile(shader, options);
+    if (!spirv_binary.succeeded) {
+      for (const auto& line : spirv_binary.diagnostics) std::cerr << line << '\n';
+      assert(false);
+    }
+  };
+  for (const auto samples : {MsaaSamples::X1, MsaaSamples::X2, MsaaSamples::X4}) {
+    for (const auto& source : endpoints) {
+      for (const auto& destination : endpoints) {
+        if (source == destination) continue;
+        if (!destination.depth) {
+          require(make_edram_converting_color_transfer_shader(
+                      samples, source, static_cast<ColorRenderTargetFormat>(destination.format)),
+                  false);
+          continue;
+        }
+        for (const auto pass : {EdramDepthTransferPass::DepthAndStencil,
+                                EdramDepthTransferPass::Depth, EdramDepthTransferPass::StencilBit})
+          for (const auto write : kUnorm24DepthWrites) {
+            const auto format = static_cast<DepthRenderTargetFormat>(destination.format);
+            const auto shader =
+                make_edram_converting_depth_transfer_shader(samples, source, format, pass, write);
+            require(shader, pass == EdramDepthTransferPass::DepthAndStencil);
+            // A D24S8 destination writes the word's code under the encoding.
+            if (format == DepthRenderTargetFormat::D24S8 &&
+                pass != EdramDepthTransferPass::StencilBit)
+              assert(shader.hlsl.find("xe_unorm24_depth_out(word >> 8u)") != std::string::npos &&
+                     shader.hlsl.find(unorm24_depth_write_hlsl(write)) != std::string::npos);
+          }
+      }
+    }
+  }
+  // The canonical store (GPU ownership flush): a compute shader for every
+  // source the canonical loads accept, at every sample count, compiling to
+  // DXIL and SPIR-V. Its EDRAM address is the mapping's destination half,
+  // verbatim but for returning where the fragment version discards.
+  for (const auto samples : {MsaaSamples::X1, MsaaSamples::X2, MsaaSamples::X4}) {
+    for (const auto& source :
+         {EdramTransferEndpoint{false, std::uint8_t(ColorRenderTargetFormat::R8G8B8A8)},
+          EdramTransferEndpoint{false, std::uint8_t(ColorRenderTargetFormat::R32Float)},
+          EdramTransferEndpoint{false, std::uint8_t(ColorRenderTargetFormat::R16G16Float)},
+          EdramTransferEndpoint{true, std::uint8_t(DepthRenderTargetFormat::D24S8)},
+          EdramTransferEndpoint{true, std::uint8_t(DepthRenderTargetFormat::D24FS8)}}) {
+      if (!edram_canonical_load_supported(source)) continue;
+      const auto shader = make_edram_canonical_store_shader(samples, source);
+      assert(shader.complete);
+      assert(shader.stage == ShaderStage::Compute);
+      assert(shader.hlsl.find("RWByteAddressBuffer CanonicalEdram : register(u0, space1)") !=
+             std::string::npos);
+      assert(shader.hlsl.find("discard") == std::string::npos);
+      const auto tile_at = shader.hlsl.find("  const uint tile = ");
+      assert(tile_at != std::string::npos);
+      assert(color.find(shader.hlsl.substr(tile_at, shader.hlsl.find('\n', tile_at) - tile_at)) !=
+             std::string::npos);
+      for (const auto& options : {ShaderCompileOptions{}, spirv}) {
+        const auto compiled = compiler.compile(shader, options);
+        if (!compiled.succeeded) {
+          for (const auto& line : compiled.diagnostics) std::cerr << line << '\n';
+          std::cerr << shader.hlsl << '\n';
+          assert(false);
+        }
+      }
+      // Each source and sample count is its own shader.
+      if (samples != MsaaSamples::X1)
+        assert(shader.source_hash !=
+               make_edram_canonical_store_shader(MsaaSamples::X1, source).source_hash);
+    }
+  }
+  // A view whose host storage is not its EDRAM word is refused, not
+  // approximated.
+  const EdramTransferEndpoint gamma{false, std::uint8_t(ColorRenderTargetFormat::R8G8B8A8Gamma)};
+  assert(!make_edram_canonical_store_shader(MsaaSamples::X1, gamma).complete);
+  assert(!make_edram_converting_color_transfer_shader(MsaaSamples::X1, gamma,
+                                                      ColorRenderTargetFormat::R32Float)
+              .complete);
 }
 
 
@@ -547,6 +830,73 @@ void test_memexport_translation_targets() {
   assert(compiler.compile(rw, spirv).succeeded);
 }
 
+// XEN-001: with guest memory in segments, every access goes through an
+// accessor that selects its segment, the declarations follow the Vulkan
+// binding plan (read-only t0 and t129+, read-write u0+), the result compiles
+// to SPIR-V, and the single-binding output is untouched.
+void test_segmented_guest_memory_lowering() {
+  using namespace xenon::gpu;
+  auto fetching = make_shader(ShaderStage::Vertex);
+  DecodedInstruction fetch{};
+  fetch.kind = ShaderInstructionKind::VertexFetch;
+  fetch.vertex_fetch.address = 1;
+  fetch.vertex_fetch.fetch_constant = 5;
+  fetch.vertex_fetch.destination_swizzle = 0x688;
+  fetch.vertex_fetch.stride_dwords = 3;
+  fetch.vertex_fetch.data_format = 38;
+  fetching.instructions.insert(fetching.instructions.begin(), fetch);
+  fetching.instructions[1].alu.address = 2;
+  fetching.control_flow[0].count = 2;
+
+  const auto single = HlslShaderLowerer::lower(fetching);
+  ShaderLoweringOptions segmented_options{};
+  segmented_options.guest_memory_segment_shift = 26;  // 64 MiB
+  segmented_options.guest_memory_segment_count = 8;
+  const auto segmented = HlslShaderLowerer::lower(fetching, segmented_options);
+  ShaderLoweringOptions one_segment{};
+  one_segment.guest_memory_segment_count = 1;
+  assert(HlslShaderLowerer::lower(fetching, one_segment).hlsl == single.hlsl);
+  assert(single.hlsl.find("XenonGuestMemory.Load4(") != std::string::npos);
+  if (!segmented.complete)
+    for (const auto& diagnostic : segmented.diagnostics) std::cerr << diagnostic << '\n';
+  assert(segmented.complete);
+  assert(segmented.hlsl.find("XenonGuestMemory.") == std::string::npos);
+  assert(segmented.hlsl.find("xenon_guest_load4(address)") != std::string::npos);
+  assert(segmented.hlsl.find("ByteAddressBuffer XenonGuestMemory0 : register(t0);") !=
+         std::string::npos);
+  assert(segmented.hlsl.find("ByteAddressBuffer XenonGuestMemory7 : register(t135);") !=
+         std::string::npos);
+  assert(segmented.hlsl.find("#define XENON_GUEST_SEGMENT_SHIFT 26u") != std::string::npos);
+  assert(segmented.translation_hash != single.translation_hash);
+
+  DxcShaderCompiler compiler;
+  ShaderCompileOptions spirv{};
+  spirv.format = ShaderBinaryFormat::Spirv;
+  const auto compiled = compiler.compile(segmented, spirv);
+  if (!compiled.succeeded)
+    for (const auto& diagnostic : compiled.diagnostics) std::cerr << diagnostic << '\n';
+  assert(compiled.succeeded);
+
+  // Memory export: read-write segments and every store/atomic accessor.
+  auto exporting = make_shader(ShaderStage::Vertex);
+  exporting.reflection.memory_exports = 1;
+  exporting.reflection.memory_export_mask = 1;
+  exporting.reflection.writes_export_address = true;
+  const auto written = HlslShaderLowerer::lower(exporting, segmented_options);
+  if (!written.complete)
+    for (const auto& diagnostic : written.diagnostics) std::cerr << diagnostic << '\n';
+  assert(written.complete);
+  assert(written.hlsl.find("XenonGuestMemory.") == std::string::npos);
+  assert(written.hlsl.find("RWByteAddressBuffer XenonGuestMemory7 : register(u7);") !=
+         std::string::npos);
+  assert(written.hlsl.find("xenon_guest_interlocked_and(") != std::string::npos);
+  assert(written.hlsl.find("memory_size = XENON_GUEST_MEMORY_BYTES;") != std::string::npos);
+  const auto compiled_rw = compiler.compile(written, spirv);
+  if (!compiled_rw.succeeded)
+    for (const auto& diagnostic : compiled_rw.diagnostics) std::cerr << diagnostic << '\n';
+  assert(compiled_rw.succeeded);
+}
+
 
 }  // namespace
 
@@ -569,7 +919,10 @@ void test_scalar_source_and_export_constants_compile() {
     alu.scalar_destination_relative = true;
     const auto lowered = HlslShaderLowerer::lower(shader);
     assert(lowered.complete);
-    assert(lowered.hlsl.find("xenon_scalar_op(45, s2, s3t, ps") != std::string::npos);
+    // addsc: the scalar unit adds source 3's W and the constant temporary's X.
+    assert(lowered.hlsl.find("// vector op 0, scalar op 45") != std::string::npos);
+    assert(lowered.hlsl.find("float4 b = s3t;") != std::string::npos);
+    assert(lowered.hlsl.find("v = x + b.x;") != std::string::npos);
     DxcShaderCompiler compiler;
     const auto dxil = compiler.compile(lowered, {});
     if (!dxil.succeeded) {
@@ -581,20 +934,209 @@ void test_scalar_source_and_export_constants_compile() {
     assert(compiler.compile(lowered, spirv).succeeded);
   }
 }
+// Regression (AC6's first cutscene ran at about 5 fps): backends build their
+// transfer pipelines per depth readback and upload, and each build ran DXC.
+// A utility shader is compiled once per process; later requests are served
+// from memory with the same result, and distinct inputs never share one.
+void test_utility_shaders_compile_once() {
+  using namespace xenon::gpu;
+  UtilityShaderCompiler compiler;
+  ShaderCompileOptions spirv{};
+  spirv.format = ShaderBinaryFormat::Spirv;
+  const auto vertex = make_transfer_fullscreen_vertex_shader();
+  const auto first = compiler.compile(vertex);
+  const auto after_first = UtilityShaderCompiler::compiles();
+  assert(first.succeeded);
+  for (int i = 0; i < 8; ++i) {
+    const auto again = compiler.compile(vertex);
+    assert(again.succeeded && again.binary == first.binary);
+  }
+  assert(UtilityShaderCompiler::compiles() == after_first);
+
+  // Same shader, other target: a separate entry.
+  const auto spirv_vertex = compiler.compile(vertex, spirv);
+  assert(spirv_vertex.succeeded && spirv_vertex.format == ShaderBinaryFormat::Spirv);
+  assert(UtilityShaderCompiler::compiles() == after_first + 1u);
+  // Other shaders: separate entries with their own binaries.
+  const auto read2 = compiler.compile(make_depth_sample_read_shader(MsaaSamples::X2));
+  const auto read4 = compiler.compile(make_depth_sample_read_shader(MsaaSamples::X4));
+  assert(read2.succeeded && read4.succeeded && read2.binary != read4.binary);
+  assert(UtilityShaderCompiler::compiles() == after_first + 3u);
+  assert(compiler.compile(make_depth_sample_read_shader(MsaaSamples::X2)).binary ==
+         read2.binary);
+  assert(UtilityShaderCompiler::compiles() == after_first + 3u);
+
+  // An incomplete shader is refused the same way every time.
+  LoweredShader incomplete = vertex;
+  incomplete.complete = false;
+  assert(!compiler.compile(incomplete).succeeded);
+  assert(!compiler.compile(incomplete).succeeded);
+}
+
+
+// The "Persistent" shader cache mode: a later session loads a title shader
+// compiled before instead of compiling it on the draw that first uses it
+// (AC6 compiles took 50 ms to 1.3 s each, on the GPU thread). An entry is
+// used only for exactly its input; a damaged or foreign file is ignored.
+void test_persistent_shader_cache() {
+  using namespace xenon::gpu;
+  const auto directory = std::filesystem::temp_directory_path() / "xenon_shader_cache_test";
+  std::error_code ec;
+  std::filesystem::remove_all(directory, ec);
+  auto compiler = std::make_shared<DxcShaderCompiler>();
+  assert(compiler->available() && !compiler->version().empty());
+  const auto lowered = HlslShaderLowerer::lower(make_shader(ShaderStage::Vertex));
+  ShaderCompileOptions options{};
+  options.format = ShaderBinaryFormat::Spirv;
+
+  ShaderCache first(compiler);
+  first.set_disk_directory(directory);
+  const auto compiled = first.get_or_compile(lowered, options);
+  assert(compiled->succeeded);
+  assert(first.misses() == 1 && first.disk_writes() == 1 && first.disk_hits() == 0);
+
+  // The next session: loaded, not compiled, and identical.
+  ShaderCache second(compiler);
+  second.set_disk_directory(directory);
+  const auto loaded = second.get_or_compile(lowered, options);
+  assert(loaded->succeeded && loaded->binary == compiled->binary);
+  assert(second.disk_hits() == 1 && second.misses() == 0 && second.disk_writes() == 0);
+  // Another format is another input.
+  ShaderCompileOptions dxil{};
+  dxil.format = ShaderBinaryFormat::Dxil;
+  assert(second.get_or_compile(lowered, dxil)->succeeded);
+  assert(second.disk_hits() == 1 && second.misses() == 1 && second.disk_writes() == 1);
+
+  // A damaged entry is not used: the shader is compiled again and rewritten.
+  for (const auto& entry : std::filesystem::directory_iterator(directory)) {
+    std::filesystem::resize_file(entry.path(), 16u, ec);
+    assert(!ec);
+  }
+  ShaderCache third(compiler);
+  third.set_disk_directory(directory);
+  assert(third.get_or_compile(lowered, options)->binary == compiled->binary);
+  assert(third.disk_hits() == 0 && third.misses() == 1 && third.disk_writes() == 1);
+
+  // Without a directory ("Session only") nothing is read or written.
+  ShaderCache memory_only(compiler);
+  assert(memory_only.get_or_compile(lowered, options)->succeeded);
+  assert(memory_only.disk_hits() == 0 && memory_only.disk_writes() == 0);
+  std::filesystem::remove_all(directory, ec);
+}
+
+// Background compiles: the first request returns at once and queues the
+// compile; the result is the same compile the cache makes in the foreground,
+// it is stored on disk, and a later queue over that disk finds it without a
+// worker.
+void test_background_compile_queue() {
+  using namespace xenon::gpu;
+  const auto directory = std::filesystem::temp_directory_path() / "xenon_shader_queue_test";
+  std::error_code ec;
+  std::filesystem::remove_all(directory, ec);
+  auto compiler = std::make_shared<DxcShaderCompiler>();
+  const auto vertex = HlslShaderLowerer::lower(make_shader(ShaderStage::Vertex));
+  const auto pixel = HlslShaderLowerer::lower(make_shader(ShaderStage::Pixel));
+  ShaderCompileOptions options{};
+  options.format = ShaderBinaryFormat::Dxil;
+  std::shared_ptr<const CompiledShader> compiled_vertex;
+  {
+    ShaderCache cache(compiler);
+    cache.set_disk_directory(directory);
+    ShaderCompileQueue queue(cache, 2);
+    assert(queue.worker_count() == 2u);
+    const auto started = std::chrono::steady_clock::now();
+    const auto first = queue.request(1u, vertex, options);
+    const auto requested = std::chrono::steady_clock::now();
+    // Nothing compiled yet, so the first request cannot have the result -
+    // and returns well before a compile could finish.
+    assert(!first);
+    assert(requested - started < std::chrono::milliseconds(20));
+    assert(!queue.request(2u, pixel, options));
+    // A second request of a pending key queues nothing more.
+    (void)queue.request(1u, vertex, options);
+    compiled_vertex = queue.wait(1u, std::chrono::steady_clock::now() + std::chrono::seconds(60));
+    const auto compiled_pixel =
+        queue.wait(2u, std::chrono::steady_clock::now() + std::chrono::seconds(60));
+    assert(compiled_vertex && compiled_vertex->succeeded);
+    assert(compiled_pixel && compiled_pixel->succeeded);
+    assert(queue.pending() == 0u);
+    // The finished key is returned by request() from now on.
+    assert(queue.request(1u, vertex, options) == compiled_vertex);
+    // The same binary the foreground path makes.
+    ShaderCache foreground(compiler);
+    assert(foreground.get_or_compile(vertex, options)->binary == compiled_vertex->binary);
+    // A key never requested has nothing to wait for.
+    assert(!queue.wait(99u, std::chrono::steady_clock::now()));
+    assert(cache.disk_writes() == 2u);
+  }
+  {
+    // The next session finds both on disk without compiling.
+    ShaderCache cache(compiler);
+    cache.set_disk_directory(directory);
+    ShaderCompileQueue queue(cache, 1);
+    const auto loaded = queue.request(7u, vertex, options);
+    assert(loaded && loaded->binary == compiled_vertex->binary);
+    assert(cache.disk_hits() == 1u && cache.misses() == 0u && queue.pending() == 0u);
+  }
+  std::filesystem::remove_all(directory, ec);
+}
+
+// GPU V3 shader prefetch: a decoded shader is lowered and compiled on a
+// worker; prepared() gives the lowering and the same binary the foreground
+// path makes, waiting while it is in flight; a key is prepared once; a
+// lowering that throws is reported, not lost; an unknown key has nothing.
+void test_shader_prefetch_lowers_and_compiles_on_workers() {
+  using namespace xenon::gpu;
+  auto compiler = std::make_shared<DxcShaderCompiler>();
+  ShaderCache cache(compiler);
+  ShaderCompileQueue queue(cache, 2);
+  ShaderCompileOptions options{};
+  options.format = ShaderBinaryFormat::Dxil;
+  const auto decoded = std::make_shared<const DecodedShader>(make_shader(ShaderStage::Pixel));
+  std::atomic<int> lowerings{0};
+  std::atomic<std::thread::id> lowered_on{};
+  const auto lower = [&, decoded] {
+    ++lowerings;
+    lowered_on = std::this_thread::get_id();
+    return HlslShaderLowerer::lower(*decoded);
+  };
+  queue.prefetch(10u, lower, options);
+  queue.prefetch(10u, lower, options);  // already queued: nothing more
+  const auto prepared = queue.prepared(10u);
+  assert(prepared && prepared->lowered && prepared->lowered->complete);
+  assert(prepared->compiled && prepared->compiled->succeeded);
+  assert(lowerings.load() == 1);
+  assert(lowered_on.load() != std::this_thread::get_id());
+  ShaderCache foreground(compiler);
+  assert(foreground.get_or_compile(*prepared->lowered, options)->binary ==
+         prepared->compiled->binary);
+  queue.prefetch(11u, []() -> LoweredShader { throw std::runtime_error("bad microcode"); },
+                 options);
+  const auto failed = queue.prepared(11u);
+  assert(failed && !failed->lowered && failed->error == "bad microcode");
+  assert(!queue.prepared(12u));
+}
 
 int main() {
   test_lowering_is_deterministic();
   test_dxc_dual_target_and_cache();
+  test_persistent_shader_cache();
+  test_background_compile_queue();
+  test_shader_prefetch_lowers_and_compiles_on_workers();
   test_pixel_target_and_incomplete_rejection();
   test_control_flow_state_machine_and_explicit_rejection();
   test_texture_lod_and_gradient_lowering();
   test_vertex_fetch_select_endian_and_packed_formats();
   test_vertex_index_applies_grouper_offset_and_clamp();
+  test_vertex_fetch_index_tolerates_host_reciprocal_error();
+  test_vertex_fetch_mini_reuses_the_full_fetch_address();
   test_texture_state_and_query_opcodes();
   test_vertex_shader_texture_fetch_uses_explicit_lod();
   test_rectangle_list_geometry_shader();
   test_sample_transfer_shaders();
+  test_utility_shaders_compile_once();
   test_memexport_translation_targets();
+  test_segmented_guest_memory_lowering();
   test_scalar_source_and_export_constants_compile();
   std::cout << "xenon_shader_translation_tests: ok\n";
 }

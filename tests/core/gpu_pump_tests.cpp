@@ -39,6 +39,7 @@
 
 #include "xenon/core/session.hpp"
 #include "xenon/kernel/event.hpp"
+#include "xenon/kernel/time.hpp"
 #include "xenon/kernel/wait.hpp"
 #include "xenon/logging/diagnostic_events.hpp"
 
@@ -117,6 +118,9 @@ struct SessionExecutionTestAccess {
   }
   [[nodiscard]] static std::uint64_t gpu_interrupts_delivered(const XenonSession& session) noexcept {
     return session.gpu_interrupts_delivered_.load();
+  }
+  [[nodiscard]] static std::uint64_t scanout_latch_timeouts(const XenonSession& session) noexcept {
+    return session.scanout_latch_timeouts_.load();
   }
   [[nodiscard]] static std::string present_results(XenonSession& session) {
     return session.describe_present_results();
@@ -749,6 +753,18 @@ void test_vsync_keeps_arriving_while_the_gpu_worker_is_busy() {
     assert(memory->write_physical(kRingBase + i * 4u, bytes));
   }
   kernel_process->configure_gpu_ring_buffer(kRingBase, 16u);
+  // The guest learns how far the GPU has read from its write-back copy of
+  // the read pointer (VdEnableRingBufferRPtrWriteBack).
+  constexpr std::uint32_t kWritebackPhysical = 0x2400u;
+  assert(memory->fill_physical(kWritebackPhysical, 4u, std::byte{0}));
+  kernel_process->set_gpu_ring_buffer_rptr_writeback(kWritebackPhysical);
+  const auto guest_read_pointer = [&] {
+    std::array<std::byte, 4> bytes{};
+    assert(memory->copy_physical_range(kWritebackPhysical, bytes));
+    return std::to_integer<std::uint32_t>(bytes[0]) << 24 |
+           std::to_integer<std::uint32_t>(bytes[1]) << 16 |
+           std::to_integer<std::uint32_t>(bytes[2]) << 8 | std::to_integer<std::uint32_t>(bytes[3]);
+  };
   kernel_process->set_gpu_ring_buffer_write_index(2u);
 
   for (int i = 0; i < 400 && blocking->draws_entered.load() == 0; ++i) {
@@ -760,17 +776,116 @@ void test_vsync_keeps_arriving_while_the_gpu_worker_is_busy() {
   const auto during = xenon::core::SessionExecutionTestAccess::gpu_interrupts_delivered(harness.session);
   // About 15 at 60 Hz; the old single thread delivered none.
   assert(during - before >= 5 && "vsync interrupts continue while a draw blocks the worker");
-  assert(kernel_process->gpu_ring_buffer().read_index == 0u &&
-         "the read pointer does not move past a draw still executing");
-
+  // A short drain with the backend idle executes on the pump thread itself:
+  // its read pointer goes back once the pump is past it.
+  assert(guest_read_pointer() == 0u);
   blocking->release.store(true);
-  for (int i = 0; i < 400 && kernel_process->gpu_ring_buffer().read_index != 2u; ++i) {
+  for (int i = 0; i < 400 && guest_read_pointer() != 2u; ++i) {
     std::this_thread::sleep_for(std::chrono::milliseconds(5));
   }
+  assert(guest_read_pointer() == 2u);
   assert(kernel_process->gpu_ring_buffer().read_index == 2u);
   const bool shutdown_completed = run_with_timeout(
       [&] { harness.session.shutdown(); }, std::chrono::milliseconds(5000));
   assert(shutdown_completed);
+}
+
+// The ring read pointer is the command processor's fetch position, as on the
+// Xenos: once a drain is decoded the guest may reuse its ring words while its
+// draws still execute on the backend thread (AC6's Direct3D spun for ring
+// space while the read pointer waited for the backend). A drain with a draw
+// that reads its data out of command memory - here a DMA index buffer in the
+// ring's free space, as Direct3D's DrawIndexedPrimitiveUP can place it -
+// holds the read pointer behind the draw, which has not read it yet.
+void run_read_pointer_case(bool index_buffer_in_ring) {
+  GpuPumpHarness harness;
+  auto backend = std::make_unique<BlockingDrawBackend>();
+  auto* blocking = backend.get();
+  xenon::core::SessionExecutionTestAccess::set_backend(harness.session, std::move(backend));
+  assert(xenon::core::SessionExecutionTestAccess::create_guest_process(harness.session));
+  auto* memory = harness.session.memory();
+  auto* kernel_process = harness.session.kernel_process();
+
+  constexpr std::uint32_t kRingBase = 0x2000u;
+  constexpr std::uint32_t kRingDwords = 64u;
+  constexpr std::uint32_t kIndicesAt = kRingBase + 48u * 4u;  // free ring space
+  std::vector<std::uint32_t> words;
+  // Nine auto-indexed DRAW_INDX_2 draws: past GraphicsSystem::kStreamAfterDraws
+  // the drain streams to the backend thread and decoding goes on.
+  for (int i = 0; i < 9; ++i) {
+    words.push_back(0xC0003600u);
+    words.push_back(0x00030084u);
+  }
+  if (index_buffer_in_ring) {
+    // DRAW_INDX: viz token, initiator (3 16-bit DMA indices, triangle list),
+    // VGT_DMA_BASE, VGT_DMA_SIZE (3 words, no swap).
+    words.insert(words.end(), {0xC0032200u, 0u, 0x00030004u, kIndicesAt, 3u});
+  }
+  const auto write_word = [&](std::uint32_t address, std::uint32_t word) {
+    const std::array<std::byte, 4> bytes{
+        static_cast<std::byte>(word >> 24), static_cast<std::byte>(word >> 16),
+        static_cast<std::byte>(word >> 8), static_cast<std::byte>(word)};
+    assert(memory->write_physical(address, bytes));
+  };
+  for (std::uint32_t i = 0; i < words.size(); ++i) write_word(kRingBase + i * 4u, words[i]);
+  write_word(kIndicesAt, 0x00000001u);
+  write_word(kIndicesAt + 4u, 0x00020000u);
+  kernel_process->configure_gpu_ring_buffer(kRingBase, kRingDwords);
+  constexpr std::uint32_t kWritebackPhysical = 0x2400u;
+  assert(memory->fill_physical(kWritebackPhysical, 4u, std::byte{0}));
+  kernel_process->set_gpu_ring_buffer_rptr_writeback(kWritebackPhysical);
+  const auto guest_read_pointer = [&] {
+    std::array<std::byte, 4> bytes{};
+    assert(memory->copy_physical_range(kWritebackPhysical, bytes));
+    return std::to_integer<std::uint32_t>(bytes[0]) << 24 |
+           std::to_integer<std::uint32_t>(bytes[1]) << 16 |
+           std::to_integer<std::uint32_t>(bytes[2]) << 8 | std::to_integer<std::uint32_t>(bytes[3]);
+  };
+  const auto end = static_cast<std::uint32_t>(words.size());
+  kernel_process->set_gpu_ring_buffer_write_index(end);
+
+  for (int i = 0; i < 400 && blocking->draws_entered.load() == 0; ++i)
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  assert(blocking->draws_entered.load() == 1 && "the backend thread reached the first draw");
+  // Decoding finishes while the backend is stuck in the first draw.
+  for (int i = 0; i < 400 && kernel_process->gpu_ring_buffer().read_index != end; ++i)
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  assert(kernel_process->gpu_ring_buffer().read_index == end && "the drain was decoded");
+
+  if (!index_buffer_in_ring) {
+    for (int i = 0; i < 400 && guest_read_pointer() != end; ++i)
+      std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    assert(guest_read_pointer() == end &&
+           "the guest's read pointer reaches the decoded commands while their draws execute");
+    assert(blocking->draws_entered.load() == 1 && "the first draw is still executing");
+    // The guest reuses the ring words; the decoded draws do not change.
+    assert(memory->fill_physical(kRingBase, end * 4u, std::byte{0xEE}));
+  } else {
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    assert(guest_read_pointer() == 0u &&
+           "a drain whose draw reads command memory keeps its read pointer behind the draw");
+  }
+
+  blocking->release.store(true);
+  for (int i = 0; i < 400 && guest_read_pointer() != end; ++i)
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  assert(guest_read_pointer() == end);
+  // Every decoded draw executes (the early read pointer does not wait for them).
+  const int draws = index_buffer_in_ring ? 10 : 9;
+  for (int i = 0; i < 400 && blocking->draws_entered.load() != draws; ++i)
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  assert(blocking->draws_entered.load() == draws);
+  const bool shutdown_completed = run_with_timeout(
+      [&] { harness.session.shutdown(); }, std::chrono::milliseconds(5000));
+  assert(shutdown_completed);
+}
+
+void test_read_pointer_returns_once_a_streamed_drain_is_decoded() {
+  run_read_pointer_case(/*index_buffer_in_ring=*/false);
+}
+
+void test_read_pointer_waits_for_a_draw_reading_command_memory() {
+  run_read_pointer_case(/*index_buffer_in_ring=*/true);
 }
 
 // The worker drains ring work when it is published, not on a polling tick:
@@ -798,6 +913,128 @@ void test_published_ring_work_wakes_the_worker() {
   assert(shutdown_completed);
 }
 
+std::atomic<bool> g_presenting{false};
+std::atomic<int> g_scanout_presents{0};
+std::atomic<int> g_vblank_callbacks{0};
+std::atomic<int> g_vblank_callbacks_during_present{0};
+std::atomic<int> g_present_ms{4};
+
+// A vblank interrupt delivered while the frame it ends is still being presented.
+ExecutionResult scanout_latch_probe_entry(ExecutionContext& context) {
+  if (context.state.gpr[3] == 0u) {
+    g_vblank_callbacks.fetch_add(1);
+    if (g_presenting.load()) g_vblank_callbacks_during_present.fetch_add(1);
+  }
+  context.state.gpr[3] = 0;
+  context.state.lr = 0u;
+  return {FlowReason::Return, 0u, 0u};
+}
+
+// A present that takes a few milliseconds, as reading back and uploading a
+// scan-out does.
+class SlowPresentBackend final : public gpu::Backend {
+ public:
+  void begin_submission(memory::AddressSpace&, gpu::Edram&) override {}
+  void consume(const gpu::ir::Command&) override {}
+  void end_submission() override {}
+  bool make_guest_memory_cpu_visible(std::uint32_t, std::uint32_t) override { return true; }
+  bool make_edram_canonical() override { return true; }
+  bool invalidate_edram_native_state() override { return true; }
+  gpu::PresentStatus present(const gpu::PresentationFrame&) override {
+    g_presenting.store(true);
+    std::this_thread::sleep_for(std::chrono::milliseconds(g_present_ms.load()));
+    g_presenting.store(false);
+    g_scanout_presents.fetch_add(1);
+    return gpu::PresentStatus::Success;
+  }
+  bool resize_presentation(std::uint32_t, std::uint32_t) override { return true; }
+  bool presentation_ready() const noexcept override { return true; }
+};
+
+// Regression (Ace Combat 6 intro movie tore at the top): AC6 resolves every
+// frame into one front buffer and renders the next once the vblank interrupt
+// says the display has taken the current one. The vsync thread delivered the
+// interrupt as it asked for the present, so the title's next resolve ran
+// before - or during - the scan-out of the frame it overwrote. The display
+// samples the front buffer at vertical blank: the interrupt is delivered once
+// that frame has been presented.
+void test_vblank_interrupt_follows_the_scanout_it_ends() {
+  // As while a session runs guest code: at the default 15.6 ms tick the
+  // present's few milliseconds, and the vsync thread's waits, last a tick.
+  const xenon::kernel::HostTimerResolution timer_resolution{};
+  g_presenting.store(false);
+  g_scanout_presents.store(0);
+  g_vblank_callbacks.store(0);
+  g_vblank_callbacks_during_present.store(0);
+  constexpr GuestAddress kCallbackAddr = 0x5000u;
+  GpuPumpHarness harness(kCallbackAddr, &scanout_latch_probe_entry);
+  xenon::core::SessionExecutionTestAccess::set_backend(harness.session,
+                                                       std::make_unique<SlowPresentBackend>());
+  assert(xenon::core::SessionExecutionTestAccess::create_guest_process(harness.session));
+  auto* kernel_process = harness.session.kernel_process();
+  kernel_process->set_gpu_interrupt_callback(kCallbackAddr, 0u);
+  const std::array<std::uint32_t, 6> fetch{0x80000002u | 2u << 22, 0x3000u | 2u << 6 | 6u,
+                                           63u | 63u << 13, 0u, 0u, 0x200u};
+  // A new frame every vblank or so, each one presented.
+  for (int frame = 0; frame < 40; ++frame) {
+    kernel_process->set_gpu_front_buffer(0x3000u, 64u, 64u, 256u, 6u, fetch);
+    std::this_thread::sleep_for(std::chrono::milliseconds(15));
+  }
+  // While the worker is running, every vblank waits for its scan-out (the
+  // timeout covers a worker stuck in a long drain, not this).
+  const auto latch_timeouts =
+      xenon::core::SessionExecutionTestAccess::scanout_latch_timeouts(harness.session);
+  std::cout << "  scan-out latch timeouts while running: " << latch_timeouts << "\n";
+  const bool shutdown_completed = run_with_timeout(
+      [&] { harness.session.shutdown(); }, std::chrono::milliseconds(5000));
+  assert(shutdown_completed);
+  assert(g_scanout_presents.load() >= 15 && g_vblank_callbacks.load() >= 15);
+  assert(g_vblank_callbacks_during_present.load() == 0 &&
+         "no vblank interrupt is delivered while its frame is still being presented");
+  assert(latch_timeouts == 0u);
+}
+
+// Regression (failed once in a loaded full test run): the vsync thread waits
+// 8 ms for the scan-out, then delivered the interrupt regardless - while the
+// worker was still presenting, so the title could render into the buffer
+// being scanned out. Presents here take 20 ms, past that wait every time:
+// the interrupt still never lands mid-present. A present already under way
+// is waited for; a vblank the worker had not started is given up on (after
+// any earlier present still running ends) and not presented late.
+void test_vblank_interrupt_waits_for_a_long_present() {
+  const xenon::kernel::HostTimerResolution timer_resolution{};
+  g_present_ms.store(20);
+  g_presenting.store(false);
+  g_scanout_presents.store(0);
+  g_vblank_callbacks.store(0);
+  g_vblank_callbacks_during_present.store(0);
+  constexpr GuestAddress kCallbackAddr = 0x5000u;
+  GpuPumpHarness harness(kCallbackAddr, &scanout_latch_probe_entry);
+  xenon::core::SessionExecutionTestAccess::set_backend(harness.session,
+                                                       std::make_unique<SlowPresentBackend>());
+  assert(xenon::core::SessionExecutionTestAccess::create_guest_process(harness.session));
+  auto* kernel_process = harness.session.kernel_process();
+  kernel_process->set_gpu_interrupt_callback(kCallbackAddr, 0u);
+  const std::array<std::uint32_t, 6> fetch{0x80000002u | 2u << 22, 0x3000u | 2u << 6 | 6u,
+                                           63u | 63u << 13, 0u, 0u, 0x200u};
+  for (int frame = 0; frame < 40; ++frame) {
+    kernel_process->set_gpu_front_buffer(0x3000u, 64u, 64u, 256u, 6u, fetch);
+    std::this_thread::sleep_for(std::chrono::milliseconds(15));
+  }
+  const auto given_up =
+      xenon::core::SessionExecutionTestAccess::scanout_latch_timeouts(harness.session);
+  const bool shutdown_completed = run_with_timeout(
+      [&] { harness.session.shutdown(); }, std::chrono::milliseconds(5000));
+  assert(shutdown_completed);
+  g_present_ms.store(4);
+  std::cout << "  20 ms presents: " << g_scanout_presents.load() << " presented, "
+            << g_vblank_callbacks.load() << " vblank interrupts, " << given_up
+            << " vblanks given up on" << std::endl;
+  assert(g_scanout_presents.load() >= 10 && g_vblank_callbacks.load() >= 15);
+  assert(g_vblank_callbacks_during_present.load() == 0 &&
+         "no vblank interrupt is delivered while a present is still under way");
+}
+
 }  // namespace
 
 int main() {
@@ -812,9 +1049,13 @@ int main() {
   test_shutdown_ends_blocked_waits_in_callbacks_and_guest_threads();
   test_vsync_callback_wakes_a_waiting_guest_thread_each_frame();
   test_vsync_keeps_arriving_while_the_gpu_worker_is_busy();
+  test_read_pointer_returns_once_a_streamed_drain_is_decoded();
+  test_read_pointer_waits_for_a_draw_reading_command_memory();
   test_published_ring_work_wakes_the_worker();
   test_present_outcomes_are_counted_by_status();
   test_a_front_buffer_without_a_fetch_constant_is_not_presented();
+  test_vblank_interrupt_follows_the_scanout_it_ends();
+  test_vblank_interrupt_waits_for_a_long_present();
 
   std::cout << "All GPU pump thread tests passed!\n";
   return 0;

@@ -1,5 +1,6 @@
 #include "xenon/recomp/module_hint_provider.hpp"
 
+#include <algorithm>
 #include <fstream>
 #include <sstream>
 
@@ -91,6 +92,26 @@ bool FileModuleHintProvider::provide(const xbox::XexEffectiveIdentity& identity,
   }
 
   out_hint_set = std::move(parsed);
+  return true;
+}
+
+bool FileModuleHintProvider::hook_sources(const xbox::XexEffectiveIdentity& identity,
+                                          std::vector<std::filesystem::path>& out_sources,
+                                          std::string& error) const {
+  const auto directory = module_root_ / "revisions" /
+                         xbox::format_effective_image_hash(identity.effective_image_hash) / "hooks";
+  std::error_code ec;
+  if (!std::filesystem::exists(directory, ec)) return true;
+  std::vector<std::filesystem::path> found;
+  for (std::filesystem::directory_iterator it(directory, ec), end; !ec && it != end; it.increment(ec))
+    if (it->is_regular_file() && it->path().extension() == ".cpp") found.push_back(it->path());
+  if (ec) {
+    error = "module '" + module_name_ + "' hook directory could not be read: " + directory.string() +
+            " (" + ec.message() + ")";
+    return false;
+  }
+  std::sort(found.begin(), found.end());
+  out_sources.insert(out_sources.end(), found.begin(), found.end());
   return true;
 }
 

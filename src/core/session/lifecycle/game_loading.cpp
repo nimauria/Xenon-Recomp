@@ -4,6 +4,7 @@
 
 #include "xenon/core/import_classification.hpp"
 #include "xenon/core/session.hpp"
+#include "xenon/logging/logger.hpp"
 #include "xenon/xam/content_graph.hpp"
 
 namespace xenon::core {
@@ -59,6 +60,7 @@ SessionResult XenonSession::load_game(std::span<const std::byte> xex_bytes,
   }
 
   loaded_xex_ = std::move(loaded);
+  index_import_thunks();
   effective_identity_ =
       xbox::compute_effective_identity(base_image, has_title_update ? &patched_image : nullptr);
   if (config_.enable_logging) {
@@ -69,6 +71,10 @@ SessionResult XenonSession::load_game(std::span<const std::byte> xex_bytes,
               << " hash=" << xbox::format_effective_image_hash(effective_identity_->effective_image_hash)
               << std::endl;
   }
+  // Before any guest code can submit GPU work.
+  if (!configure_temporal_rendering()) return SessionResult::failure(last_error_);
+  // Before the title can poll a controller.
+  if (!configure_module_input()) return SessionResult::failure(last_error_);
 
   // Bind true native variable imports to guest-backed system-module
   // variables before any guest code or callbacks can observe the IAT slots.
@@ -188,6 +194,10 @@ bool XenonSession::resolve_xex_imports() {
 
     unresolved_imports_.push_back(
         UnresolvedImport{import.module, import.symbol, import.ordinal});
+    logging::Logger::instance().record(
+        logging::Level::Warning, "kernel",
+        std::string(import.is_variable() ? "unresolved variable import: " : "unresolved import: ") +
+            import.module + " '" + import.symbol + "' ordinal " + std::to_string(import.ordinal));
     if (config_.enable_export_diagnostics) {
       std::scoped_lock console_log_lock(console_log_mutex());
       std::cout << "[XenonSession] Unresolved "

@@ -59,6 +59,14 @@ class RenderTargetImage {
   [[nodiscard]] VkImage image() const noexcept { return image_; }
   [[nodiscard]] VkImageView view() const noexcept { return view_; }
   [[nodiscard]] VkFormat format() const noexcept { return format_; }
+  // The view EDRAM transfers read and write: view() itself, or for 16-bit
+  // float storage the same bits as unsigned integers
+  // (color_host_transfers_as_integer(); the image is then mutable-format), so
+  // a transfer never canonicalizes a half NaN.
+  [[nodiscard]] VkImageView transfer_view() const noexcept {
+    return transfer_view_ ? transfer_view_ : view_;
+  }
+  [[nodiscard]] VkFormat transfer_format() const noexcept { return transfer_format_; }
   [[nodiscard]] ColorRenderTargetFormat guest_format() const noexcept {
     return guest_format_;
   }
@@ -76,6 +84,8 @@ class RenderTargetImage {
   static constexpr VkShaderStageFlags kSampledSourceStages =
       VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_COMPUTE_BIT;
   [[nodiscard]] VkDescriptorSet sampled_descriptor_set(VkDescriptorSetLayout set_layout);
+  // The same for transfer_view(): what EDRAM transfers read.
+  [[nodiscard]] VkDescriptorSet transfer_descriptor_set(VkDescriptorSetLayout set_layout);
   [[nodiscard]] const std::string& error() const noexcept { return error_; }
 
  private:
@@ -84,7 +94,9 @@ class RenderTargetImage {
   VkImage image_{VK_NULL_HANDLE};
   VkDeviceMemory memory_{VK_NULL_HANDLE};
   VkImageView view_{VK_NULL_HANDLE};
+  VkImageView transfer_view_{VK_NULL_HANDLE};
   VkFormat format_{VK_FORMAT_UNDEFINED};
+  VkFormat transfer_format_{VK_FORMAT_UNDEFINED};
   ColorRenderTargetFormat guest_format_{ColorRenderTargetFormat::R8G8B8A8};
   std::uint32_t mip_width_{};
   std::uint32_t mip_height_{};
@@ -94,7 +106,12 @@ class RenderTargetImage {
   VkImageLayout layout_{VK_IMAGE_LAYOUT_UNDEFINED};
   VkDescriptorPool sampled_pool_{VK_NULL_HANDLE};
   VkDescriptorSet sampled_set_{VK_NULL_HANDLE};
+  VkDescriptorPool transfer_pool_{VK_NULL_HANDLE};
+  VkDescriptorSet transfer_set_{VK_NULL_HANDLE};
   std::string error_{};
+
+  VkDescriptorSet descriptor_set(VkDescriptorSetLayout set_layout, VkImageView view,
+                                 VkDescriptorPool& pool, VkDescriptorSet& set);
 };
 
 }  // namespace xenon::gpu::vulkan

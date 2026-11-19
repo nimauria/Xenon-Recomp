@@ -21,6 +21,12 @@ if(XENON_BUILD_TESTS)
     endif()
     xenon_enable_test_asserts(xenon_backend_capability_tests)
     add_test(NAME xenon_backend_capability_tests COMMAND xenon_backend_capability_tests)
+    # XEN-001: the same suite with storage buffers limited to the Vulkan
+    # minimum, so the segmented and windowed guest-memory bindings run on
+    # every GPU.
+    add_test(NAME xenon_backend_capability_tests_vulkan_128mib COMMAND xenon_backend_capability_tests)
+    set_tests_properties(xenon_backend_capability_tests_vulkan_128mib PROPERTIES
+      ENVIRONMENT "XENON_VULKAN_MAX_STORAGE_BUFFER_RANGE=134217728" RUN_SERIAL TRUE)
     add_executable(xenon_backend_ownership_integration_tests
       backends/backend_ownership_integration.cpp)
     target_link_libraries(xenon_backend_ownership_integration_tests
@@ -43,6 +49,61 @@ if(XENON_BUILD_TESTS)
     xenon_enable_test_asserts(xenon_backend_ownership_integration_tests)
     add_test(NAME xenon_backend_ownership_integration_tests
       COMMAND xenon_backend_ownership_integration_tests)
+    set_tests_properties(xenon_backend_ownership_integration_tests PROPERTIES
+      RUN_SERIAL TRUE)
+    # XEN-001: the same suite with storage buffers limited to the Vulkan
+    # minimum, so the segmented and windowed guest-memory bindings run on
+    # every GPU.
+    add_test(NAME xenon_backend_ownership_integration_tests_vulkan_128mib COMMAND xenon_backend_ownership_integration_tests)
+    set_tests_properties(xenon_backend_ownership_integration_tests_vulkan_128mib PROPERTIES
+      ENVIRONMENT "XENON_VULKAN_MAX_STORAGE_BUFFER_RANGE=134217728" RUN_SERIAL TRUE)
+    if(WIN32 AND TARGET xenon_graphics_d3d12)
+      # The same on WARP, Windows' software rasterizer and what GPU-less
+      # hosts (CI's Windows runners) render on: its depth conversion
+      # truncates, where most GPUs round, so the D3D12 backend must calibrate
+      # to a different D24 depth-write encoding there.
+      add_test(NAME xenon_backend_ownership_integration_warp_tests
+        COMMAND xenon_backend_ownership_integration_tests)
+      set_tests_properties(xenon_backend_ownership_integration_warp_tests PROPERTIES
+        RUN_SERIAL TRUE ENVIRONMENT "XENON_D3D12_ADAPTER=warp")
+    endif()
+    add_executable(xenon_shader_load_reuse_tests backends/shader_load_reuse.cpp)
+    target_link_libraries(xenon_shader_load_reuse_tests PRIVATE xenon_graphics)
+    if(WIN32 AND TARGET xenon_graphics_d3d12)
+      target_link_libraries(xenon_shader_load_reuse_tests PRIVATE xenon_graphics_d3d12)
+      target_compile_definitions(xenon_shader_load_reuse_tests PRIVATE XENON_TEST_D3D12=1)
+    endif()
+    if(TARGET xenon_graphics_vulkan)
+      target_link_libraries(xenon_shader_load_reuse_tests PRIVATE xenon_graphics_vulkan)
+      target_compile_definitions(xenon_shader_load_reuse_tests PRIVATE XENON_TEST_VULKAN=1)
+    endif()
+    if(TARGET xenon_graphics_dxc)
+      xenon_stage_runtime_dependencies(xenon_shader_load_reuse_tests)
+    endif()
+    xenon_enable_test_asserts(xenon_shader_load_reuse_tests)
+    add_test(NAME xenon_shader_load_reuse_tests COMMAND xenon_shader_load_reuse_tests)
+    add_executable(xenon_gpu_texture_load_tests
+      backends/gpu_texture_load.cpp)
+    target_link_libraries(xenon_gpu_texture_load_tests PRIVATE xenon_graphics)
+    if(WIN32 AND TARGET xenon_graphics_d3d12)
+      target_link_libraries(xenon_gpu_texture_load_tests PRIVATE xenon_graphics_d3d12)
+      target_compile_definitions(xenon_gpu_texture_load_tests PRIVATE XENON_TEST_D3D12=1)
+    endif()
+    if(TARGET xenon_graphics_vulkan)
+      target_link_libraries(xenon_gpu_texture_load_tests PRIVATE xenon_graphics_vulkan)
+      target_compile_definitions(xenon_gpu_texture_load_tests PRIVATE XENON_TEST_VULKAN=1)
+    endif()
+    if(TARGET xenon_graphics_dxc)
+      xenon_stage_runtime_dependencies(xenon_gpu_texture_load_tests)
+    endif()
+    xenon_enable_test_asserts(xenon_gpu_texture_load_tests)
+    add_test(NAME xenon_gpu_texture_load_tests COMMAND xenon_gpu_texture_load_tests)
+    # XEN-001: the same suite with storage buffers limited to the Vulkan
+    # minimum, so the segmented and windowed guest-memory bindings run on
+    # every GPU.
+    add_test(NAME xenon_gpu_texture_load_tests_vulkan_128mib COMMAND xenon_gpu_texture_load_tests)
+    set_tests_properties(xenon_gpu_texture_load_tests_vulkan_128mib PROPERTIES
+      ENVIRONMENT "XENON_VULKAN_MAX_STORAGE_BUFFER_RANGE=134217728" RUN_SERIAL TRUE)
     add_executable(xenon_scanout_integration_tests
       backends/scanout_integration.cpp)
     target_link_libraries(xenon_scanout_integration_tests
@@ -65,6 +126,12 @@ if(XENON_BUILD_TESTS)
     xenon_enable_test_asserts(xenon_scanout_integration_tests)
     add_test(NAME xenon_scanout_integration_tests
       COMMAND xenon_scanout_integration_tests)
+    # XEN-001: the same suite with storage buffers limited to the Vulkan
+    # minimum, so the segmented and windowed guest-memory bindings run on
+    # every GPU.
+    add_test(NAME xenon_scanout_integration_tests_vulkan_128mib COMMAND xenon_scanout_integration_tests)
+    set_tests_properties(xenon_scanout_integration_tests_vulkan_128mib PROPERTIES
+      ENVIRONMENT "XENON_VULKAN_MAX_STORAGE_BUFFER_RANGE=134217728" RUN_SERIAL TRUE)
     add_executable(xenon_cross_backend_canonical_tests
       backends/cross_backend_canonical.cpp)
     target_link_libraries(xenon_cross_backend_canonical_tests PRIVATE xenon_graphics)
@@ -86,6 +153,17 @@ if(XENON_BUILD_TESTS)
     xenon_enable_test_asserts(xenon_cross_backend_canonical_tests)
     add_test(NAME xenon_cross_backend_canonical_tests
       COMMAND xenon_cross_backend_canonical_tests)
+    # XEN-001: the same suite with storage buffers limited to the Vulkan
+    # minimum, so the segmented and windowed guest-memory bindings run on
+    # every GPU.
+    add_test(NAME xenon_cross_backend_canonical_tests_vulkan_128mib COMMAND xenon_cross_backend_canonical_tests)
+    set_tests_properties(xenon_cross_backend_canonical_tests_vulkan_128mib PROPERTIES
+      ENVIRONMENT "XENON_VULKAN_MAX_STORAGE_BUFFER_RANGE=134217728" RUN_SERIAL TRUE)
+    add_executable(xenon_vertex_position_evaluator_tests xenos/vertex_position_evaluator.cpp)
+    target_link_libraries(xenon_vertex_position_evaluator_tests PRIVATE xenon_graphics)
+    xenon_enable_test_asserts(xenon_vertex_position_evaluator_tests)
+    add_test(NAME xenon_vertex_position_evaluator_tests COMMAND xenon_vertex_position_evaluator_tests)
+
     add_executable(xenon_shader_decoder_tests xenos/shader_decoder.cpp)
     set_target_properties(xenon_shader_decoder_tests PROPERTIES
       OUTPUT_NAME xenon_shader_decoder_gpu09_tests)
@@ -109,6 +187,22 @@ if(XENON_BUILD_TESTS)
     target_link_libraries(xenon_staging_ring_tests PRIVATE xenon_graphics)
     xenon_enable_test_asserts(xenon_staging_ring_tests)
     add_test(NAME xenon_staging_ring_tests COMMAND xenon_staging_ring_tests)
+    add_executable(xenon_recording_workers_tests xenos/recording_workers.cpp)
+    target_link_libraries(xenon_recording_workers_tests PRIVATE xenon_graphics)
+    xenon_enable_test_asserts(xenon_recording_workers_tests)
+    add_test(NAME xenon_recording_workers_tests COMMAND xenon_recording_workers_tests)
+    add_executable(xenon_backend_executor_tests xenos/backend_executor.cpp)
+    target_link_libraries(xenon_backend_executor_tests PRIVATE xenon_graphics)
+    xenon_enable_test_asserts(xenon_backend_executor_tests)
+    add_test(NAME xenon_backend_executor_tests COMMAND xenon_backend_executor_tests)
+    add_executable(xenon_readback_publisher_tests xenos/readback_publisher.cpp)
+    target_link_libraries(xenon_readback_publisher_tests PRIVATE xenon_graphics)
+    xenon_enable_test_asserts(xenon_readback_publisher_tests)
+    add_test(NAME xenon_readback_publisher_tests COMMAND xenon_readback_publisher_tests)
+    add_executable(xenon_texture_replacement_tests xenos/texture_replacement.cpp)
+    target_link_libraries(xenon_texture_replacement_tests PRIVATE xenon_graphics)
+    xenon_enable_test_asserts(xenon_texture_replacement_tests)
+    add_test(NAME xenon_texture_replacement_tests COMMAND xenon_texture_replacement_tests)
     add_executable(xenon_resource_barrier_tests
       xenos/resource_barrier.cpp)
     target_link_libraries(xenon_resource_barrier_tests PRIVATE xenon_graphics)
@@ -122,6 +216,16 @@ if(XENON_BUILD_TESTS)
     target_link_libraries(xenon_presentation_tests PRIVATE xenon_graphics)
     xenon_enable_test_asserts(xenon_presentation_tests)
     add_test(NAME xenon_presentation_tests COMMAND xenon_presentation_tests)
+    add_executable(xenon_blend_constant_tests
+      xenos/blend_constant.cpp)
+    target_link_libraries(xenon_blend_constant_tests PRIVATE xenon_graphics)
+    xenon_enable_test_asserts(xenon_blend_constant_tests)
+    add_test(NAME xenon_blend_constant_tests COMMAND xenon_blend_constant_tests)
+    add_executable(xenon_transient_arena_tests
+      xenos/transient_arena.cpp)
+    target_link_libraries(xenon_transient_arena_tests PRIVATE xenon_graphics)
+    xenon_enable_test_asserts(xenon_transient_arena_tests)
+    add_test(NAME xenon_transient_arena_tests COMMAND xenon_transient_arena_tests)
     add_executable(xenon_edram_surface_tests
       xenos/edram_surface.cpp)
     target_link_libraries(xenon_edram_surface_tests PRIVATE xenon_graphics)
@@ -137,6 +241,18 @@ if(XENON_BUILD_TESTS)
     target_link_libraries(xenon_primitive_processor_tests PRIVATE xenon_graphics)
     xenon_enable_test_asserts(xenon_primitive_processor_tests)
     add_test(NAME xenon_primitive_processor_tests COMMAND xenon_primitive_processor_tests)
+    add_executable(xenon_guest_memory_segments_tests xenos/guest_memory_segments.cpp)
+    target_link_libraries(xenon_guest_memory_segments_tests PRIVATE xenon_graphics)
+    xenon_enable_test_asserts(xenon_guest_memory_segments_tests)
+    add_test(NAME xenon_guest_memory_segments_tests COMMAND xenon_guest_memory_segments_tests)
+    add_executable(xenon_resident_range_allocator_tests xenos/resident_range_allocator.cpp)
+    target_link_libraries(xenon_resident_range_allocator_tests PRIVATE xenon_graphics)
+    xenon_enable_test_asserts(xenon_resident_range_allocator_tests)
+    add_test(NAME xenon_resident_range_allocator_tests COMMAND xenon_resident_range_allocator_tests)
+    add_executable(xenon_index_cache_tests xenos/index_cache.cpp)
+    target_link_libraries(xenon_index_cache_tests PRIVATE xenon_graphics)
+    xenon_enable_test_asserts(xenon_index_cache_tests)
+    add_test(NAME xenon_index_cache_tests COMMAND xenon_index_cache_tests)
     if(TARGET xenon_graphics_dxc)
       add_executable(xenon_shader_translation_tests
         xenos/shader_translation.cpp)
@@ -157,5 +273,18 @@ if(XENON_BUILD_TESTS)
   if(TARGET xenon_graphics)
     xenon_add_standalone_test(xenon_xenos_register_aperture_tests
       xenos/register_aperture_tests.cpp xenon_graphics xenon_memory)
+    xenon_add_standalone_test(xenon_display_vblank_tests
+      display_vblank_tests.cpp xenon_graphics)
+    set_tests_properties(xenon_display_vblank_tests PROPERTIES RUN_SERIAL TRUE)
+    xenon_add_standalone_test(xenon_guest_read_sync_tests
+      guest_read_sync_tests.cpp xenon_graphics xenon_memory)
+    xenon_add_standalone_test(xenon_temporal_tests
+      xenos/temporal.cpp xenon_graphics)
+    xenon_add_standalone_test(xenon_sampler_address_tests
+      sampler_address_tests.cpp xenon_graphics)
+    xenon_add_standalone_test(xenon_perf_stats_tests
+      perf_stats_tests.cpp xenon_graphics)
+    xenon_add_standalone_test(xenon_gpu_failure_log_tests
+      failure_log_tests.cpp xenon_graphics)
   endif()
 endif()

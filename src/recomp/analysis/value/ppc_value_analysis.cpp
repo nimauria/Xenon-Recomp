@@ -305,6 +305,232 @@ class BackwardSlicer {
   return result;
 }
 
+// Switch dispatch as compilers emit it, e.g. MSVC for the Xbox 360:
+//
+//   cmplwi  cr6, r9, 3          ; bound: index <= 3
+//   bgt     cr6, default
+//   lis     r12, table@ha
+//   addi    r12, r12, table@l
+//   rlwinm  r0, r9, 2, 0, 29    ; index * 4
+//   lwzx    r0, r12, r0         ; (or lbzx/lhzx + base + shift: offset tables)
+//   mtctr   r0
+//   bctr
+//
+// The CTR value is evaluated for every index the unsigned bound admits, by
+// walking the straight-line history back from mtctr through constants,
+// add/shift/mask/sign-extension and loads from non-writable image bytes. The
+// index leaf is the compared register's value at the compare. Every entry
+// must decode to executable code, or the table is rejected as a whole.
+class JumpTableResolver {
+ public:
+  static constexpr std::size_t kMaxEntries = 1024u;
+  static constexpr std::size_t kMaxBoundDistance = 24u;
+  static constexpr std::size_t kMaxDepth = 24u;
+
+  JumpTableResolver(std::span<const cpu::DecodedInstruction> history, const xbox::XexImage& image)
+      : history_(history), image_(image) {}
+
+  // Targets in table order (duplicates removed), or empty.
+  std::vector<std::uint32_t> resolve() {
+    std::vector<std::uint32_t> targets;
+    const auto mtctr = find_mtctr();
+    if (!mtctr || !find_bound()) return targets;
+    std::optional<std::uint32_t> table;
+    for (std::uint32_t index = 0; index < entry_count_; ++index) {
+      table_address_.reset();
+      const auto target = evaluate(history_[*mtctr].rs(), *mtctr, index, 0u);
+      if (!target || !executable_address(image_, *target)) return {};
+      if (!table) table = table_address_;
+      if (std::find(targets.begin(), targets.end(), *target) == targets.end())
+        targets.push_back(*target);
+    }
+    table_ = table;
+    return targets;
+  }
+
+  [[nodiscard]] std::optional<std::uint32_t> table_address() const noexcept { return table_; }
+
+ private:
+  // The mtctr feeding the bcctr (the last CTR write in the history).
+  std::optional<std::size_t> find_mtctr() const {
+    for (std::size_t i = history_.size(); i-- > 0;) {
+      const auto& instruction = history_[i];
+      if (instruction.mnemonic() == "mtspr" && instruction.spr() == 9u) return i;
+      if (instruction.info->group == cpu::InstructionGroup::Branch) return std::nullopt;
+    }
+    return std::nullopt;
+  }
+
+  // The nearest conditional branch before the bcctr that leaves when the
+  // index is out of range (bgt: index > N, or bge: index >= N on an unsigned
+  // 32-bit compare of a register with an immediate). No other branch may
+  // separate it from the bcctr, so every path to the dispatch is bounded.
+  bool find_bound() {
+    const auto first = history_.size() > kMaxBoundDistance ? history_.size() - kMaxBoundDistance : 0u;
+    for (std::size_t i = history_.size(); i-- > first;) {
+      const auto& branch = history_[i];
+      if (branch.info->group != cpu::InstructionGroup::Branch) continue;
+      if (branch.mnemonic() != "bcx" || branch.lk()) return false;
+      const auto bo = branch.bo();
+      // CR-conditional, no CTR decrement.
+      if ((bo & 0x14u) != 0x04u) return false;
+      const bool when_true = (bo & 0x08u) != 0u;
+      const auto field = branch.bi() >> 2u;
+      const auto bit = branch.bi() & 3u;
+      std::uint32_t exclusive_extra = 0u;
+      if (when_true && bit == 1u) exclusive_extra = 1u;        // bgt: valid 0..N
+      else if (!when_true && bit == 0u) exclusive_extra = 0u;  // bge: valid 0..N-1
+      else return false;
+      for (std::size_t c = i; c-- > first;) {
+        const auto& compare = history_[c];
+        if (compare.info->group == cpu::InstructionGroup::Branch) return false;
+        if (!compare.mnemonic().starts_with("cmp")) continue;
+        if (compare.crfd() != field) continue;  // another field: unrelated
+        // Unsigned word compare against an immediate (cmplwi).
+        if (compare.mnemonic() != "cmpli" || ((compare.word >> 21) & 1u) != 0u) return false;
+        const std::uint64_t count = std::uint64_t{compare.uimm16()} + exclusive_extra;
+        if (count == 0u || count > kMaxEntries) return false;
+        entry_count_ = static_cast<std::uint32_t>(count);
+        index_register_ = compare.ra();
+        compare_position_ = c;
+        return true;
+      }
+      return false;
+    }
+    return false;
+  }
+
+  // The GPR an instruction this resolver evaluates writes.
+  [[nodiscard]] static std::optional<std::uint32_t> modelled_destination(
+      const cpu::DecodedInstruction& instruction) {
+    const auto mnemonic = instruction.mnemonic();
+    if (mnemonic_is(mnemonic, {"addi", "addis", "addx", "subfx"})) return instruction.rt();
+    if (mnemonic_is(mnemonic, {"ori", "oris", "xori", "xoris", "rlwinmx", "extsbx", "extshx"}))
+      return instruction.ra();
+    if (mnemonic == "orx" && instruction.rs() == instruction.rb()) return instruction.ra();
+    if (instruction.info->group == cpu::InstructionGroup::Memory && is_load(mnemonic) &&
+        !update_form(mnemonic))
+      return instruction.rt();
+    return std::nullopt;
+  }
+
+  [[nodiscard]] static bool writes_gpr(const cpu::DecodedInstruction& instruction,
+                                       std::uint32_t reg) {
+    if (const auto destination = modelled_destination(instruction)) return *destination == reg;
+    const auto mnemonic = instruction.mnemonic();
+    const auto group = instruction.info->group;
+    if (group == cpu::InstructionGroup::Branch) return instruction.lk();  // a call clobbers
+    if (mnemonic.starts_with("cmp") || mnemonic == "mtspr") return false;
+    if (group == cpu::InstructionGroup::FloatingPoint || group == cpu::InstructionGroup::Vector)
+      return false;
+    if (group == cpu::InstructionGroup::Memory && is_store(mnemonic))
+      return update_form(mnemonic) && instruction.ra() == reg;
+    return instruction.rt() == reg || instruction.ra() == reg;
+  }
+
+  std::optional<std::uint32_t> operand(std::uint32_t reg, std::size_t position,
+                                       std::uint32_t index, std::size_t depth) {
+    if (reg == 0u) return 0u;  // (rA|0) addressing
+    return evaluate(reg, position, index, depth + 1u);
+  }
+
+  // `reg` as read by the instruction at `position`, for this index.
+  std::optional<std::uint32_t> evaluate(std::uint32_t reg, std::size_t position,
+                                        std::uint32_t index, std::size_t depth) {
+    if (depth > kMaxDepth) return std::nullopt;
+    for (std::size_t i = position; i-- > 0;) {
+      if (reg == index_register_ && i == compare_position_) return index;
+      const auto& instruction = history_[i];
+      if (!writes_gpr(instruction, reg)) continue;
+      return evaluate_writer(instruction, i, reg, index, depth);
+    }
+    return std::nullopt;
+  }
+
+  std::optional<std::uint32_t> evaluate_writer(const cpu::DecodedInstruction& instruction,
+                                               std::size_t i, std::uint32_t reg,
+                                               std::uint32_t index, std::size_t depth) {
+    const auto mnemonic = instruction.mnemonic();
+    if (instruction.info->group == cpu::InstructionGroup::Branch) return std::nullopt;
+    if (mnemonic_is(mnemonic, {"addi", "addis"}) && instruction.rt() == reg) {
+      const auto base = operand(instruction.ra(), i, index, depth);
+      if (!base) return std::nullopt;
+      const auto delta = mnemonic == "addis"
+          ? static_cast<std::uint32_t>(instruction.simm16()) << 16u
+          : static_cast<std::uint32_t>(static_cast<std::int32_t>(instruction.simm16()));
+      return *base + delta;
+    }
+    if (mnemonic_is(mnemonic, {"ori", "oris", "xori", "xoris"}) && instruction.ra() == reg) {
+      const auto source = evaluate(instruction.rs(), i, index, depth + 1u);
+      if (!source) return std::nullopt;
+      const auto imm = mnemonic.ends_with("is")
+          ? static_cast<std::uint32_t>(instruction.uimm16()) << 16u
+          : static_cast<std::uint32_t>(instruction.uimm16());
+      return mnemonic.starts_with("xor") ? (*source ^ imm) : (*source | imm);
+    }
+    if (mnemonic == "orx" && instruction.ra() == reg && instruction.rs() == instruction.rb())
+      return evaluate(instruction.rs(), i, index, depth + 1u);  // mr
+    if (mnemonic_is(mnemonic, {"addx", "subfx"}) && instruction.rt() == reg) {
+      const auto a = evaluate(instruction.ra(), i, index, depth + 1u);
+      const auto b = evaluate(instruction.rb(), i, index, depth + 1u);
+      if (!a || !b) return std::nullopt;
+      return mnemonic == "addx" ? *a + *b : *b - *a;
+    }
+    if (mnemonic == "rlwinmx" && instruction.ra() == reg) {
+      const auto source = evaluate(instruction.rs(), i, index, depth + 1u);
+      if (!source) return std::nullopt;
+      const auto sh = instruction.sh32();
+      const auto rotated = sh ? (*source << sh) | (*source >> (32u - sh)) : *source;
+      return rotated & rotate_mask(instruction.mb32(), instruction.me32());
+    }
+    if (mnemonic_is(mnemonic, {"extsbx", "extshx"}) && instruction.ra() == reg) {
+      const auto source = evaluate(instruction.rs(), i, index, depth + 1u);
+      if (!source) return std::nullopt;
+      return mnemonic == "extsbx"
+          ? static_cast<std::uint32_t>(static_cast<std::int32_t>(static_cast<std::int8_t>(*source)))
+          : static_cast<std::uint32_t>(static_cast<std::int32_t>(static_cast<std::int16_t>(*source)));
+    }
+    if (instruction.info->group == cpu::InstructionGroup::Memory && is_load(mnemonic) &&
+        !update_form(mnemonic) && instruction.rt() == reg) {
+      const auto width = load_width(mnemonic);
+      if (!width || *width > 4u) return std::nullopt;
+      std::optional<std::uint32_t> address;
+      if (instruction.info->format == cpu::InstructionFormat::D) {
+        const auto base = operand(instruction.ra(), i, index, depth);
+        if (base) address = *base + static_cast<std::uint32_t>(
+                                         static_cast<std::int32_t>(instruction.simm16()));
+      } else if (instruction.info->format == cpu::InstructionFormat::X) {
+        const auto base = operand(instruction.ra(), i, index, depth);
+        const auto offset = evaluate(instruction.rb(), i, index, depth + 1u);
+        if (base && offset) address = *base + *offset;
+        if (base && !table_address_) table_address_ = *base;
+      }
+      if (!address) return std::nullopt;
+      const auto value = read_static_unsigned(image_, *address, *width);
+      if (!value) return std::nullopt;
+      if (mnemonic.starts_with("lha"))
+        return static_cast<std::uint32_t>(
+            static_cast<std::int32_t>(static_cast<std::int16_t>(*value)));
+      return static_cast<std::uint32_t>(*value);
+    }
+    return std::nullopt;  // an instruction this resolver does not model
+  }
+
+  [[nodiscard]] static std::uint32_t rotate_mask(std::uint32_t mb, std::uint32_t me) noexcept {
+    const auto from_mb = 0xFFFFFFFFu >> mb;
+    const auto to_me = 0xFFFFFFFFu << (31u - me);
+    return mb <= me ? (from_mb & to_me) : (from_mb | to_me);
+  }
+
+  std::span<const cpu::DecodedInstruction> history_;
+  const xbox::XexImage& image_;
+  std::uint32_t entry_count_{};
+  std::uint32_t index_register_{};
+  std::size_t compare_position_{};
+  std::optional<std::uint32_t> table_address_;
+  std::optional<std::uint32_t> table_;
+};
+
 }  // namespace
 
 AbstractValue AbstractValue::unknown() noexcept { return {}; }
@@ -440,6 +666,7 @@ const char* indirect_resolver_name(IndirectResolverKind kind) noexcept {
     case IndirectResolverKind::FastValue: return "fast-value";
     case IndirectResolverKind::ReadOnlyTable: return "read-only-table";
     case IndirectResolverKind::BackwardSlice: return "backward-slice";
+    case IndirectResolverKind::JumpTable: return "jump-table";
   }
   return "none";
 }
@@ -602,6 +829,15 @@ IndirectResolution resolve_indirect_flow(const cpu::DecodedInstruction& branch,
   const auto sliced = slicer.resolve_special(ctr_branch ? 9u : 8u);
   result.instructions_examined = slicer.examined();
   result.targets = valid_executable_targets(image, sliced);
+  if (result.targets.empty() && ctr_branch && !branch.lk()) {
+    JumpTableResolver jump_table(history, image);
+    result.targets = jump_table.resolve();
+    if (!result.targets.empty()) {
+      result.kind = IndirectResolverKind::JumpTable;
+      result.table_address = jump_table.table_address();
+    }
+    return result;
+  }
   if (result.targets.empty()) return result;
   if (sliced.kind == AbstractValueKind::LoadedFromReadOnlyTable) {
     result.kind = IndirectResolverKind::ReadOnlyTable;

@@ -150,17 +150,29 @@ std::optional<Result> Store::lookup(const Node& node) const {
 Result Store::publish(const Node& node, std::string bytes) const {
   if(auto hit=lookup(node)) return *hit;
   auto hash=digest(bytes); const auto final=root_/"nodes"/node.key();
-  std::filesystem::create_directories(root_/"staging"); std::filesystem::create_directories(root_/"nodes");
   static std::atomic<std::uint64_t> serial{};
   std::random_device rng;
   auto stage=root_/"staging"/(node.key()+"-"+std::to_string(rng())+"-"+std::to_string(serial++));
-  if(!std::filesystem::create_directory(stage)) throw std::runtime_error("graph staging collision");
+  // staging/ and nodes/ are created when an operation finds them missing, not
+  // checked on every publish: every worker publishes into the same two
+  // directories, and the existence checks queued behind each other's renames
+  // there (most of an analysis of ~19,000 functions was spent in them).
+  std::error_code stage_ec;
+  if(!std::filesystem::create_directory(stage,stage_ec)) {
+    if(!stage_ec) throw std::runtime_error("graph staging collision");
+    std::filesystem::create_directories(root_/"staging");
+    if(!std::filesystem::create_directory(stage)) throw std::runtime_error("graph staging collision");
+  }
   try {
     write(stage/"payload",bytes);
     if(read(stage/"payload")!=bytes) throw std::runtime_error("graph staging verification failed");
     Json j=Json::make_object(); j.set("request",node.canonical()); j.set("sha256",hash); j.set("verified",true);
     write(stage/"manifest.json",j.dump());
     std::error_code ec; std::filesystem::rename(stage,final,ec);
+    if(ec && !std::filesystem::exists(root_/"nodes")) {
+      std::filesystem::create_directories(root_/"nodes");
+      ec.clear(); std::filesystem::rename(stage,final,ec);
+    }
     if(ec) {
       if(auto hit=lookup(node)) { std::filesystem::remove_all(stage); return *hit; }
       // Never replace a corrupt entry in place: readers must not observe a
@@ -194,7 +206,7 @@ bool deserialize_ir(std::string_view bytes,cpu::ir::Function& fn) {
       b.successors.resize(r.count());for(auto& e:b.successors){e.target=static_cast<cpu::GuestAddress>(r.get());auto kind=r.get();if(kind>2)return false;e.kind=static_cast<cpu::ir::EdgeKind>(kind);e.local=r.get()!=0;}
       b.predecessors.resize(r.count());for(auto& p:b.predecessors)p=static_cast<cpu::GuestAddress>(r.get());
       b.instructions.resize(r.count());for(auto& i:b.instructions){
-        auto op=r.get(),type=r.get();if(op>static_cast<unsigned>(cpu::ir::Op::Syscall)||type>static_cast<unsigned>(cpu::ir::Type::V128))return false;
+        auto op=r.get(),type=r.get();if(op>static_cast<unsigned>(cpu::ir::Op::HostHook)||type>static_cast<unsigned>(cpu::ir::Type::V128))return false;
         i.op=static_cast<cpu::ir::Op>(op);i.type=static_cast<cpu::ir::Type>(type);i.result=static_cast<cpu::ir::ValueId>(r.get());i.imm0=r.get();i.imm1=r.get();
         i.guest_address=static_cast<cpu::GuestAddress>(r.get());i.guest_word=static_cast<std::uint32_t>(r.get());i.guest_opcode=cpu::OpcodeId{static_cast<std::uint32_t>(r.get())};
         auto n=r.count();if(n>4)return false;std::vector<cpu::ir::ValueId> args(n);for(auto& a:args)a=static_cast<cpu::ir::ValueId>(r.get());i.args.assign(args);
@@ -204,9 +216,17 @@ bool deserialize_ir(std::string_view bytes,cpu::ir::Function& fn) {
     fn=std::move(out);return true;
   }catch(...){return false;}
 }
-RegionResult compile_region(const Store& store,const Versions& v,cpu::GuestAddress entry,std::span<const cpu::FunctionCodeRange> ranges){
+RegionResult compile_region(const Store& store,const Versions& v,cpu::GuestAddress entry,std::span<const cpu::FunctionCodeRange> ranges,
+                            std::span<const cpu::GuestAddress> extra_leaders,
+                            std::span<const cpu::InstructionHook> hooks){
   std::string raw;number(raw,entry);number(raw,ranges.size());
   for(auto r:ranges){number(raw,r.base);number(raw,r.words.size());for(auto w:r.words)number(raw,w);}
+  // Leaders change the block structure; regions without any keep their keys.
+  if(!extra_leaders.empty()){number(raw,extra_leaders.size());for(auto l:extra_leaders)number(raw,l);}
+  // So do hooks; the routine names are bound later, at emission.
+  if(!hooks.empty()){raw+="hooks";number(raw,hooks.size());
+    for(const auto&h:hooks){number(raw,h.address);number(raw,h.ordinal);number(raw,h.after_instruction);
+      number(raw,h.packed_actions());number(raw,h.jump_on_true);number(raw,h.jump_on_false);}}
   RegionResult result;
   Node decoded{"decoded-region",v.decoder,{{"guest_ranges_sha256",digest(raw)}},{}};
   // The range boundary is the analysis output contract: title/DB identity is
@@ -215,11 +235,14 @@ RegionResult compile_region(const Store& store,const Versions& v,cpu::GuestAddre
   Node ir{"ir",v.ir,{{"cpu_semantics",v.semantics},{"producer_build",producer_identity("ir")}},{analysis.key()}};
   result.nodes={decoded,analysis,ir};
   if(auto cached=store.lookup(ir);cached && deserialize_ir(cached->bytes,result.compiled.function)) {result.compiled.ok=true;result.ir_hit=true;return result;}
-  result.compiled=cpu::StaticFunctionCompiler{}.compile_ranges(entry,ranges);
-  if(result.compiled.ok){
-    (void)store.publish(decoded,raw);(void)store.publish(analysis,raw);
-    (void)store.publish(ir,serialize_ir(result.compiled.function));
-  }
+  result.compiled=cpu::StaticFunctionCompiler{}.compile_ranges(entry,ranges,extra_leaders,hooks);
+  // Only the IR is stored. The decoded and analysis nodes are identities: the
+  // IR's key depends on theirs, and compilation-graph.json records them, but
+  // nothing ever looks them up, and their payload would be the guest words
+  // again. Storing them doubled the cache's file traffic (a staging
+  // directory, two files, a read-back and a rename each) for nothing: with
+  // ~19,000 functions that was minutes of filesystem work.
+  if(result.compiled.ok) (void)store.publish(ir,serialize_ir(result.compiled.function));
   return result;
 }
 } // namespace xenon::recomp::graph

@@ -23,7 +23,7 @@ class VerifyInstallTests(unittest.TestCase):
         (licenses / "LICENSE").write_text("MIT")
         (licenses / "THIRD_PARTY_NOTICES.md").write_text("notices")
         (licenses / "THIRD_PARTY_SOURCE_OFFER.md").write_text("source offer")
-        for name in ("xenia-ffmpeg", "dxc", "vulkan-loader", "vulkan-headers", "sdl2", "qt6"):
+        for name in ("xenia-ffmpeg", "dxc", "vulkan-loader", "vulkan-headers", "sdl3", "qt6"):
             directory = licenses / name
             directory.mkdir(parents=True)
             (directory / "LICENSE.txt").write_text(name)

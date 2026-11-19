@@ -8,6 +8,8 @@
 #include <cstring>
 #include <cmath>
 #include <deque>
+#include <filesystem>
+#include <fstream>
 #include <variant>
 #include <span>
 #include <unordered_set>
@@ -15,6 +17,7 @@
 
 #include "xenon/gpu/vulkan/command_queue.hpp"
 #include "xenon/gpu/vulkan/depth_target.hpp"
+#include "xenon/gpu/depth_format.hpp"
 #include "xenon/gpu/vulkan/edram_transfer.hpp"
 #include "xenon/gpu/vulkan/gpu_resolve.hpp"
 #include "xenon/gpu/vulkan/guest_memory_mirror.hpp"
@@ -61,7 +64,12 @@ struct BackendApi {
   }
   // VK_CULL_MODE_FRONT_AND_BACK is native.
   static constexpr bool kEmulatesFrontAndBackCull = false;
+  // VK_BLEND_FACTOR_CONSTANT_ALPHA is native.
+  static constexpr bool kSharedBlendFactorConstant = false;
   static constexpr bool kSupportsDirectColorTransfer = true;
+  static constexpr bool kSupportsDirectDepthTransfer = true;
+  static constexpr bool kSupportsCanonicalGpuLoad = true;
+  static constexpr bool kSupportsCanonicalGpuStore = true;
 #ifdef XENON_HAS_DXC
   static constexpr ShaderBinaryFormat kShaderBinaryFormat =
       ShaderBinaryFormat::Spirv;
@@ -76,17 +84,95 @@ class Backend::Impl : public detail::BackendCore<Backend::Impl, BackendApi> {
     // snapshots and upload arenas owned by this Impl. Drain them before member
     // destruction starts.
     (void)queue.wait_idle();
+    close_pipeline_cache();
+  }
+
+  // Persistent pipeline cache (GPU V3): pipelines this device built in
+  // earlier sessions are created from the driver's cached state instead of
+  // being compiled again (AC6's first Vulkan cutscene built 31 pipelines in
+  // 1.8 s). Saved next to the shader cache when the backend is destroyed.
+  VkPipelineCache pipeline_cache_handle{VK_NULL_HANDLE};
+  std::filesystem::path pipeline_cache_path{};
+  [[nodiscard]] VkPipelineCache native_pipeline_cache() const noexcept {
+    return pipeline_cache_handle;
+  }
+  void open_pipeline_cache(const std::filesystem::path& path) {
+    close_pipeline_cache();
+    pipeline_cache_path = path;
+    std::vector<char> data;
+    if (!path.empty()) {
+      std::ifstream file(path, std::ios::binary);
+      if (file) data.assign(std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>());
+    }
+    VkPipelineCacheCreateInfo info{VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO};
+    info.initialDataSize = data.size();
+    info.pInitialData = data.empty() ? nullptr : data.data();
+    // The driver checks the header (vendor, device, cache UUID) and ignores
+    // data from another device or driver; one that refuses it outright gets
+    // an empty cache instead.
+    if (vkCreatePipelineCache(context.device(), &info, nullptr, &pipeline_cache_handle) !=
+        VK_SUCCESS) {
+      info.initialDataSize = 0;
+      info.pInitialData = nullptr;
+      if (vkCreatePipelineCache(context.device(), &info, nullptr, &pipeline_cache_handle) !=
+          VK_SUCCESS)
+        pipeline_cache_handle = VK_NULL_HANDLE;
+    }
+  }
+  void close_pipeline_cache() noexcept {
+    if (!pipeline_cache_handle || !context.device()) return;
+    if (!pipeline_cache_path.empty()) {
+      std::size_t size = 0;
+      if (vkGetPipelineCacheData(context.device(), pipeline_cache_handle, &size, nullptr) ==
+              VK_SUCCESS &&
+          size) {
+        std::vector<char> data(size);
+        if (vkGetPipelineCacheData(context.device(), pipeline_cache_handle, &size, data.data()) ==
+            VK_SUCCESS) {
+          // Written beside, then renamed over: a crash mid-write leaves the
+          // previous cache whole.
+          std::error_code ignored;
+          std::filesystem::create_directories(pipeline_cache_path.parent_path(), ignored);
+          auto temporary = pipeline_cache_path;
+          temporary += ".tmp";
+          {
+            std::ofstream file(temporary, std::ios::binary | std::ios::trunc);
+            if (file) file.write(data.data(), static_cast<std::streamsize>(size));
+          }
+          std::filesystem::rename(temporary, pipeline_cache_path, ignored);
+        }
+      }
+    }
+    vkDestroyPipelineCache(context.device(), pipeline_cache_handle, nullptr);
+    pipeline_cache_handle = VK_NULL_HANDLE;
   }
   EdramColorTransfer edram_color_transfer{};
+  EdramDepthTransfer edram_depth_transfer{};
+  EdramCanonicalStore edram_canonical_store{};
   GpuResolver gpu_resolver{};
 
-  bool gpu_color_resolve(RenderTargetImage& owner, const GpuResolveConstants& constants) {
-    if (gpu_resolver.resolve(context.device(), queue, mirror, owner, constants)) return true;
+  bool gpu_color_resolve(RenderTargetImage& owner, const GpuResolvePlan& plan) {
+    if (gpu_resolver.resolve(context.device(), queue, mirror, owner, plan.constants,
+                             plan.range_address, plan.range_size))
+      return true;
     error = named(gpu_resolver.error());
     return false;
   }
   bool gpu_color_clear(RenderTargetImage& owner, const GpuClearConstants& constants) {
     if (gpu_resolver.clear(context.device(), queue, owner, constants)) return true;
+    error = named(gpu_resolver.error());
+    return false;
+  }
+  bool gpu_depth_resolve(DepthTargetImage& owner, const GpuResolvePlan& plan) {
+    if (gpu_resolver.resolve_depth(context.device(), queue, mirror, owner, plan.constants,
+                                   plan.range_address, plan.range_size))
+      return true;
+    error = named(gpu_resolver.error());
+    return false;
+  }
+  bool gpu_depth_clear(DepthTargetImage& owner, const GpuClearConstants& constants,
+                       std::uint8_t stencil) {
+    if (gpu_resolver.clear_depth(context.device(), queue, owner, constants, stencil)) return true;
     error = named(gpu_resolver.error());
     return false;
   }
@@ -121,6 +207,96 @@ class Backend::Impl : public detail::BackendCore<Backend::Impl, BackendApi> {
     error = named(edram_color_transfer.error());
     return false;
   }
+  bool transfer_depth_tiles(DepthTargetImage& source, DepthTargetImage& destination,
+                            const EdramTransferConstants& constants,
+                            std::span<const EdramSurfaceRegion> regions) {
+    if (edram_depth_transfer.transfer(context.device(), context.physical_device(), queue,
+                                      source, destination, constants, regions))
+      return true;
+    error = named(edram_depth_transfer.error());
+    return false;
+  }
+  template <typename Source>
+  bool convert_color_tiles(Source& source, RenderTargetImage& destination,
+                           const EdramTransferConstants& constants,
+                           std::span<const EdramSurfaceRegion> regions) {
+    if (edram_color_transfer.convert(context.device(), queue, source, destination, constants,
+                                     regions))
+      return true;
+    error = named(edram_color_transfer.error());
+    return false;
+  }
+  template <typename Source>
+  bool convert_depth_tiles(Source& source, DepthTargetImage& destination,
+                           const EdramTransferConstants& constants,
+                           std::span<const EdramSurfaceRegion> regions) {
+    if (edram_depth_transfer.convert(context.device(), context.physical_device(), queue, source,
+                                     destination, constants, regions))
+      return true;
+    error = named(edram_depth_transfer.error());
+    return false;
+  }
+
+  // Canonical EDRAM loads on the GPU: `tiles` uploaded from the CPU store,
+  // then unpacked into the image (BackendCore::canonical_to_color()).
+  bool load_canonical_color(RenderTargetImage& image, const Edram& edram,
+                            std::span<const std::uint16_t> tiles,
+                            const EdramTransferConstants& constants,
+                            std::span<const EdramSurfaceRegion> regions) {
+    if (!edram_canonical_store.upload(context.physical_device(), context.device(), queue, edram,
+                                      tiles)) {
+      error = named(edram_canonical_store.error());
+      return false;
+    }
+    if (edram_color_transfer.load_canonical(context.device(), queue,
+                                            edram_canonical_store.source(), image, constants,
+                                            regions))
+      return true;
+    error = named(edram_color_transfer.error());
+    return false;
+  }
+  bool load_canonical_depth(DepthTargetImage& image, const Edram& edram,
+                            std::span<const std::uint16_t> tiles,
+                            const EdramTransferConstants& constants,
+                            std::span<const EdramSurfaceRegion> regions) {
+    if (!edram_canonical_store.upload(context.physical_device(), context.device(), queue, edram,
+                                      tiles)) {
+      error = named(edram_canonical_store.error());
+      return false;
+    }
+    if (edram_depth_transfer.load_canonical(context.device(), context.physical_device(), queue,
+                                            edram_canonical_store.source(), image, constants,
+                                            regions))
+      return true;
+    error = named(edram_depth_transfer.error());
+    return false;
+  }
+
+  // Ownership flushes on the GPU: the image's regions packed into canonical
+  // EDRAM by a compute pass, the tiles read back into the CPU store
+  // (BackendCore::color_to_canonical()).
+  template <typename Image>
+  bool store_canonical(Image& image, Edram& canonical, std::span<const std::uint16_t> tiles,
+                       const EdramTransferConstants& constants,
+                       std::span<const EdramSurfaceRegion> regions) {
+    if (edram_canonical_store.flush(context.physical_device(), context.device(), queue, image,
+                                    constants, regions, tiles, canonical))
+      return true;
+    error = named(edram_canonical_store.error());
+    return false;
+  }
+  bool store_canonical_color(RenderTargetImage& image, Edram& canonical,
+                             std::span<const std::uint16_t> tiles,
+                             const EdramTransferConstants& constants,
+                             std::span<const EdramSurfaceRegion> regions) {
+    return store_canonical(image, canonical, tiles, constants, regions);
+  }
+  bool store_canonical_depth(DepthTargetImage& image, Edram& canonical,
+                             std::span<const std::uint16_t> tiles,
+                             const EdramTransferConstants& constants,
+                             std::span<const EdramSurfaceRegion> regions) {
+    return store_canonical(image, canonical, tiles, constants, regions);
+  }
 
   bool create_render_target(RenderTargetImage& image,
                             const EdramSurfaceLayout& surface,
@@ -142,20 +318,48 @@ class Backend::Impl : public detail::BackendCore<Backend::Impl, BackendApi> {
     return image.initialize(context.physical_device(), context.device(),
                             surface, format);
   }
-  bool create_texture(TextureImage& image, const DecodedTexture& decoded) {
-    const bool initialized = image.initialize(
-        context.physical_device(), context.device(), queue, decoded);
-    // Fold in regardless of overall success/failure: a texture can
-    // successfully bind while its sampler still substituted an
-    // unsupported clamp mode.
-    unsupported.unsupported_sampler_behaviors +=
-        image.unsupported_sampler_behaviors();
-    return initialized;
+  GpuTextureLoader texture_loader{};
+  // Loads `layout` into `image` on the GPU, from `capture` (a sync-point copy
+  // of guest memory at `capture_base`) or, when that is empty, from the
+  // guest-memory mirror. A new or differently shaped image is created first.
+  bool load_texture(TextureImage& image, const TextureLayout& layout,
+                    std::span<const std::byte> capture, std::uint32_t capture_base) {
+    if (!image.matches(layout)) {
+      const bool created = image.create(context.physical_device(), context.device(), layout);
+      if (!created) {
+        error = named(image.error());
+        return false;
+      }
+    }
+    const bool loaded =
+        capture.empty()
+            ? texture_loader.load_from_mirror(context.physical_device(), context.device(), queue,
+                                              mirror, image, layout)
+            : texture_loader.load_from_bytes(context.physical_device(), context.device(), queue,
+                                             image, layout, capture, capture_base);
+    if (!loaded) error = named(texture_loader.error());
+    return loaded;
   }
+  // A texture mod's texels, uploaded once and waited for (the first draw
+  // that samples it waits one copy).
+  bool create_replacement_texture(TextureImage& image, const DecodedTexture& texture) {
+    return image.initialize(context.physical_device(), context.device(), queue, texture);
+  }
+  // The sampler is made from the state the draw binds (the fetch constant
+  // with the shader's filter overrides), as on D3D12.
+  SamplerCache samplers{};
   bool bind_texture(std::uint32_t slot, const TextureDescriptor& descriptor,
                     TextureImage& image) {
-    return resources.bind_texture(slot, descriptor.dimension, image.view(),
-                                  image.sampler());
+    const auto unsupported_before = samplers.unsupported_sampler_behaviors();
+    const auto sampler = samplers.get(descriptor);
+    // A sampler can be made while substituting an unsupported clamp mode.
+    unsupported.unsupported_sampler_behaviors +=
+        samplers.unsupported_sampler_behaviors() - unsupported_before;
+    if (!sampler) {
+      error = named(samplers.error());
+      return false;
+    }
+    return resources.bind_texture(slot, descriptor.dimension, image.view(), sampler);
   }
   VkPipelineLayout pipeline_root() { return resources.pipeline_layout(); }
   std::uint32_t color_render_width(const DrawResourceState& state,
@@ -177,123 +381,221 @@ class Backend::Impl : public detail::BackendCore<Backend::Impl, BackendApi> {
   }
   std::uint64_t pipeline_cache_misses() const { return pipelines.size(); }
   void add_backend_unsupported_counters(GpuUnsupportedCounters&) const {}
+  // GPU V3 draw recording (see the D3D12 backend, whose model this shares).
+  // A draw is prepared here, in order, into a PreparedDraw that refers to
+  // nothing mutable: its descriptor set and constants offset, its uploaded
+  // indices, its attachments; image transitions and mirror barriers it needs
+  // are recorded as ordered work before it. Consecutive draws on the same
+  // attachments form a run, recorded as one rendering instance by
+  // record_prepared_run() - rather than one rendering instance per draw,
+  // each loading and storing every attachment - into the primary segment, or
+  // on a recording worker when the run is long.
+  struct PreparedDraw {
+    VkPipeline pipeline{VK_NULL_HANDLE};
+    VkPipelineLayout layout{VK_NULL_HANDLE};
+    VkDescriptorSet set{VK_NULL_HANDLE};
+    std::uint32_t constants_offset{};
+    bool indexed{};
+    VkBuffer index_buffer{VK_NULL_HANDLE};
+    VkDeviceSize index_offset{};
+    std::uint32_t element_count{};
+    std::array<VkImageView, 4> colors{};
+    std::uint32_t color_count{};
+    VkImageView depth{VK_NULL_HANDLE};
+    std::uint32_t width{};
+    std::uint32_t height{};
+    VkViewport viewport{};
+    VkRect2D scissor{};
+    std::array<float, 4> blend_constants{};
+    bool stencil{};
+    std::array<std::uint32_t, 3> stencil_front{};  // compare mask, write mask, reference
+    std::array<std::uint32_t, 3> stencil_back{};
+
+    [[nodiscard]] bool same_attachments(const PreparedDraw& other) const noexcept {
+      return colors == other.colors && color_count == other.color_count &&
+             depth == other.depth && width == other.width && height == other.height;
+    }
+  };
+  std::vector<PreparedDraw> open_run{};
+  std::uint32_t parallel_run_draws{8};
+
   bool record_draw(const DrawRecording& draw, bool& record_failed) {
-    return queue.execute_async([&](VkCommandBuffer command_buffer,
-                                   std::uint32_t frame_index,
-                                   std::uint32_t draw_slot) {
-      resources.prepare_draw(frame_index, draw_slot);
-      const auto descriptor_set =
-          resources.descriptor_set(frame_index, draw_slot);
-      std::size_t index_offset = 0;
-      if (!upload_draw_indices(draw, frame_index, draw_slot, index_offset)) {
-        record_failed = true;
-        return;
-      }
-      mirror.prepare_shader_access(command_buffer, draw.memexport_writable);
-      for (std::size_t i = 0; i < draw.color_count; ++i)
-        if (draw.targets[i])
-          draw.targets[i]->transition_to_color_attachment(command_buffer);
-      if (draw.depth)
-        draw.depth->transition_to_depth_attachment(command_buffer);
-      std::array<VkRenderingAttachmentInfo, 4> attachments{};
-      for (std::size_t i = 0; i < draw.color_count; ++i) {
-        attachments[i].sType =
-            VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
-        if (draw.targets[i]) {
-          attachments[i].imageView = draw.targets[i]->view();
-          attachments[i].imageLayout =
-              VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-          attachments[i].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
-          attachments[i].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-        } else {
-          attachments[i].imageView = VK_NULL_HANDLE;
-          attachments[i].imageLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-          attachments[i].loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-          attachments[i].storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-        }
-      }
-      VkRenderingInfo rendering{VK_STRUCTURE_TYPE_RENDERING_INFO};
-      rendering.renderArea.extent = {draw.render_width, draw.render_height};
-      rendering.layerCount = 1;
-      rendering.colorAttachmentCount =
-          static_cast<std::uint32_t>(draw.color_count);
-      rendering.pColorAttachments =
-          draw.color_count ? attachments.data() : nullptr;
-      VkRenderingAttachmentInfo depth_attachment{
-          VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
-      if (draw.depth) {
-        depth_attachment.imageView = draw.depth->view();
-        depth_attachment.imageLayout =
-            VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
-        depth_attachment.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
-        depth_attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-        rendering.pDepthAttachment = &depth_attachment;
-        rendering.pStencilAttachment = &depth_attachment;
-      }
-      vkCmdBeginRendering(command_buffer, &rendering);
-      vkCmdBindPipeline(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                        draw.pipeline.pipeline());
-      vkCmdBindDescriptorSets(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                              resources.pipeline_layout(), 0, 1,
-                              &descriptor_set, 0, nullptr);
-      const auto& guest_viewport = draw.state.raster.viewport;
-      const bool has_viewport = std::abs(guest_viewport.x_scale) > 0.0001f &&
-                                std::abs(guest_viewport.y_scale) > 0.0001f;
-      const auto depth_a = (std::clamp)(guest_viewport.z_offset, 0.0f, 1.0f);
-      const auto depth_b = (std::clamp)(
-          guest_viewport.z_offset + guest_viewport.z_scale, 0.0f, 1.0f);
-      const VkViewport viewport = has_viewport
-          ? VkViewport{guest_viewport.x_offset - guest_viewport.x_scale,
-                       guest_viewport.y_offset - guest_viewport.y_scale,
-                       guest_viewport.x_scale * 2.0f,
-                       guest_viewport.y_scale * 2.0f,
-                       (std::min)(depth_a, depth_b), (std::max)(depth_a, depth_b)}
-          : VkViewport{0.0f, 0.0f, float(draw.render_width),
-                       float(draw.render_height), 0.0f, 1.0f};
-      const VkRect2D scissor{{draw.scissor_left, draw.scissor_top},
-                             {static_cast<std::uint32_t>(draw.scissor_right - draw.scissor_left),
-                              static_cast<std::uint32_t>(draw.scissor_bottom - draw.scissor_top)}};
-      vkCmdSetViewport(command_buffer, 0, 1, &viewport);
-      vkCmdSetScissor(command_buffer, 0, 1, &scissor);
-      vkCmdSetBlendConstants(command_buffer, draw.state.blend_constant.data());
-      if (draw.depth && draw.state.depth_target.stencil_enabled) {
-        vkCmdSetStencilCompareMask(
-            command_buffer, VK_STENCIL_FACE_FRONT_BIT,
-            draw.state.depth_target.stencil_read_mask);
-        vkCmdSetStencilWriteMask(
-            command_buffer, VK_STENCIL_FACE_FRONT_BIT,
-            draw.state.depth_target.stencil_write_mask);
-        vkCmdSetStencilReference(
-            command_buffer, VK_STENCIL_FACE_FRONT_BIT,
-            draw.state.depth_target.stencil_reference);
-        const auto back_read = draw.state.depth_target.backface_stencil_enabled
-                                   ? draw.state.depth_target.stencil_back_read_mask
-                                   : draw.state.depth_target.stencil_read_mask;
-        const auto back_write = draw.state.depth_target.backface_stencil_enabled
-                                    ? draw.state.depth_target.stencil_back_write_mask
-                                    : draw.state.depth_target.stencil_write_mask;
-        const auto back_reference = draw.state.depth_target.backface_stencil_enabled
-                                        ? draw.state.depth_target.stencil_back_reference
-                                        : draw.state.depth_target.stencil_reference;
-        vkCmdSetStencilCompareMask(command_buffer,
-                                   VK_STENCIL_FACE_BACK_BIT, back_read);
-        vkCmdSetStencilWriteMask(command_buffer,
-                                 VK_STENCIL_FACE_BACK_BIT, back_write);
-        vkCmdSetStencilReference(command_buffer,
-                                 VK_STENCIL_FACE_BACK_BIT, back_reference);
-      }
-      if (draw.batch.indexed) {
-        vkCmdBindIndexBuffer(
-            command_buffer, transient_uploads[frame_index].buffer(),
-            static_cast<VkDeviceSize>(index_offset), VK_INDEX_TYPE_UINT32);
-        vkCmdDrawIndexed(command_buffer,
-                         static_cast<std::uint32_t>(draw.batch.indices.size()),
-                         1, 0, 0, 0);
+    // Attachments not in their attachment layouts, and the guest-memory
+    // mirror's barrier, are ordered work before the draw (each ends the open
+    // run: no barrier is recorded inside a rendering instance).
+    bool transition = draw.depth && draw.depth->layout() != VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+    for (std::size_t i = 0; i < draw.color_count; ++i)
+      transition |= draw.targets[i] &&
+                    draw.targets[i]->layout() != VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    const bool mirror_barrier = mirror.needs_shader_access_barrier(draw.memexport_writable);
+    if (transition || mirror_barrier) {
+      if (!queue.execute_async([&](VkCommandBuffer command, std::uint32_t, std::uint32_t) {
+            if (mirror_barrier) mirror.prepare_shader_access(command, draw.memexport_writable);
+            for (std::size_t i = 0; i < draw.color_count; ++i)
+              if (draw.targets[i]) draw.targets[i]->transition_to_color_attachment(command);
+            if (draw.depth) draw.depth->transition_to_depth_attachment(command);
+          }))
+        return false;
+    }
+    if (!mirror_barrier) mirror.note_shader_access(draw.memexport_writable);
+
+    PreparedDraw prepared{};
+    prepared.color_count = static_cast<std::uint32_t>(draw.color_count);
+    for (std::size_t i = 0; i < draw.color_count; ++i)
+      prepared.colors[i] = draw.targets[i] ? draw.targets[i]->view() : VK_NULL_HANDLE;
+    prepared.depth = draw.depth ? draw.depth->view() : VK_NULL_HANDLE;
+    prepared.width = draw.render_width;
+    prepared.height = draw.render_height;
+    // A run is one rendering instance: a draw on other attachments ends it.
+    if (!open_run.empty() && !open_run.back().same_attachments(prepared)) close_draw_run();
+
+    std::uint32_t frame_index = 0;
+    std::uint32_t draw_slot = 0;
+    if (!queue.reserve_slot(frame_index, draw_slot)) return false;
+    const auto binding = resources.prepare_draw(frame_index, draw_slot);
+    std::size_t index_offset = 0;
+    bool resident_index = false;
+    if (!upload_draw_indices(draw, frame_index, index_offset, resident_index)) {
+      record_failed = true;
+      return true;
+    }
+    prepared.pipeline = draw.pipeline.pipeline();
+    prepared.layout = resources.pipeline_layout();
+    prepared.set = binding.set;
+    prepared.constants_offset = binding.constants_offset;
+    prepared.indexed = draw.batch.indexed;
+    if (draw.batch.indexed) {
+      prepared.index_buffer = resident_index ? resident_indices.buffer()
+                                             : transient_uploads[frame_index].buffer();
+      prepared.index_offset = static_cast<VkDeviceSize>(index_offset);
+      prepared.element_count = static_cast<std::uint32_t>(draw.batch.indices.size());
+    } else {
+      prepared.element_count = draw.batch.vertex_count;
+    }
+    // The guest X/Y viewport transform runs in the vertex shader; the host
+    // viewport is the whole render target, flipped so NDC Y points up as
+    // in Direct3D. Its depth range is the host depth transform's, which
+    // the vertex shader's Z part keeps ordered.
+    // A D24FS8 target holds half the guest depth on the host (see
+    // host_viewport_depth), so its draws use the halved range too.
+    const auto depth_format = draw.depth && draw.depth->requires_float24_conversion()
+                                  ? DepthRenderTargetFormat::D24FS8
+                                  : DepthRenderTargetFormat::D24S8;
+    prepared.viewport = {0.0f, float(draw.render_height), float(draw.render_width),
+                         -float(draw.render_height),
+                         host_viewport_depth(depth_format, draw.z_min),
+                         host_viewport_depth(depth_format, draw.z_max)};
+    prepared.scissor = {{draw.scissor_left, draw.scissor_top},
+                        {static_cast<std::uint32_t>(draw.scissor_right - draw.scissor_left),
+                         static_cast<std::uint32_t>(draw.scissor_bottom - draw.scissor_top)}};
+    std::copy(draw.blend_constant.begin(), draw.blend_constant.end(),
+              prepared.blend_constants.begin());
+    const auto& depth_state = draw.state.depth_target;
+    prepared.stencil = draw.depth && depth_state.stencil_enabled;
+    prepared.stencil_front = {depth_state.stencil_read_mask, depth_state.stencil_write_mask,
+                              depth_state.stencil_reference};
+    prepared.stencil_back =
+        depth_state.backface_stencil_enabled
+            ? std::array<std::uint32_t, 3>{depth_state.stencil_back_read_mask,
+                                           depth_state.stencil_back_write_mask,
+                                           depth_state.stencil_back_reference}
+            : prepared.stencil_front;
+    open_run.push_back(prepared);
+    return true;
+  }
+
+  // Closes the open run (CommandQueue's before-ordered-work hook).
+  void close_draw_run() {
+    if (open_run.empty()) return;
+    auto run = std::move(open_run);
+    open_run.clear();
+    const bool parallel = run.size() >= parallel_run_draws;
+    if (!queue.record_run(
+            [run = std::move(run)](VkCommandBuffer command) { record_prepared_run(command, run); },
+            parallel) &&
+        error.empty())
+      error = named(queue.error());
+  }
+
+  // Records `run` - draws on the same attachments - as one rendering
+  // instance: API calls only, from the prepared values. Safe on any thread.
+  static void record_prepared_run(VkCommandBuffer command, const std::vector<PreparedDraw>& run) {
+    const auto& first = run.front();
+    // Earlier rendering instances (in this command buffer or one submitted
+    // before it) may have written these attachments: their loads here wait
+    // for those writes.
+    VkMemoryBarrier2 attachments{VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
+    attachments.srcStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT |
+                               VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT |
+                               VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT;
+    attachments.srcAccessMask =
+        VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+    attachments.dstStageMask = attachments.srcStageMask;
+    attachments.dstAccessMask =
+        VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT |
+        VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+    VkDependencyInfo dependency{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+    dependency.memoryBarrierCount = 1;
+    dependency.pMemoryBarriers = &attachments;
+    vkCmdPipelineBarrier2(command, &dependency);
+
+    std::array<VkRenderingAttachmentInfo, 4> colors{};
+    for (std::uint32_t i = 0; i < first.color_count; ++i) {
+      colors[i].sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+      if (first.colors[i]) {
+        colors[i].imageView = first.colors[i];
+        colors[i].imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        colors[i].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+        colors[i].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
       } else {
-        vkCmdDraw(command_buffer, draw.batch.vertex_count, 1, 0, 0);
+        colors[i].imageView = VK_NULL_HANDLE;
+        colors[i].imageLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        colors[i].loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+        colors[i].storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
       }
-      vkCmdEndRendering(command_buffer);
-    });
+    }
+    VkRenderingInfo rendering{VK_STRUCTURE_TYPE_RENDERING_INFO};
+    rendering.renderArea.extent = {first.width, first.height};
+    rendering.layerCount = 1;
+    rendering.colorAttachmentCount = first.color_count;
+    rendering.pColorAttachments = first.color_count ? colors.data() : nullptr;
+    VkRenderingAttachmentInfo depth{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
+    if (first.depth) {
+      depth.imageView = first.depth;
+      depth.imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+      depth.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+      depth.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+      rendering.pDepthAttachment = &depth;
+      rendering.pStencilAttachment = &depth;
+    }
+    vkCmdBeginRendering(command, &rendering);
+    VkPipeline bound_pipeline = VK_NULL_HANDLE;
+    for (const auto& draw : run) {
+      if (bound_pipeline != draw.pipeline) {
+        vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, draw.pipeline);
+        bound_pipeline = draw.pipeline;
+      }
+      vkCmdBindDescriptorSets(command, VK_PIPELINE_BIND_POINT_GRAPHICS, draw.layout, 0, 1,
+                              &draw.set, 1, &draw.constants_offset);
+      vkCmdSetViewport(command, 0, 1, &draw.viewport);
+      vkCmdSetScissor(command, 0, 1, &draw.scissor);
+      vkCmdSetBlendConstants(command, draw.blend_constants.data());
+      if (draw.stencil) {
+        vkCmdSetStencilCompareMask(command, VK_STENCIL_FACE_FRONT_BIT, draw.stencil_front[0]);
+        vkCmdSetStencilWriteMask(command, VK_STENCIL_FACE_FRONT_BIT, draw.stencil_front[1]);
+        vkCmdSetStencilReference(command, VK_STENCIL_FACE_FRONT_BIT, draw.stencil_front[2]);
+        vkCmdSetStencilCompareMask(command, VK_STENCIL_FACE_BACK_BIT, draw.stencil_back[0]);
+        vkCmdSetStencilWriteMask(command, VK_STENCIL_FACE_BACK_BIT, draw.stencil_back[1]);
+        vkCmdSetStencilReference(command, VK_STENCIL_FACE_BACK_BIT, draw.stencil_back[2]);
+      }
+      if (draw.indexed) {
+        vkCmdBindIndexBuffer(command, draw.index_buffer, draw.index_offset, VK_INDEX_TYPE_UINT32);
+        vkCmdDrawIndexed(command, draw.element_count, 1, 0, 0, 0);
+      } else {
+        vkCmdDraw(command, draw.element_count, 1, 0, 0);
+      }
+    }
+    vkCmdEndRendering(command);
   }
 };
 
@@ -316,6 +618,23 @@ bool Backend::initialize(const ContextConfig& config) {
     impl_->error = impl_->resources.error();
     return false;
   }
+  if (!impl_->samplers.initialize(impl_->context.physical_device(), impl_->context.device())) {
+    impl_->error = impl_->samplers.error();
+    return false;
+  }
+  // Guest shaders bind guest memory the way the device's descriptors allow.
+  impl_->guest_segments = impl_->resources.segmentation();
+  if (impl_->guest_segments.segmented())
+    logging::Logger::instance().log(
+        logging::Level::Info, "gpu",
+        "Vulkan storage buffers span less than guest memory: bound as " +
+            std::to_string(impl_->guest_segments.count) + " segments of " +
+            std::to_string(impl_->guest_segments.segment_bytes >> 20u) + " MiB");
+  // Ordered work and submissions close the open draw run first.
+  impl_->queue.set_before_ordered_work([impl = impl_.get()] { impl->close_draw_run(); });
+  // GPU timestamps around every batch, where the queue supports them.
+  static_cast<void>(impl_->queue.enable_timestamps(impl_->context.physical_device()));
+  impl_->open_pipeline_cache({});
   for (std::uint32_t i = 0; i < CommandQueue::kFrameCount; ++i) {
     if (!impl_->transient_uploads[i].initialize(
             impl_->context.physical_device(), impl_->context.device(),
@@ -327,11 +646,27 @@ bool Backend::initialize(const ContextConfig& config) {
       return false;
     }
   }
+  if (!impl_->resident_indices.initialize(
+          impl_->context.physical_device(), impl_->context.device(), Impl::kResidentIndexBytes,
+          VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
+          VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) ||
+      !impl_->resident_indices.map(impl_->resident_index_mapping)) {
+    impl_->error = impl_->resident_indices.error();
+    return false;
+  }
+  impl_->attach_resident_indices();
+  // Before any guest depth is written: every D24 write path then stores the
+  // guest's exact codes on this device.
+  if (!impl_->calibrate_depth_writes()) return false;
   impl_->ready = true;
   return true;
 }
 VkInstance Backend::instance() const noexcept {
   return impl_ ? impl_->context.instance() : VK_NULL_HANDLE;
+}
+
+std::optional<Unorm24DepthCalibration> Backend::unorm24_depth_calibration() const {
+  return impl_ ? impl_->unorm24_depth_calibration : std::nullopt;
 }
 
 bool Backend::configure_presentation(VkSurfaceKHR surface,
@@ -353,6 +688,7 @@ void Backend::consume(const ir::Command& command) {
   impl_->consume(command);
 }
 void Backend::end_submission() { impl_->end_submission(); }
+void Backend::end_submission_deferred() { impl_->end_submission(false); }
 bool Backend::make_guest_memory_cpu_visible(std::uint32_t physical_address,
                                             std::uint32_t size) {
   return impl_->make_guest_memory_cpu_visible(physical_address, size);
@@ -366,6 +702,47 @@ bool Backend::make_edram_canonical() {
 
 bool Backend::invalidate_edram_native_state() {
   return impl_->invalidate_edram_native_state();
+}
+
+void Backend::sync_guest_reads() { impl_->sync_guest_reads(); }
+void Backend::prefetch_shaders(std::span<const ir::Command> commands) {
+  if (impl_) impl_->prefetch_shaders(commands);
+}
+void Backend::end_guest_read_sync() { impl_->end_guest_read_sync(); }
+bool Backend::publish_gpu_writes(bool wait) { return impl_->publish_gpu_writes(wait); }
+void Backend::set_resolve_readback(ResolveReadback policy) { impl_->resolve_readback = policy; }
+void Backend::set_gpu_canonical_edram_flushes(bool enabled) noexcept {
+  if (impl_) impl_->gpu_canonical_flushes = enabled;
+}
+
+bool Backend::set_parallel_recording(unsigned threads, std::uint32_t min_run_draws) {
+  if (!impl_ || !impl_->queue.set_recording_threads(threads)) return false;
+  impl_->parallel_run_draws = (std::max)(1u, min_run_draws);
+  return true;
+}
+
+std::uint64_t Backend::parallel_runs_recorded() const noexcept {
+  return impl_ ? impl_->queue.parallel_runs() : 0u;
+}
+
+Backend::GpuTiming Backend::gpu_timing() {
+  if (!impl_ || !impl_->queue.wait_idle()) return {};
+  impl_->queue.collect_timestamps();
+  return {impl_->queue.timed_batches(), impl_->queue.timed_gpu_ns()};
+}
+
+Backend::ShaderPrefetchStatistics Backend::shader_prefetch_statistics() const noexcept {
+  if (!impl_) return {};
+  return {impl_->prefetched_variants, impl_->prefetched_variant_hits,
+          impl_->variants_compiled_at_draw};
+}
+
+void Backend::set_shader_cache_directory(const std::string& directory) {
+  impl_->shader_cache.set_disk_directory(directory);
+  if (impl_->ready)
+    impl_->open_pipeline_cache(directory.empty()
+                                   ? std::filesystem::path{}
+                                   : std::filesystem::path(directory) / "vulkan_pipelines.bin");
 }
 
 bool Backend::capture_scanout(const PresentationFrame& frame, std::uint32_t width,
@@ -386,6 +763,14 @@ bool Backend::presentation_ready() const noexcept {
 }
 GpuPerformanceCounters Backend::performance_counters() const noexcept {
   return impl_->performance_counters();
+}
+
+std::vector<GpuFailureReason> Backend::failure_reasons() const {
+  return impl_->failure_log.reasons();
+}
+
+std::vector<GpuResolveKind> Backend::resolve_census() const {
+  return impl_->resolve_census.kinds();
 }
 
 GpuUnsupportedCounters Backend::unsupported_counters() const noexcept {
@@ -412,6 +797,12 @@ std::size_t Backend::realized_texture_count() const noexcept {
 }
 std::size_t Backend::realized_render_target_count() const noexcept {
   return impl_->render_targets.size();
+}
+std::uint32_t Backend::tallest_render_target_rows() const noexcept {
+  std::uint32_t rows = 0;
+  for (const auto& [key, image] : impl_->render_targets)
+    if (image) rows = (std::max)(rows, image->height());
+  return rows;
 }
 const DeviceProperties& Backend::device_properties() const noexcept {
   return impl_->context.properties();

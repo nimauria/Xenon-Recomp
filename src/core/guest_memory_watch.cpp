@@ -1,6 +1,7 @@
 #include "xenon/core/guest_memory_watch.hpp"
 
 #include <algorithm>
+#include <charconv>
 #include <iomanip>
 #include <sstream>
 
@@ -16,20 +17,81 @@ std::string_view watch_phase_name(WatchPhase phase) noexcept {
   return "unknown";
 }
 
-GuestMemoryWatch::GuestMemoryWatch(std::vector<cpu::GuestAddress> addresses,
-                                   std::size_t capacity) {
-  configure(std::move(addresses), capacity);
+namespace {
+
+std::optional<std::uint32_t> parse_word(std::string_view text) {
+  while (!text.empty() && (text.front() == ' ' || text.front() == '\t')) text.remove_prefix(1);
+  while (!text.empty() && (text.back() == ' ' || text.back() == '\t')) text.remove_suffix(1);
+  int base = 10;
+  if (text.size() > 2u && text[0] == '0' && (text[1] == 'x' || text[1] == 'X')) {
+    base = 16;
+    text.remove_prefix(2);
+  }
+  if (text.empty()) return std::nullopt;
+  std::uint32_t value{};
+  const auto* end = text.data() + text.size();
+  const auto [ptr, error] = std::from_chars(text.data(), end, value, base);
+  if (error != std::errc{} || ptr != end) return std::nullopt;
+  return value;
 }
 
-void GuestMemoryWatch::configure(std::vector<cpu::GuestAddress> addresses,
-                                 std::size_t capacity) {
-  std::sort(addresses.begin(), addresses.end());
-  addresses.erase(std::unique(addresses.begin(), addresses.end()), addresses.end());
+void append_hex(std::ostringstream& out, std::uint32_t value) {
+  out << "0x" << std::hex << std::uppercase << value << std::dec;
+}
+
+// The word a target names: the plain word, or the end of its pointer chain.
+std::optional<std::uint32_t> resolve(const WatchTarget& target,
+                                     const GuestMemoryWatch::Reader& reader) {
+  auto value = reader(target.address);
+  for (const auto offset : target.offsets) {
+    if (!value || *value == 0u) return std::nullopt;
+    value = reader(*value + offset);
+  }
+  return value;
+}
+
+}  // namespace
+
+std::optional<WatchTarget> parse_watch_target(std::string_view text) {
+  WatchTarget target;
+  bool first = true;
+  while (true) {
+    const auto arrow = text.find("->");
+    const auto part = parse_word(text.substr(0, arrow));
+    if (!part) return std::nullopt;
+    if (first) {
+      target.address = *part;
+      first = false;
+    } else {
+      target.offsets.push_back(*part);
+    }
+    if (arrow == std::string_view::npos) return target;
+    text.remove_prefix(arrow + 2u);
+  }
+}
+
+std::string format_watch_target(const WatchTarget& target) {
+  std::ostringstream out;
+  append_hex(out, target.address);
+  for (const auto offset : target.offsets) {
+    out << "->";
+    append_hex(out, offset);
+  }
+  return out.str();
+}
+
+GuestMemoryWatch::GuestMemoryWatch(std::vector<WatchTarget> targets, std::size_t capacity) {
+  configure(std::move(targets), capacity);
+}
+
+void GuestMemoryWatch::configure(std::vector<WatchTarget> targets, std::size_t capacity) {
+  std::sort(targets.begin(), targets.end());
+  targets.erase(std::unique(targets.begin(), targets.end()), targets.end());
 
   std::scoped_lock lock(mutex_);
   slots_.clear();
-  slots_.reserve(addresses.size());
-  for (const auto address : addresses) slots_.push_back(Slot{address, false, std::nullopt});
+  slots_.reserve(targets.size());
+  for (auto& target : targets) slots_.push_back(Slot{std::move(target), false, std::nullopt});
   capacity_ = std::max<std::size_t>(capacity, 1u);
   ring_.clear();
   ring_.reserve(std::min<std::size_t>(capacity_, 256u));
@@ -41,11 +103,11 @@ void GuestMemoryWatch::configure(std::vector<cpu::GuestAddress> addresses,
   active_.store(!slots_.empty(), std::memory_order_relaxed);
 }
 
-std::vector<cpu::GuestAddress> GuestMemoryWatch::addresses() const {
+std::vector<WatchTarget> GuestMemoryWatch::targets() const {
   std::scoped_lock lock(mutex_);
-  std::vector<cpu::GuestAddress> result;
+  std::vector<WatchTarget> result;
   result.reserve(slots_.size());
-  for (const auto& slot : slots_) result.push_back(slot.address);
+  for (const auto& slot : slots_) result.push_back(slot.target);
   return result;
 }
 
@@ -55,19 +117,19 @@ std::vector<WatchRecord> GuestMemoryWatch::sample(const Reader& reader,
   if (!active()) return added;
 
   // Read outside the lock: guest memory reads may fault-check and are the slow part.
-  std::vector<cpu::GuestAddress> targets;
+  std::vector<WatchTarget> targets;
   {
     std::scoped_lock lock(mutex_);
     targets.reserve(slots_.size());
-    for (const auto& slot : slots_) targets.push_back(slot.address);
+    for (const auto& slot : slots_) targets.push_back(slot.target);
   }
   std::vector<std::optional<std::uint32_t>> values;
   values.reserve(targets.size());
-  for (const auto address : targets) values.push_back(reader(address));
+  for (const auto& target : targets) values.push_back(resolve(target, reader));
 
   const auto differs = [&](std::size_t i) {
     const auto& slot = slots_[i];
-    if (slot.address != targets[i]) return false;
+    if (slot.target != targets[i]) return false;
     if (slot.seen && slot.value == values[i]) return false;
     return slot.seen || values[i].has_value();
   };
@@ -92,7 +154,7 @@ std::vector<WatchRecord> GuestMemoryWatch::sample(const Reader& reader,
       std::chrono::duration_cast<std::chrono::microseconds>(now - epoch_).count();
   for (std::size_t i = 0; i < targets.size() && i < slots_.size(); ++i) {
     auto& slot = slots_[i];
-    if (slot.address != targets[i]) continue;  // reconfigured while reading
+    if (slot.target != targets[i]) continue;  // reconfigured while reading
     const auto& value = values[i];
     if (slot.seen && slot.value == value) continue;
     // An address that is not yet readable has no baseline: the first readable value
@@ -102,7 +164,8 @@ std::vector<WatchRecord> GuestMemoryWatch::sample(const Reader& reader,
     WatchRecord record{};
     record.sequence = next_sequence_++;
     record.microseconds = micros;
-    record.address = slot.address;
+    record.address = slot.target.address;
+    record.offsets = slot.target.offsets;
     record.old_value = slot.value;
     record.new_value = value;
     record.initial = !slot.seen;
@@ -145,10 +208,10 @@ std::uint64_t GuestMemoryWatch::total_changes() const {
   return total_changes_;
 }
 
-std::optional<std::uint32_t> GuestMemoryWatch::last_value(cpu::GuestAddress address) const {
+std::optional<std::uint32_t> GuestMemoryWatch::last_value(const WatchTarget& target) const {
   std::scoped_lock lock(mutex_);
   for (const auto& slot : slots_) {
-    if (slot.address == address) return slot.value;
+    if (slot.target == target) return slot.value;
   }
   return std::nullopt;
 }
@@ -163,8 +226,8 @@ std::string GuestMemoryWatch::format(const WatchRecord& record) {
           << std::dec << std::setfill(' ');
     }
   };
-  out << "watch #" << record.sequence << " +" << record.microseconds << "us 0x" << std::hex
-      << std::uppercase << record.address << std::dec << ' ';
+  out << "watch #" << record.sequence << " +" << record.microseconds << "us "
+      << format_watch_target(WatchTarget{record.address, record.offsets}) << ' ';
   if (record.initial) {
     out << "initial ";
     value_text(record.new_value);

@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <set>
 #include <span>
 
 #include "recomp/compilation/project_generation_internal.hpp"
@@ -49,6 +50,7 @@ EmittedFunctionSources emit_function_sources(
     const std::vector<const DiscoveredFunction*>& codegen_items,
     const AlternateEntriesByOwner& alternate_entries_by_owner,
     const std::unordered_map<GuestAddress, std::string>& direct_call_symbols,
+    std::span<const std::string> hook_symbols,
     const graph::Store& graph_store, const DriverOptions& options) {
   EmittedFunctionSources emitted;
   const auto worker_count = resolve_worker_count(options.codegen_jobs);
@@ -82,6 +84,15 @@ EmittedFunctionSources emit_function_sources(
       direct_calls.push_back({target, symbol_it->second});
       direct_call_key += std::to_string(target) + "=" + symbol_it->second + ";";
     }
+    // The routine names bound to this function's hook ordinals.
+    std::set<std::uint64_t> hook_ordinals;
+    for (const auto& block : function.ir.blocks)
+      for (const auto& instruction : block.instructions)
+        if (instruction.op == cpu::ir::Op::HostHook) hook_ordinals.insert(instruction.imm0);
+    std::string hook_key;
+    for (const auto ordinal : hook_ordinals)
+      hook_key += std::to_string(ordinal) + "=" +
+                  (ordinal < hook_symbols.size() ? hook_symbols[ordinal] : std::string("?")) + ";";
     // Exact canonical IR, emitted symbol and aliases are all backend inputs.
     // Whole-image configuration/knowledge identity is intentionally absent.
     graph::Node node{"source", options.graph_versions.codegen,
@@ -90,6 +101,8 @@ EmittedFunctionSources emit_function_sources(
          {"direct_calls", direct_call_key},
          {"producer_build", graph::producer_identity("source")},
          {"cpu_semantics", options.graph_versions.semantics}}, {}};
+    // Absent without hooks, so hook-free functions keep their keys.
+    if (!hook_key.empty()) node.inputs.emplace("hooks", hook_key);
     // Output-based dependency permits cutoff when analysis changes but IR does not.
     node.dependencies.push_back(graph::digest(graph::serialize_ir(function.ir)));
     source_nodes[i] = node;
@@ -98,7 +111,7 @@ EmittedFunctionSources emit_function_sources(
     if (cached) { function_source = std::move(cached->bytes); source_hits[i] = 1; }
     else {
       function_source = backend.emit_translation_unit(function.ir, function.name, direct_calls,
-                                                      alternate_entries);
+                                                      alternate_entries, hook_symbols);
       (void)graph_store.publish(node, function_source);
     }
     function_sources[i] = std::move(function_source);

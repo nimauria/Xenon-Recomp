@@ -1,7 +1,7 @@
 #pragma once
 #include "state_file.hpp"
 namespace xenon::launcher_next {
-void validate_setting(const std::string &key, const Json &value);
+void validate_setting(const std::string &key, const Json &value, bool presence_available = false);
 Json profile_runtime_values(const Json &values, const Json &global, bool freeze_defaults = false);
 Json effective_profile_settings(const Json &profile, const Json &global);
 void normalize_profile_preferences(Json &profile, const Json &global);

@@ -618,7 +618,7 @@ int main() {
   config.input_drivers = {"null"};
   // Must be true: audio exports (including XAudioGetUnderrunCount) are only
   // registered into export_registry_ when enable_audio is set - see
-  // XenonSession::init_exports(). This still needs (and gets, via SDL2) a
+  // XenonSession::init_exports(). This still needs (and gets, via SDL3) a
   // real host audio backend; init_audio() fails session init outright if
   // one cannot be created, matching normal Play semantics.
   config.enable_audio = true;

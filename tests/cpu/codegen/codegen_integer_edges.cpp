@@ -41,6 +41,8 @@ int main(int argc, char** argv) {
       {"edge_cmpw", "cmp", 0x6028u, (8u << 21) | (3u << 16) | (4u << 11)},
       // cmpl cr2,1,r3,r4: L=1 doubleword unsigned compare.
       {"edge_cmpld", "cmpl", 0x602Cu, (9u << 21) | (3u << 16) | (4u << 11)},
+      // addic. r5,r3,-1: record forms set CR0 from the low 32 bits.
+      {"edge_addic_record", "addicx", 0x6030u, (5u << 21) | (3u << 16) | 0xFFFFu},
   };
 
   std::ofstream out(argv[1]);

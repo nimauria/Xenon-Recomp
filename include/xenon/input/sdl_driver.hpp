@@ -13,7 +13,7 @@ namespace xenon::input {
 
 // SDL itself is deliberately hidden behind this host adapter. The controller
 // routing / Xbox mapping layer remains unit-testable without SDL installed.
-// SDL2 and SDL3 are interchangeable host adapters behind this interface.
+// The production host adapter is SDL3 (sdl3_host.cpp).
 struct SdlHostDevice {
   NativeDeviceId native_id{};
   std::string persistent_key{};
@@ -142,8 +142,7 @@ class SdlInputDriver final : public InputDriver {
   mutable std::mutex mutex_{};
 };
 
-// Returns an SDL2-backed host when Xenon was built with SDL2, otherwise null.
-[[nodiscard]] std::unique_ptr<SdlHost> create_sdl2_host();
+// Returns an SDL3-backed host when Xenon was built with SDL3, otherwise null.
 [[nodiscard]] std::unique_ptr<SdlHost> create_sdl3_host();
 [[nodiscard]] std::unique_ptr<SdlHost> create_preferred_sdl_host();
 [[nodiscard]] std::unique_ptr<InputDriver> create_sdl_input_driver(

@@ -1519,3 +1519,49 @@ header select {
   max-height: 300px;
   overflow: auto;
 }
+/* Native popovers stay above modal-free page content and use the shared tokens. */
+.action-menu {
+  position:fixed;inset:auto;margin:0;padding:6px;min-width:220px;max-width:calc(100vw - 16px);
+  max-height:calc(100vh - 16px);overflow:auto;border:1px solid var(--line);border-radius:10px;
+  background:var(--panel);color:var(--text);box-shadow:0 12px 38px #0005;
+}
+.action-menu button {display:block;width:100%;text-align:start;border:0;background:transparent;}
+.action-menu button:focus-visible,.action-menu button:hover {background:var(--surface-hover,var(--panel));}
+.game-settings-tabs { display:flex; gap:.35rem; overflow-x:auto; margin-block:1rem; }
+.game-settings-tabs [aria-selected="true"] { border-color:var(--accent); background:var(--panel); }
+.game-settings-panel { min-width:0; display:grid; gap:.75rem; }
+.game-setting { min-width:0; padding:.85rem; border:1px solid var(--line); border-radius:var(--control-radius, .5rem); }
+.game-setting legend { font-weight:600; padding-inline:.35rem; }
+.game-setting p { margin-block:.25rem .75rem; }
+.game-setting input:not([type="checkbox"]),.game-setting select { max-width:100%; margin-block:.4rem; }
+.game-setting small { display:block; color:var(--muted); }
+.ready-package { display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:1rem; }
+.install-hint { color:var(--muted); font-size:.875rem; }
+.demo-banner {
+  padding: .7rem 1rem;
+  border: 1px solid var(--accent);
+  border-radius: var(--control-radius, .5rem);
+  background: var(--panel);
+  color: var(--accent);
+}
+
+.attention-items {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 12rem), 1fr));
+  gap: .75rem;
+}
+.attention-items button {
+  display: grid;
+  gap: .35rem;
+  text-align: start;
+  padding: 1rem;
+}
+.attention-items strong { font-size: 1.5rem; }
+.attention-items small { color: var(--muted); }
+.catalog-badges { display: flex; gap: .5rem; flex-wrap: wrap; margin-block: .5rem; }
+.catalog-badges span { padding: .2rem .5rem; border: 1px solid var(--line); border-radius: var(--control-radius, .5rem); font-size: .8rem; }
+.discover > p { max-width: 75ch; }
+.discover-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 24rem), 1fr)); gap: 1rem; }
+.discover-grid .catalog-entry { margin: 0; align-content: start; }
+.runtime-connection input { width: 100%; }
+.session-log { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 18rem; overflow: auto; }

@@ -9,6 +9,12 @@ foreach(xenon_tool recomp-driver ppc-disasm ir-dump module-inspector)
   xenon_enable_warnings(${xenon_tool})
 endforeach()
 
+# hint-port: translates a module's hint set to another executable revision
+# of the same title (see xenon/recomp/revision_mapping.hpp).
+add_executable(hint-port hint_port.cpp)
+target_link_libraries(hint-port PRIVATE xenon_recomp)
+xenon_enable_warnings(hint-port)
+
 # import-scanner additionally links xenon_core: for Project Gracemeria import
 # auditing (see docs/xam/XAM_V1.md), it cross-references every import against a
 # real, minimally-initialized XenonSession export_registry_ - the exact same
@@ -20,6 +26,13 @@ add_executable(import-scanner recomp_tools.cpp)
 target_compile_definitions(import-scanner PRIVATE XENON_TOOL_NAME="import-scanner" XENON_TOOL_HAS_CORE=1)
 target_link_libraries(import-scanner PRIVATE xenon_recomp xenon_core)
 xenon_enable_warnings(import-scanner)
+
+# xenon-extract: extracts a game disc image (GDFX .iso or .dvd) to a host
+# folder through Xenon's own filesystem layer (GdfxImageSource +
+# materialize_content_source).
+add_executable(xenon-extract xenon_extract/main.cpp)
+target_link_libraries(xenon-extract PRIVATE xenon_filesystem)
+xenon_enable_warnings(xenon-extract)
 
 # xenon-prepare: the out-of-process automatic game preparation worker (see
 # docs/development/GAME_PREPARATION.md). Reads default.xex directly out of a disc image/
@@ -46,3 +59,48 @@ if(NOT WIN32)
   target_link_libraries(xenon-prepare PRIVATE ${CMAKE_DL_LIBS})
 endif()
 xenon_enable_warnings(xenon-prepare)
+
+# shader-bench: times DXC on the shaders a Xenon shader cache holds, per
+# compile setting (development: tuning compile options on real game shaders).
+if(TARGET xenon_graphics_dxc)
+  add_executable(shader-bench shader_bench.cpp)
+  target_link_libraries(shader-bench PRIVATE xenon_graphics_dxc)
+  xenon_enable_warnings(shader-bench)
+endif()
+
+# draw-bench: a deterministic, mission-shaped draw stream through a real
+# native backend - host cost per draw, and a host profile with --profile
+# (development: renderer performance without running a game).
+if(TARGET xenon_graphics_dxc AND (TARGET xenon_graphics_d3d12 OR TARGET xenon_graphics_vulkan))
+  add_executable(draw-bench draw_bench.cpp)
+  target_link_libraries(draw-bench PRIVATE xenon_graphics xenon_logging)
+  if(WIN32 AND TARGET xenon_graphics_d3d12)
+    target_link_libraries(draw-bench PRIVATE xenon_graphics_d3d12)
+    target_compile_definitions(draw-bench PRIVATE XENON_DRAW_BENCH_D3D12=1)
+  endif()
+  if(TARGET xenon_graphics_vulkan)
+    target_link_libraries(draw-bench PRIVATE xenon_graphics_vulkan)
+    target_compile_definitions(draw-bench PRIVATE XENON_DRAW_BENCH_VULKAN=1)
+  endif()
+  xenon_stage_runtime_dependencies(draw-bench)
+  xenon_enable_warnings(draw-bench)
+endif()
+
+# gpu-replay: replays a portable GPU capture (XENON_GPU_CAPTURE=1 records one
+# from a running title) through a real native backend and times it - a
+# deterministic renderer benchmark of a real workload; --verify checks the
+# replay produces the same bytes every time.
+if(TARGET xenon_graphics_dxc AND (TARGET xenon_graphics_d3d12 OR TARGET xenon_graphics_vulkan))
+  add_executable(gpu-replay gpu_replay.cpp)
+  target_link_libraries(gpu-replay PRIVATE xenon_graphics xenon_logging)
+  if(WIN32 AND TARGET xenon_graphics_d3d12)
+    target_link_libraries(gpu-replay PRIVATE xenon_graphics_d3d12)
+    target_compile_definitions(gpu-replay PRIVATE XENON_GPU_REPLAY_D3D12=1)
+  endif()
+  if(TARGET xenon_graphics_vulkan)
+    target_link_libraries(gpu-replay PRIVATE xenon_graphics_vulkan)
+    target_compile_definitions(gpu-replay PRIVATE XENON_GPU_REPLAY_VULKAN=1)
+  endif()
+  xenon_stage_runtime_dependencies(gpu-replay)
+  xenon_enable_warnings(gpu-replay)
+endif()

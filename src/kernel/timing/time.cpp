@@ -1,5 +1,6 @@
 #include "xenon/kernel/time.hpp"
 
+#include <atomic>
 #include <thread>
 
 #if defined(_WIN32)
@@ -17,12 +18,22 @@ namespace {
 // the resolution actually in force.
 using NtQueryTimerResolutionFn = LONG(NTAPI*)(PULONG, PULONG, PULONG);
 using NtSetTimerResolutionFn = LONG(NTAPI*)(ULONG, BOOLEAN, PULONG);
+using TimeBeginPeriodFn = UINT(WINAPI*)(UINT);
+using TimeEndPeriodFn = UINT(WINAPI*)(UINT);
 
 template <typename Fn>
 Fn ntdll_function(const char* name) {
   const auto module = GetModuleHandleW(L"ntdll.dll");
   return module ? reinterpret_cast<Fn>(GetProcAddress(module, name)) : nullptr;
 }
+
+template <typename Fn>
+Fn winmm_function(const char* name) {
+  const auto module = LoadLibraryW(L"winmm.dll");
+  return module ? reinterpret_cast<Fn>(GetProcAddress(module, name)) : nullptr;
+}
+
+std::atomic_uint32_t g_time_period_users{};
 #endif
 }  // namespace
 
@@ -30,9 +41,6 @@ HostTimerResolution::HostTimerResolution() {
 #if defined(_WIN32)
   const auto query = ntdll_function<NtQueryTimerResolutionFn>("NtQueryTimerResolution");
   const auto set = ntdll_function<NtSetTimerResolutionFn>("NtSetTimerResolution");
-  if (!query || !set) return;
-  ULONG coarsest = 0, finest = 0, current = 0;
-  if (query(&coarsest, &finest, &current) < 0) return;
   // Windows 11 drops a process's resolution request while its window is
   // hidden unless the process opts out of that throttling.
   PROCESS_POWER_THROTTLING_STATE throttling{};
@@ -41,10 +49,23 @@ HostTimerResolution::HostTimerResolution() {
   throttling.StateMask = 0;
   static_cast<void>(SetProcessInformation(GetCurrentProcess(), ProcessPowerThrottling,
                                           &throttling, sizeof(throttling)));
-  ULONG granted = 0;
-  if (set(finest, TRUE, &granted) < 0) return;
-  requested_ = finest;
-  active_ = true;
+  if (const auto begin = winmm_function<TimeBeginPeriodFn>("timeBeginPeriod");
+      begin && begin(1u) == 0) {
+    using_time_period_ = true;
+    g_time_period_users.fetch_add(1u, std::memory_order_relaxed);
+    active_ = true;
+  }
+  if (query && set) {
+    ULONG coarsest = 0, finest = 0, current = 0;
+    if (query(&coarsest, &finest, &current) >= 0) {
+      ULONG granted = 0;
+      if (set(finest, TRUE, &granted) >= 0) {
+        requested_ = finest;
+        active_ = true;
+        return;
+      }
+    }
+  }
 #else
   timespec resolution{};
   active_ = clock_getres(CLOCK_MONOTONIC, &resolution) == 0 &&
@@ -55,15 +76,25 @@ HostTimerResolution::HostTimerResolution() {
 HostTimerResolution::~HostTimerResolution() {
 #if defined(_WIN32)
   if (!active_) return;
-  if (const auto set = ntdll_function<NtSetTimerResolutionFn>("NtSetTimerResolution")) {
-    ULONG current = 0;
-    static_cast<void>(set(requested_, FALSE, &current));
+  if (using_time_period_) {
+    if (const auto end = winmm_function<TimeEndPeriodFn>("timeEndPeriod")) {
+      static_cast<void>(end(1u));
+    }
+    g_time_period_users.fetch_sub(1u, std::memory_order_relaxed);
+  }
+  if (requested_ != 0u) {
+    if (const auto set = ntdll_function<NtSetTimerResolutionFn>("NtSetTimerResolution")) {
+      ULONG current = 0;
+      static_cast<void>(set(requested_, FALSE, &current));
+    }
   }
 #endif
 }
 
 std::chrono::nanoseconds HostTimerResolution::current() {
 #if defined(_WIN32)
+  if (g_time_period_users.load(std::memory_order_relaxed) != 0u)
+    return std::chrono::milliseconds(1);
   const auto query = ntdll_function<NtQueryTimerResolutionFn>("NtQueryTimerResolution");
   ULONG coarsest = 0, finest = 0, current = 0;
   if (!query || query(&coarsest, &finest, &current) < 0) return (std::chrono::nanoseconds::max)();

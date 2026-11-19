@@ -8,15 +8,75 @@
 #include <cstdio>
 #include <cstring>
 #include <limits>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <thread>
 
+#include "xenon/logging/activity_trace.hpp"
 #include "xenon/logging/diagnostic_events.hpp"
 #include "xenon/logging/probe_log.hpp"
 
 namespace xenon::gpu {
 namespace {
+
+// The PM4 type-3 opcode's name, for the activity trace.
+std::string type3_opcode_name(std::uint32_t opcode) {
+  switch (opcode) {
+    case 0x10: return "Nop";
+    case 0x21: return "RegRmw";
+    case 0x22: return "DrawIndx";
+    case 0x23: return "VizQuery";
+    case 0x25: return "SetState";
+    case 0x26: return "WaitForIdle";
+    case 0x27: return "ImLoad";
+    case 0x2B: return "ImLoadImmediate";
+    case 0x2C: return "ImStore";
+    case 0x2D: return "SetConstant";
+    case 0x2E: return "LoadConstantContext";
+    case 0x2F: return "LoadAluConstant";
+    case 0x34: return "DrawIndxBin";
+    case 0x35: return "DrawIndx2Bin";
+    case 0x36: return "DrawIndx2";
+    case 0x37: return "IndirectBufferPfd";
+    case 0x3B: return "InvalidateState";
+    case 0x3C: return "WaitRegMem";
+    case 0x3D: return "MemWrite";
+    case 0x3E: return "RegToMem";
+    case 0x3F: return "IndirectBuffer";
+    case 0x44: return "CondExec";
+    case 0x45: return "CondWrite";
+    case 0x46: return "EventWrite";
+    case 0x48: return "MeInit";
+    case 0x4A: return "SetShaderBases";
+    case 0x4B: return "SetBinBaseOffset";
+    case 0x4F: return "MemWriteCounter";
+    case 0x50: return "SetBinMask";
+    case 0x51: return "SetBinSelect";
+    case 0x52: return "WaitRegEq";
+    case 0x53: return "WaitRegGte";
+    case 0x54: return "Interrupt";
+    case 0x55: return "SetConstant2";
+    case 0x56: return "SetShaderConstants";
+    case 0x58: return "EventWriteShaderDone";
+    case 0x59: return "EventWriteCacheFlush";
+    case 0x5A: return "EventWriteExtent";
+    case 0x5B: return "EventWriteZPassDone";
+    case 0x5C: return "WaitUntilRead";
+    case 0x5D: return "WaitIndirectBufferPfdComplete";
+    case 0x5E: return "ContextUpdate";
+    case 0x60: return "SetBinMaskLow";
+    case 0x61: return "SetBinMaskHigh";
+    case 0x62: return "SetBinSelectLow";
+    case 0x63: return "SetBinSelectHigh";
+    default: {
+      char text[24];
+      std::snprintf(text, sizeof(text), "type3_0x%02X", opcode);
+      return text;
+    }
+  }
+}
+
 
 [[nodiscard]] std::uint32_t load_be32(const std::byte* p) noexcept {
   std::uint32_t v{};
@@ -211,13 +271,17 @@ void CommandProcessor::reset() {
   active_pixel_shader_ = {};
   active_vertex_program_.reset();
   active_pixel_program_.reset();
+  active_vertex_decoded_.reset();
+  active_pixel_decoded_.reset();
+  command_memory_.clear();
+  drain_reads_command_memory_ = false;
   shader_partition_ = {};
   bin_base_offset_ = 0;
   bin_mask_ = 0;
   bin_select_ = 0;
   active_viz_queries_ = 0;
   viz_query_draws_ = 0;
-  swap_counter_ = 0;
+  std::atomic_ref<std::uint32_t>(swap_counter_).store(0u, std::memory_order_release);
   submission_dwords_ = 0;
   max_indirect_depth_ = 0;
   stall_frames_.clear();
@@ -246,6 +310,10 @@ std::uint32_t CommandProcessor::execute_ring(std::uint32_t physical_address,
   ++stats_.ring_drains;
   submission_dwords_ = 0;
   max_indirect_depth_ = 0;
+  // The whole ring is command memory: the guest refills any of it the read
+  // pointer has passed, not only this drain's words.
+  drain_reads_command_memory_ = false;
+  note_command_memory(physical_address, std::uint64_t{physical_address} + capacity_dwords * 4ull);
 
   // Resuming a suspended wait: only valid when the drain restarts at exactly the
   // packet that was suspended; anything else (the ring was reset, the guest
@@ -401,10 +469,8 @@ void CommandProcessor::emit_register_write(std::uint32_t index,
       const std::array<std::byte, 4> bytes{
           static_cast<std::byte>(value >> 24), static_cast<std::byte>(value >> 16),
           static_cast<std::byte>(value >> 8), static_cast<std::byte>(value)};
-      before_guest_visible_effect();
-      if (!memory_.write_physical(destination, bytes)) {
-        throw std::runtime_error("Xenos scratch register write-back has no backing");
-      }
+      write_guest_effect(destination, bytes,
+                         "Xenos scratch register write-back has no backing");
       ++stats_.scratch_writebacks;
     }
   }
@@ -427,12 +493,107 @@ void CommandProcessor::write_physical_dword(std::uint32_t address_with_endian,
   // The Xenos memory path is little-endian before the packet-selected endian
   // transformation; CPU-visible big-endian access is supplied by MemoryPort.
   const auto bytes = encode_le32(stored);
-  before_guest_visible_effect();
-  if (!memory_.write_physical(address, bytes)) {
-    throw std::runtime_error("Xenos physical write has no backing");
-  }
+  write_guest_effect(address, bytes, "Xenos physical write has no backing");
   stream_.emit(ir::PhysicalMemoryWrite{address, logical_value, endian});
   ++stats_.physical_writes;
+}
+
+std::shared_ptr<const DecodedShader> CommandProcessor::decode_program(
+    const ShaderProgram& program) {
+  auto& slot = decoded_programs_[program.hash()];
+  if (!slot) slot = std::make_shared<const DecodedShader>(ShaderDecoder::decode(program));
+  return slot;
+}
+
+void CommandProcessor::note_command_memory(std::uint64_t begin, std::uint64_t end) {
+  if (end <= begin) return;
+  // Already known (the ring every drain; Direct3D's command buffer region
+  // once its segments have merged): nothing changes.
+  auto at = std::lower_bound(command_memory_.begin(), command_memory_.end(), begin,
+                             [](const auto& range, std::uint64_t value) {
+                               return range.second < value;
+                             });
+  if (at != command_memory_.end() && at->first <= begin && at->second >= end) return;
+  // Merge every range it overlaps or touches.
+  auto last = at;
+  while (last != command_memory_.end() && last->first <= end) {
+    begin = (std::min)(begin, last->first);
+    end = (std::max)(end, last->second);
+    ++last;
+  }
+  at = command_memory_.erase(at, last);
+  command_memory_.insert(at, {begin, end});
+  if (command_memory_.size() <= kCommandMemoryRanges) return;
+  // Bounded: the two neighbours with the smallest gap merge. The set only
+  // grows, so the check stays conservative - a read it flags at worst holds
+  // a read pointer behind its drain's work, as before the early write-back.
+  std::size_t closest = 0;
+  for (std::size_t i = 1; i + 1 < command_memory_.size(); ++i) {
+    if (command_memory_[i + 1].first - command_memory_[i].second <
+        command_memory_[closest + 1].first - command_memory_[closest].second)
+      closest = i;
+  }
+  command_memory_[closest].second = command_memory_[closest + 1].second;
+  command_memory_.erase(command_memory_.begin() + static_cast<std::ptrdiff_t>(closest + 1));
+}
+
+bool CommandProcessor::overlaps_command_memory(std::uint64_t begin,
+                                               std::uint64_t end) const noexcept {
+  if (end <= begin) return false;
+  const auto at = std::lower_bound(command_memory_.begin(), command_memory_.end(), begin,
+                                   [](const auto& range, std::uint64_t value) {
+                                     return range.second <= value;
+                                   });
+  return at != command_memory_.end() && at->first < end;
+}
+
+void CommandProcessor::note_draw_memory_reads(const ir::DrawPacket& draw) {
+  if (drain_reads_command_memory_) return;  // decided for this drain
+  if (draw.index_buffer.valid &&
+      overlaps_command_memory(draw.index_buffer.physical_address,
+                              std::uint64_t{draw.index_buffer.physical_address} +
+                                  draw.index_buffer.length_bytes)) {
+    drain_reads_command_memory_ = true;
+    return;
+  }
+  // A vertex fetch constant (two dwords of a six-dword slot): type 3 is a
+  // vertex buffer, dword 0 its dword-aligned address, dword 1 bits 2..25 its
+  // size in dwords (ResourceStateTracker::vertex_buffer()).
+  constexpr std::uint32_t kFetchConstantBase = 0x4800u;
+  const auto reads_vertices = [&](std::uint32_t fetch_constant, std::uint32_t select) {
+    if (fetch_constant >= 32u || select >= 3u) return false;
+    const auto offset = kFetchConstantBase + fetch_constant * 6u + select * 2u;
+    const auto w0 = registers_.read(offset);
+    if ((w0 & 3u) != 3u) return false;
+    const std::uint64_t address = w0 & ~3u;
+    const std::uint64_t bytes = std::uint64_t{(registers_.read(offset + 1u) >> 2) & 0xFFFFFFu} * 4u;
+    return overlaps_command_memory(address, address + bytes);
+  };
+  for (const auto* decoded : {active_vertex_decoded_.get(), active_pixel_decoded_.get()}) {
+    if (!decoded) continue;
+    for (const auto fetch : decoded->reflection.vertex_fetches) {
+      if (reads_vertices(fetch / 3u, fetch % 3u)) {
+        drain_reads_command_memory_ = true;
+        return;
+      }
+    }
+  }
+  // A resolve (RB_MODECONTROL EDRAM mode 6, copy) reads its rectangle from
+  // fetch constant 0 whatever the shaders fetch.
+  constexpr std::uint32_t kRbModeControl = 0x2208u;
+  if ((registers_.read(kRbModeControl) & 7u) == 6u && reads_vertices(0u, 0u))
+    drain_reads_command_memory_ = true;
+}
+
+void CommandProcessor::write_guest_effect(std::uint32_t address,
+                                          std::span<const std::byte> bytes,
+                                          const char* failure) {
+  if (guest_write_sink_) {
+    guest_write_sink_(address, std::vector<std::byte>(bytes.begin(), bytes.end()), false);
+    return;
+  }
+  before_guest_visible_effect();
+  if (!memory_.write_physical(address, bytes)) throw std::runtime_error(failure);
 }
 
 std::uint32_t CommandProcessor::read_physical_dword(
@@ -443,6 +604,7 @@ std::uint32_t CommandProcessor::read_physical_dword(
   if (std::uint64_t(address) + 4u > memory::kPhysicalMemorySize) {
     throw std::out_of_range("Xenos physical read outside RAM");
   }
+  before_guest_memory_read(address, 4u);
   std::array<std::byte, 4> snapshot{};
   if (!memory_.copy_physical_range(address, snapshot)) {
     throw std::runtime_error("Xenos physical read has no backing");
@@ -624,14 +786,22 @@ void CommandProcessor::execute_wait_reg_mem(
 
   ++stats_.wait_reg_mem_packets;
   // What the wait polls may be written by the work before it (a resolve, a
-  // memory export).
-  before_guest_visible_effect();
+  // memory export). COHER_STATUS_HOST is not: the command processor itself
+  // completes the coherency request it reports (below), and nothing the GPU
+  // wrote is observed through it. AC6 polls it after every resolve, so
+  // treating it as a barrier waited for each resolve's readback.
+  if (memory_source || payload[1] != kCoherStatusHostRegister)
+    before_guest_visible_effect(BarrierKind::Wait);
   // Polling COHER_STATUS_HOST is how a title waits for a host-memory coherency
   // request it queued (texture/vertex cache invalidation over a range). The
   // command processor completes the request itself as part of the poll and the
-  // wait is satisfied. Xenon's GPU reads guest RAM directly through the shared
-  // physical mapping, so there is no separate cached copy to flush here; the
-  // state transition (pending -> clear) is what the title observes.
+  // wait is satisfied. It is not a sync point: what the CPU wrote before
+  // queueing the request was written before the ring work carrying it was
+  // published, and the sync point that work started from already covers it.
+  // The hardware completes the request microseconds after the preceding
+  // sync point; taking "now" instead would expose writes the CPU made since,
+  // which the hardware never sees. The state transition (pending -> clear)
+  // is what the title observes.
   if (!memory_source && payload[1] == kCoherStatusHostRegister) {
     if ((registers_.read(kCoherStatusHostRegister) & kCoherStatusPending) != 0u) {
       static_cast<void>(registers_.write(kCoherStatusHostRegister, 0u));
@@ -659,6 +829,7 @@ void CommandProcessor::execute_wait_reg_mem(
         stats_.parked_ns += parked;
         stats_.longest_park_ns = (std::max)(stats_.longest_park_ns, parked);
       }
+      sync_point();
       return;
     }
 
@@ -709,7 +880,7 @@ void CommandProcessor::execute_wait_register(
         "PM4_WAIT_REG_EQ/GTE requires exactly 4 dwords");
   }
   const std::uint32_t register_index = payload[0];
-  before_guest_visible_effect();
+  before_guest_visible_effect(BarrierKind::Wait);
   if (!registers_.valid(register_index)) {
     throw std::out_of_range("PM4 compact wait register outside register file");
   }
@@ -719,6 +890,7 @@ void CommandProcessor::execute_wait_register(
     const std::uint32_t value = registers_.read(register_index) & payload[2];
     ++stats_.wait_register_polls;
     if (greater_or_equal ? value >= payload[1] : value == payload[1]) {
+      sync_point();
       return;
     }
     if ((poll & 0x3Fu) == 0x3Fu) std::this_thread::yield();
@@ -745,6 +917,7 @@ void CommandProcessor::execute_load_alu_constant(
   }
 
   std::vector<std::byte> snapshot(std::size_t(size) * 4u);
+  before_guest_memory_read(address, size * 4u);
   if (!memory_.copy_physical_range(address, snapshot)) {
     throw std::runtime_error("PM4_LOAD_ALU_CONSTANT snapshot failed");
   }
@@ -796,7 +969,7 @@ bool CommandProcessor::execute_im_store(
     throw std::out_of_range("PM4_IM_STORE destination outside physical RAM");
   }
 
-  before_guest_visible_effect();
+  before_guest_visible_effect(BarrierKind::ShaderStore);
   if (byte_count64) {
     auto write = memory_.physical_write_span(
         destination, static_cast<std::uint32_t>(byte_count64));
@@ -841,11 +1014,13 @@ void CommandProcessor::execute_invalidate_state(
   if ((mask & 0x100u) != 0u) {
     active_vertex_shader_ = {};
     active_vertex_program_.reset();
+    active_vertex_decoded_.reset();
     ++stats_.shader_invalidations;
   }
   if ((mask & 0x200u) != 0u) {
     active_pixel_shader_ = {};
     active_pixel_program_.reset();
+    active_pixel_decoded_.reset();
     ++stats_.shader_invalidations;
   }
   ++stats_.invalidate_state_packets;
@@ -873,7 +1048,7 @@ void CommandProcessor::execute_event_write_shader_done(
   const std::uint32_t initiator = payload[0];
   emit_register_write(kVgtEventInitiator, initiator & 0x3Fu);
   const bool write_progress_counter = (initiator & 0x80000000u) != 0u;
-  const std::uint32_t value = write_progress_counter ? swap_counter_ : payload[2];
+  const std::uint32_t value = write_progress_counter ? swap_counter() : payload[2];
   if ((payload[1] & ~0x3u) != 0u) {
     write_physical_dword(payload[1], value);
     ++stats_.event_memory_writes;
@@ -912,6 +1087,25 @@ void CommandProcessor::execute_event_write_extent(
     const auto value = encode_be16(extents[i]);
     encoded[i * 2u] = value[0];
     encoded[i * 2u + 1u] = value[1];
+  }
+  // Deferred (see set_guest_write_sink()): the sink compares when the work
+  // before the packet has executed, and drops a write that changes nothing.
+  if (guest_write_sink_) {
+    ++stats_.extent_event_writes;
+    ++stats_.event_packets;
+    guest_write_sink_(address, std::vector<std::byte>(encoded.begin(), encoded.end()), true);
+    return;
+  }
+  // A write that leaves memory as it is cannot be observed, so it needs no
+  // ordering against the work before it. AC6 issues one after nearly every
+  // draw, each to a location already holding these extents; making each one
+  // a barrier executed the draws one at a time.
+  std::array<std::byte, 12> current{};
+  if (memory_.copy_physical_range(address, current) && current == encoded) {
+    ++stats_.extent_event_writes;
+    ++stats_.unchanged_event_writes;
+    ++stats_.event_packets;
+    return;
   }
   before_guest_visible_effect();
   if (!memory_.write_physical(address, encoded)) {
@@ -963,7 +1157,10 @@ void CommandProcessor::execute_interrupt(
   }
   ++stats_.interrupt_packets;
   if (!interrupt_callback_) return;
-  before_guest_visible_effect();
+  before_guest_visible_effect(BarrierKind::Interrupt);
+  // Code the handler wakes may rewrite what the commands after the interrupt
+  // read; the hardware reads it before that code can run.
+  sync_point();
   for (std::uint32_t cpu = 0; cpu < 6u; ++cpu) {
     if ((payload[0] & (UINT32_C(1) << cpu)) == 0u) continue;
     interrupt_callback_(cpu);
@@ -986,6 +1183,19 @@ void CommandProcessor::execute_mem_write(std::span<const std::uint32_t> payload)
     throw std::out_of_range("Xenos physical write outside RAM");
   }
 
+  if (guest_write_sink_) {
+    std::vector<std::byte> bytes(static_cast<std::size_t>(byte_count64));
+    for (std::size_t i = 0; i < word_count; ++i) {
+      const auto encoded = encode_le32(gpu_swap(payload[i + 1u], endian));
+      std::copy(encoded.begin(), encoded.end(), bytes.begin() + std::ptrdiff_t(i * 4u));
+    }
+    guest_write_sink_(physical_base, std::move(bytes), false);
+    for (std::size_t i = 0; i < word_count; ++i)
+      stream_.emit(ir::PhysicalMemoryWrite{
+          static_cast<std::uint32_t>(physical_base + i * 4u), payload[i + 1u], endian});
+    stats_.physical_writes += word_count;
+    return;
+  }
   before_guest_visible_effect();
   auto write = memory_.physical_write_span(
       physical_base, static_cast<std::uint32_t>(byte_count64));
@@ -1123,8 +1333,10 @@ void CommandProcessor::execute_draw(Type3Opcode opcode, bool predicate,
 
   draw.register_generation = registers_.generation();
   draw.raw_payload = std::move(payload);
+  note_draw_memory_reads(draw);
   stream_.emit(std::move(draw));
   ++stats_.draws;
+  if (draw_emitted_callback_) draw_emitted_callback_();
 }
 
 void CommandProcessor::execute_type3(Reader& reader, const PacketHeader& header,
@@ -1142,6 +1354,23 @@ void CommandProcessor::execute_type3(Reader& reader, const PacketHeader& header,
   }
   auto payload = read_payload(reader, header.count);
 
+  // Activity trace: each type-3 packet, timed (a WAIT_REG_MEM's time is how
+  // long the ring waited; an IB's includes the packets inside it).
+  std::optional<logging::ActivityScope> activity;
+  if (logging::activity_trace_enabled()) {
+    static std::array<std::atomic<std::uint32_t>, 128> keys{};
+    const auto opcode = static_cast<std::uint32_t>(header.opcode) & 0x7Fu;
+    auto key = keys[opcode].load(std::memory_order_relaxed);
+    if (!key) {
+      key = logging::intern_activity({"pm4", type3_opcode_name(opcode),
+                                      {"dwords", "first", "second", ""}, false});
+      keys[opcode].store(key, std::memory_order_relaxed);
+    }
+    activity.emplace(key, std::array<std::uint64_t, 4>{
+                              header.count, payload.empty() ? 0u : payload[0],
+                              payload.size() > 1 ? payload[1] : 0u, 0u});
+  }
+
   // Type-3 predication is command-processor state, not draw/backend state.
   // A failed predicate suppresses the complete packet after its payload has
   // been consumed from the ring, before it can mutate state or emit IR.
@@ -1151,6 +1380,15 @@ void CommandProcessor::execute_type3(Reader& reader, const PacketHeader& header,
   }
 
   if (header.opcode == Type3Opcode::Nop) {
+    if (const auto swap = decode_front_buffer_swap(payload)) {
+      // The flip shows what the work before it rendered and resolved, so that
+      // work executes first.
+      before_guest_visible_effect(BarrierKind::Swap);
+      advance_progress_counter();
+      ++stats_.front_buffer_swaps;
+      if (swap_callback_) swap_callback_(*swap);
+      return;
+    }
     // NOP payloads often carry debug strings/markers. Preserve them in the IR
     // rather than treating the bytes as semantic state.
     stream_.emit(ir::Type3Packet{header.opcode, header.predicate, std::move(payload)});
@@ -1184,6 +1422,7 @@ void CommandProcessor::execute_type3(Reader& reader, const PacketHeader& header,
       stream_.emit(ir::IndirectBuffer{address, length, prefetch});
       ++stats_.indirect_buffers;
     }
+    note_command_memory(address, std::uint64_t{address} + std::uint64_t{length} * 4u);
     if (length) execute_buffer_internal(address, length, depth + 1u, start_offset);
     return;
   }
@@ -1292,6 +1531,7 @@ void CommandProcessor::execute_type3(Reader& reader, const PacketHeader& header,
       throw std::out_of_range("PM4_IM_LOAD shader outside physical RAM");
     }
     std::vector<std::byte> microcode_snapshot(std::size_t(size) * 4u);
+    before_guest_memory_read(address, size * 4u);
     if (!memory_.copy_physical_range(address, microcode_snapshot)) {
       throw std::runtime_error("PM4_IM_LOAD shader snapshot failed");
     }
@@ -1310,7 +1550,8 @@ void CommandProcessor::execute_type3(Reader& reader, const PacketHeader& header,
       active_pixel_shader_ = reference;
       active_pixel_program_ = program;
     }
-    auto decoded = ShaderDecoder::decode(program);
+    auto decoded = decode_program(program);
+    (stage == ShaderStage::Vertex ? active_vertex_decoded_ : active_pixel_decoded_) = decoded;
     stream_.emit(ir::ShaderLoad{header.opcode, false, address,
                                 std::move(program), std::move(decoded), payload});
     return;
@@ -1338,7 +1579,8 @@ void CommandProcessor::execute_type3(Reader& reader, const PacketHeader& header,
       active_pixel_shader_ = reference;
       active_pixel_program_ = program;
     }
-    auto decoded = ShaderDecoder::decode(program);
+    auto decoded = decode_program(program);
+    (stage == ShaderStage::Vertex ? active_vertex_decoded_ : active_pixel_decoded_) = decoded;
     stream_.emit(ir::ShaderLoad{header.opcode, true, 0,
                                 std::move(program), std::move(decoded), payload});
     return;
@@ -1356,6 +1598,7 @@ void CommandProcessor::execute_type3(Reader& reader, const PacketHeader& header,
       throw std::out_of_range("PM4_LOAD_CONSTANT_CONTEXT outside physical RAM");
     }
     std::vector<std::byte> constant_snapshot(std::size_t(size) * 4u);
+    before_guest_memory_read(address, size * 4u);
     if (!memory_.copy_physical_range(address, constant_snapshot)) {
       throw std::runtime_error("PM4_LOAD_CONSTANT_CONTEXT snapshot failed");
     }

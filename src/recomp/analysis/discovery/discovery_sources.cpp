@@ -23,6 +23,7 @@ const char* discovery_source_name(DiscoverySource source) noexcept {
     case DiscoverySource::RuntimeObservation: return "runtime-observation";
     case DiscoverySource::GapRecovery: return "gap-recovery";
     case DiscoverySource::KnowledgeMatch: return "knowledge-match";
+    case DiscoverySource::AddressTakenCode: return "address-taken-code";
   }
   return "unknown";
 }
@@ -45,6 +46,7 @@ std::uint32_t discovery_source_base_confidence(DiscoverySource source) noexcept 
     case DiscoverySource::RuntimeObservation: return 88;
     case DiscoverySource::GapRecovery: return 55;
     case DiscoverySource::KnowledgeMatch: return 58;
+    case DiscoverySource::AddressTakenCode: return 72;
     case DiscoverySource::PrologueHeuristic: return 40;
   }
   return 50;
@@ -131,6 +133,7 @@ void add_source(std::vector<DiscoverySource>& sources, DiscoverySource source) {
     case DiscoverySource::RuntimeObservation:
     case DiscoverySource::GapRecovery:
     case DiscoverySource::KnowledgeMatch:
+    case DiscoverySource::AddressTakenCode:
       return false;
   }
   return false;
@@ -160,7 +163,8 @@ void add_source(std::vector<DiscoverySource>& sources, DiscoverySource source) {
       case DiscoverySource::ControlFlowHint:
         candidate = FunctionAuthority::ResolvedIndirect;
         break;
-      case DiscoverySource::PointerTable: candidate = FunctionAuthority::PointerTable; break;
+      case DiscoverySource::PointerTable:
+      case DiscoverySource::AddressTakenCode: candidate = FunctionAuthority::PointerTable; break;
       case DiscoverySource::RuntimeObservation: candidate = FunctionAuthority::RuntimeObservation; break;
       case DiscoverySource::GapRecovery: candidate = FunctionAuthority::GapRecovery; break;
       case DiscoverySource::KnowledgeMatch: candidate = FunctionAuthority::InferredBranch; break;

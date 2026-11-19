@@ -1,6 +1,8 @@
+#include <algorithm>
 #include <bit>
 #include <cassert>
 #include <cstdint>
+#include <cstdlib>
 #include <iostream>
 #include <vector>
 
@@ -61,6 +63,206 @@ class ImportThunkRuntimeServices final : public RuntimeServices {
   int call_count = 0;
   GuestAddress last_call_target = 0;
 };
+// A guest loop made of jumps between interpreter-only code and compiled code.
+// The interpreter ran a tail branch into compiled code as a nested host call,
+// and that code's indirect branch back entered the interpreter one level
+// deeper, ~1.5 KB of host stack per lap. On the console a branch costs no
+// stack. Code at kLoop decrements r3 and jumps to
+// the compiled kCompiled, which jumps back through the fallback (as generated
+// code's indirect branch does) until r3 reaches 0, then returns. The nesting
+// must stay flat however many laps run.
+constexpr GuestAddress kLoop = kCode + 0x100u;
+constexpr GuestAddress kCompiled = kCode + 0x200u;
+int g_compiled_depth = 0;
+int g_compiled_max_depth = 0;
+int g_registry_tag = 0;
+
+ExecutionResult compiled_loop_body(ExecutionContext& context) {
+  ++g_compiled_depth;
+  g_compiled_max_depth = (std::max)(g_compiled_max_depth, g_compiled_depth);
+  ExecutionResult result{};
+  if (context.state.gpr[3] == 0u) {
+    result = {FlowReason::Return, static_cast<GuestAddress>(context.state.lr & ~3ull), 0u};
+  } else if (auto* native = context.lookup_compiled(kLoop, CompiledLookupKind::Branch)) {
+    result = native(context);
+  } else {
+    const auto fallback = context.try_dynamic_fallback(kLoop, CompiledLookupKind::Branch);
+    result = fallback.handled ? fallback.result
+                              : ExecutionResult{FlowReason::Branch, kLoop, 0u};
+  }
+  --g_compiled_depth;
+  return result;
+}
+
+NativeCompiledEntry loop_lookup(void*, ExecutionContext&, GuestAddress target, CompiledLookupKind) {
+  return target == kCompiled ? &compiled_loop_body : nullptr;
+}
+
+void test_branch_loop_through_fallback_keeps_host_stack_flat(AddressSpace& memory) {
+  write_instruction(memory, kLoop + 0x0u, 0x3863FFFFu);  // addi r3, r3, -1
+  write_instruction(memory, kLoop + 0x4u, 0x480000FCu);  // b kCompiled (kLoop+4 -> +0x100)
+  NullRuntimeServices runtime;
+  CpuState state{};
+  DynamicFallbackExecutor fallback({}, {});
+  ExecutionContext context(state, memory, runtime);
+  fallback.bind(context);
+  context.compiled_registry = &g_registry_tag;
+  context.compiled_lookup = &loop_lookup;
+  for (const std::uint64_t laps : {200ull, 100000ull}) {
+    state = {};
+    state.gpr[3] = laps;
+    state.lr = kReturn;
+    g_compiled_depth = g_compiled_max_depth = 0;
+    // A call site: the fallback for kLoop, with its tail branches followed.
+    const auto entered = context.try_dynamic_fallback(kLoop, CompiledLookupKind::Call);
+    assert(entered.handled);
+    const auto result = context.follow_tail_branches(entered.result);
+    if (g_compiled_max_depth > 1) {
+      std::cerr << laps << " laps nested the compiled code " << g_compiled_max_depth
+                << " deep: each lap grew the host stack\n";
+      assert(false);
+    }
+    assert(result.reason == FlowReason::Return && result.next_address == kReturn);
+    assert(state.gpr[3] == 0u);
+  }
+  std::cout << "branch loop through the fallback: constant host stack" << std::endl;
+}
+
+// Regression (AC6 mission crash, host stack overflow ~5 minutes into play, in
+// two runs): interpreter-only code at 0x82345DE0 walks a list and calls the
+// compiled dispatcher 0x8233AAA0 for each entry; the dispatcher calls a
+// compiled thunk that tail-branches into interpreter-only code, which then
+// returns. That return reached the interpreter as a Branch entry whose LR is
+// the dispatcher's continuation, and the interpreter ran the continuation
+// itself: the dispatcher's epilogue, back into the walk, and the walk's next
+// call to the dispatcher one host frame deeper (8,000+ levels in the dump)
+// while the guest stack stayed balanced. Here the walk calls the dispatcher
+// r3 times; every return must unwind to the native frame that owns it.
+constexpr GuestAddress kWalk = kCode + 0xA00u;
+constexpr GuestAddress kDispatcher = kCode + 0xB00u;
+constexpr GuestAddress kDispatcherContinue = kCode + 0xB2Cu;
+constexpr GuestAddress kThunk = kCode + 0xC00u;
+constexpr GuestAddress kCallback = kCode + 0xD00u;
+int g_dispatcher_depth = 0;
+int g_dispatcher_max_depth = 0;
+
+// The thunk: `b kCallback`, which has no compiled entry.
+ExecutionResult compiled_thunk(ExecutionContext& context) {
+  const auto fallback = context.try_dynamic_fallback(kCallback, CompiledLookupKind::Branch);
+  return fallback.handled ? fallback.result : ExecutionResult{FlowReason::Branch, kCallback, 0u};
+}
+
+// The dispatcher: saves its return address (r30 stands in for its stack
+// slot), calls the thunk with LR = its continuation, and returns when that
+// call comes back to it.
+ExecutionResult compiled_dispatcher(ExecutionContext& context) {
+  if (++g_dispatcher_depth > 64) {
+    std::cerr << "the dispatcher nested " << g_dispatcher_depth
+              << " deep: each call from the walk grew the host stack\n";
+    std::abort();
+  }
+  g_dispatcher_max_depth = (std::max)(g_dispatcher_max_depth, g_dispatcher_depth);
+  context.state.gpr[30] = context.state.lr;
+  context.state.lr = kDispatcherContinue;
+  auto result = context.follow_tail_branches(compiled_thunk(context));
+  if (result.reason == FlowReason::Return && result.next_address == kDispatcherContinue) {
+    context.state.lr = context.state.gpr[30];
+    result = {FlowReason::Return, static_cast<GuestAddress>(context.state.lr & ~3ull), 0u};
+  }
+  --g_dispatcher_depth;
+  return result;
+}
+
+NativeCompiledEntry dispatcher_lookup(void*, ExecutionContext&, GuestAddress target,
+                                      CompiledLookupKind) {
+  if (target == kDispatcher) return &compiled_dispatcher;
+  if (target == kThunk) return &compiled_thunk;
+  return nullptr;
+}
+
+void test_return_from_a_tail_branched_callback_unwinds_to_its_caller(AddressSpace& memory) {
+  write_instruction(memory, kWalk + 0x00u, 0x7FE802A6u);  // mflr r31
+  write_instruction(memory, kWalk + 0x04u, 0x3863FFFFu);  // loop: addi r3, r3, -1
+  write_instruction(memory, kWalk + 0x08u, 0x2C030000u);  // cmpwi r3, 0
+  write_instruction(memory, kWalk + 0x0Cu, 0x4182000Cu);  // beq done
+  write_instruction(memory, kWalk + 0x10u, 0x480000F1u);  // bl kDispatcher
+  write_instruction(memory, kWalk + 0x14u, 0x4BFFFFF0u);  // b loop
+  write_instruction(memory, kWalk + 0x18u, 0x7FE803A6u);  // done: mtlr r31
+  write_instruction(memory, kWalk + 0x1Cu, 0x4E800020u);  // blr
+  // The dispatcher's continuation as guest code, as the real one is: what the
+  // interpreter ran when it did not hand the return back.
+  write_instruction(memory, kDispatcherContinue + 0x0u, 0x7FC803A6u);  // mtlr r30
+  write_instruction(memory, kDispatcherContinue + 0x4u, 0x4E800020u);  // blr
+  write_instruction(memory, kCallback + 0x0u, 0x38800001u);  // li r4, 1
+  write_instruction(memory, kCallback + 0x4u, 0x4E800020u);  // blr
+  NullRuntimeServices runtime;
+  CpuState state{};
+  DynamicFallbackExecutor fallback({}, {});
+  ExecutionContext context(state, memory, runtime);
+  fallback.bind(context);
+  context.compiled_registry = &g_registry_tag;
+  context.compiled_lookup = &dispatcher_lookup;
+  for (const std::uint64_t calls : {200ull, 100000ull}) {
+    state = {};
+    state.gpr[3] = calls + 1u;
+    state.lr = kReturn;
+    g_dispatcher_depth = g_dispatcher_max_depth = 0;
+    const auto entered = context.try_dynamic_fallback(kWalk, CompiledLookupKind::Call);
+    assert(entered.handled);
+    auto result = context.follow_tail_branches(entered.result);
+    // The dispatcher: the long walk yields at the instruction budget and is
+    // re-entered as a Branch, whose final return must still reach kReturn.
+    while (result.reason == FlowReason::Branch) {
+      const auto again = context.try_dynamic_fallback(result.next_address, CompiledLookupKind::Branch);
+      assert(again.handled);
+      result = context.follow_tail_branches(again.result);
+    }
+    assert(g_dispatcher_max_depth == 1);
+    assert(result.reason == FlowReason::Return && result.next_address == kReturn);
+    assert(state.gpr[3] == 0u && state.gpr[4] == 1u);
+  }
+  std::cout << "return from a tail-branched callback: unwinds to its caller" << std::endl;
+}
+
+// Only indirect jumps (bctr) report a compiled-lookup miss to the adaptive
+// observer. A direct `b` inside interpreted code is an ordinary jump; reported
+// as an "indirect-branch target" it made preparation seed a function at a
+// loop head (AC6's 0x82382F3C) and generation failed.
+std::vector<GuestAddress> g_missed;
+NativeCompiledEntry no_compiled_code(void*, ExecutionContext&, GuestAddress, CompiledLookupKind) {
+  return nullptr;
+}
+void record_miss(void*, ExecutionContext&, GuestAddress target, CompiledLookupKind) {
+  g_missed.push_back(target);
+}
+
+void test_only_indirect_jumps_report_lookup_misses(AddressSpace& memory) {
+  constexpr GuestAddress kJumps = kCode + 0xE00u;
+  write_instruction(memory, kJumps + 0x00u, 0x48000008u);  // b +8
+  write_instruction(memory, kJumps + 0x04u, 0x60000000u);  // nop (skipped)
+  write_instruction(memory, kJumps + 0x08u, 0x4E800420u);  // bctr
+  write_instruction(memory, kJumps + 0x18u, 0x4E800020u);  // blr
+  NullRuntimeServices runtime;
+  CpuState state{};
+  DynamicFallbackExecutor fallback({}, {});
+  ExecutionContext context(state, memory, runtime);
+  fallback.bind(context);
+  context.compiled_registry = &g_registry_tag;
+  context.compiled_lookup = &no_compiled_code;
+  context.compiled_lookup_miss = &record_miss;
+  state.lr = kReturn;
+  state.ctr = kJumps + 0x18u;
+  g_missed.clear();
+  const auto result = context.try_dynamic_fallback(kJumps, CompiledLookupKind::Call);
+  assert(result.handled && result.result.reason == FlowReason::Return &&
+         result.result.next_address == kReturn);
+  assert(std::find(g_missed.begin(), g_missed.end(), kJumps + 0x08u) == g_missed.end() &&
+         "a direct jump's target is not an indirect-branch observation");
+  assert(std::find(g_missed.begin(), g_missed.end(), kJumps + 0x18u) != g_missed.end() &&
+         "an indirect jump's uncompiled target is still observed");
+  std::cout << "only indirect jumps report compiled-lookup misses" << std::endl;
+}
+
 }  // namespace
 
 int main() {
@@ -213,6 +415,12 @@ int main() {
     const auto from_call = branch_context.try_dynamic_fallback(kThunk, CompiledLookupKind::Call);
     assert(from_call.handled && from_call.result.reason == FlowReason::Fallthrough);
     assert(session_runtime.call_count == 2);
+    // Regression (AC6 startup): every kernel call reaches the fallback this
+    // way, and its per-execution statistics and observations took two locks
+    // per call. An import is the runtime's dispatch, not interpreted guest code.
+    assert(branch_fallback.executed_blocks() == 0u &&
+           branch_fallback.fallback_unique_pc_count() == 0u &&
+           "import calls are not fallback executions");
   }
 
   // Guest self-modifying code invalidates the active fallback source snapshot.
@@ -427,6 +635,37 @@ int main() {
   assert(state.xer_ca());            // 6 <u 7 -> carry set
   assert((state.cr >> 28) == 0b0100u);  // CR0 = GT (6 is positive, nonzero)
 
+  // Real AC6 repro: the mode manager's tick loads a countdown word with lwz
+  // (zero-extended) and decrements it with "addic. -1", calling its update
+  // only while CR0 is not GT. Record forms compare the low 32 bits, so once the
+  // word holds 0xFFFFFFFF the result 0x0_FFFFFFFE is negative. Comparing all
+  // 64 bits called it positive, skipped the update forever and left AC6 on a
+  // black screen after the downloadable-content check.
+  state = {};
+  state.gpr[4] = 0xFFFFFFFFull;
+  state.lr = kReturn;
+  const auto wrapped_result =
+      addic_context.try_dynamic_fallback(kCode + 0x700u, CompiledLookupKind::Call);
+  assert(wrapped_result.handled);
+  assert(state.gpr[6] == 0xFFFFFFFEull);  // the register keeps its 64-bit value
+  assert((state.cr >> 28) == 0b1000u);    // CR0 = LT: low word 0xFFFFFFFE is -2
+  state = {};
+  state.gpr[4] = 0x1'00000001ull;  // low word 1: the high word must not matter
+  state.lr = kReturn;
+  assert(addic_context.try_dynamic_fallback(kCode + 0x700u, CompiledLookupKind::Call).handled);
+  assert((state.cr >> 28) == 0b0010u);  // CR0 = EQ: low word 0
+
+  // CA is the carry out of the low word: the closing "addic. r6,r4,-1" on
+  // 0x1_00000000 adds 0xFFFFFFFF to a zero low word, which does not carry,
+  // although the 64-bit sum does.
+  state = {};
+  state.gpr[4] = 0x1'00000000ull;
+  state.lr = kReturn;
+  assert(addic_context.try_dynamic_fallback(kCode + 0x700u, CompiledLookupKind::Call).handled);
+  assert(state.gpr[6] == 0xFFFFFFFFull);
+  assert(!state.xer_ca());
+  assert((state.cr >> 28) == 0b1000u);  // CR0 = LT: low word 0xFFFFFFFF is -1
+
   // Real AC6 repro, part four: the entire VMX/VMX128 vector unit - the
   // largest single gap this interpreter has ever had - had no case here at
   // all, starting with "lvx128" (AC6's own compiled code executes this
@@ -493,6 +732,9 @@ int main() {
     assert(std::bit_cast<float>(memory.read32_be(kVecDot + i * 4u)) == 38.0f);
   }
 
+  test_branch_loop_through_fallback_keeps_host_stack_flat(memory);
+  test_return_from_a_tail_branched_callback_unwinds_to_its_caller(memory);
+  test_only_indirect_jumps_report_lookup_misses(memory);
   std::cout << "dynamic fallback tests passed\n";
   return 0;
 }

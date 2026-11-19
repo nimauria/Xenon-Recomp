@@ -74,7 +74,9 @@ std::vector<ContentData> ContentManager::enumerate_content(
   std::scoped_lock lock(mutex_);
   std::vector<ContentData> result;
   for (const auto& [id, content] : content_) {
-    bool matches = content.device_id == device_id &&
+    // Device 0 is XCONTENTDEVICE_ANY: every device's content (AC6 lists its
+    // marketplace content that way).
+    bool matches = (device_id == 0u || content.device_id == device_id) &&
                    content.content_type == type;
     if (title_id != 0) {
       matches = matches && content.title_id == title_id;
@@ -196,6 +198,26 @@ XResult ContentManager::create_content(
   return create_content(content, out_content_id);
 }
 
+std::uint32_t ContentManager::register_installed_package(ContentData data) {
+  if (const auto existing =
+          find_content(data.device_id, data.content_type, data.title_id, data.file_name))
+    return existing->content_id;
+  std::scoped_lock lock(mutex_);
+  std::error_code error;
+  data.size_bytes = std::filesystem::file_size(data.package_file, error);
+  if (error) data.size_bytes = 0;
+  data.content_id = next_content_id_++;
+  const auto id = data.content_id;
+  content_[id] = std::move(data);
+  return id;
+}
+
+std::uint32_t ContentManager::license_mask(std::uint32_t content_id) const {
+  std::scoped_lock lock(mutex_);
+  const auto it = content_.find(content_id);
+  return it != content_.end() && !it->second.package_file.empty() ? 0xFFFFFFFFu : 0u;
+}
+
 XResult ContentManager::create_content(const ContentData& data, std::uint32_t& out_content_id) {
   if (!get_device(data.device_id).has_value() || !is_plain_file_name(data.file_name)) {
     return result::InvalidParameter;
@@ -230,6 +252,8 @@ XResult ContentManager::delete_content(std::uint32_t content_id) {
   for (const auto& [root, package] : open_packages_) {
     if (package.content_id == content_id) return kErrorAccessDenied;
   }
+  // An installed package is the user's download, not the title's to delete.
+  if (!it->second.package_file.empty()) return kErrorAccessDenied;
   // A package the host cannot remove (on Windows, one with a file still
   // open) is reported as access denied and stays listed.
   const auto path = package_path(it->second);
@@ -251,6 +275,23 @@ XResult ContentManager::open_package(filesystem::VirtualFileSystem& vfs,
   if (open_packages_.count(key) != 0u) return kErrorAlreadyExists;
   const auto it = content_.find(content_id);
   if (it == content_.end()) return kErrorFileNotFound;
+  if (!it->second.package_file.empty()) {
+    // An installed STFS package: its files, read-only.
+    auto source = std::make_shared<filesystem::StfsPackageSource>(it->second.package_file);
+    if (source->initialize() != filesystem::FsError::None) return kErrorFileNotFound;
+    OpenPackage package{"\\Device\\XContent" + std::to_string(next_package_device_++),
+                        root_name + ":", content_id};
+    auto device = std::make_shared<filesystem::ReadOnlyContentDevice>(
+        package.device_path, std::move(source), filesystem::WriteAccessOpen::GrantAndFailWrites);
+    if (vfs.register_device(device) != filesystem::FsError::None) return kErrorAccessDenied;
+    if (vfs.register_symbolic_link(package.alias, package.device_path) !=
+        filesystem::FsError::None) {
+      static_cast<void>(vfs.unregister_device(package.device_path));
+      return kErrorAlreadyExists;
+    }
+    open_packages_.emplace(key, std::move(package));
+    return result::Success;
+  }
   const auto path = package_path(it->second);
   if (!std::filesystem::is_directory(path)) return kErrorFileNotFound;
 
@@ -482,14 +523,25 @@ bool ContentManager::mount_content_graph(
 
   // Mount DLC. Each package gets a real internal device path and a stable
   // dlcN: alias. Device constructors must never receive the alias itself.
+  // Each is also listed as installed content on the hard disk, so the
+  // title finds it the way it does on the console - XamContentCreate-
+  // Enumerator for its content type, then XamContentCreate to mount it.
   for (std::size_t i = 0; i < graph.installed_dlc.size(); ++i) {
     const auto& dlc = graph.installed_dlc[i];
+    ContentData installed{};
+    installed.content_type = static_cast<ContentType>(dlc->content_type);
+    installed.display_name = dlc->display_name;
+    installed.file_name = dlc->source_path.filename().string();
+    installed.device_id = storage_device::HardDisk;
+    installed.title_id = dlc->title_id != 0 ? dlc->title_id : graph.title_id;
+    installed.package_file = dlc->source_path;
+    static_cast<void>(register_installed_package(std::move(installed)));
     auto stfs_source = std::make_shared<filesystem::StfsPackageSource>(dlc->source_path);
     if (stfs_source->initialize() == filesystem::FsError::None) {
       const auto device_path = "\\Device\\Content" + std::to_string(i);
       const auto alias = "dlc" + std::to_string(i) + ":";
       auto device = std::make_shared<filesystem::ReadOnlyContentDevice>(
-          device_path, std::move(stfs_source));
+          device_path, std::move(stfs_source), filesystem::WriteAccessOpen::GrantAndFailWrites);
       if (vfs.register_device(device) == filesystem::FsError::None) {
         static_cast<void>(vfs.register_symbolic_link(alias, device_path));
       }

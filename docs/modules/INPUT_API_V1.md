@@ -2,7 +2,7 @@
 
 Xenon Input exposes a small native ABI for game modules that need access to the
 same guest-visible input state used by the runtime. It is intentionally separate
-from the Xbox/XAM guest ABI and from the launcher's Qt interfaces.
+from the Xbox/XAM guest ABI and from the launcher's CEF/React interfaces.
 
 A game module such as Project Gracemeria should consume this API rather than
 including `InputSystem`, SDL, XInput, launcher headers, or platform controller
@@ -104,7 +104,7 @@ reimplementing them.
 
 This is important for title modules: Project Gracemeria can query the final
 controller state or identify that the active source is a flight device, but it
-does not need to know whether the user's hardware arrived through SDL3, SDL2,
+does not need to know whether the user's hardware arrived through SDL3,
 Windows XInput, keyboard/mouse synthesis or a HOTAS adapter.
 
 ## Example state query

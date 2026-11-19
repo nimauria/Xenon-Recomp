@@ -7,10 +7,12 @@ if(XENON_ENABLE_GRAPHICS)
     xenos/shader.cpp
     xenos/shader_decoder.cpp
     xenos/shader_translation.cpp
+    xenos/vertex_position_evaluator.cpp
     xenos/depth_format.cpp
     xenos/resource_ir.cpp
     xenos/resource_barrier.cpp
     xenos/texture.cpp
+    xenos/gpu_texture_load.cpp
     xenos/presentation.cpp
     xenos/scanout.cpp
     xenos/gpu_resolve.cpp
@@ -18,10 +20,24 @@ if(XENON_ENABLE_GRAPHICS)
     xenos/edram_surface.cpp
     xenos/edram_ownership.cpp
     xenos/primitive_processor.cpp
+    xenos/index_cache.cpp
+    xenos/guest_memory_segments.cpp
+    xenos/resident_range_allocator.cpp
     xenos/command_processor.cpp
     xenos/capture.cpp
     xenos/graphics_system.cpp
+    xenos/backend_executor.cpp
+    xenos/temporal.cpp
+    xenos/temporal_profile.cpp
+    xenos/temporal_frame.cpp
+    xenos/guest_read_sync.cpp
     common/backend_capabilities.cpp
+    common/recording_workers.cpp
+    common/display_vblank.cpp
+    common/failure_log.cpp
+    common/perf_stats.cpp
+    common/readback_publisher.cpp
+    common/texture_replacement.cpp
   )
   target_link_libraries(xenon_graphics PUBLIC xenon_memory xenon_logging)
   if(CMAKE_DL_LIBS)
@@ -44,7 +60,8 @@ if(XENON_ENABLE_GRAPHICS)
     xenon_resolve_dxc(XENON_DXC_TARGET XENON_DXC_INCLUDE_DIR)
     if(XENON_DXC_TARGET AND XENON_DXC_INCLUDE_DIR)
       add_library(xenon_graphics_dxc STATIC
-        dxc/shader_compiler.cpp)
+        dxc/shader_compiler.cpp
+        dxc/shader_compile_queue.cpp)
       target_include_directories(xenon_graphics_dxc
         PUBLIC "${XENON_SOURCE_DIR}/include"
         PRIVATE "${XENON_DXC_INCLUDE_DIR}")
@@ -106,6 +123,7 @@ if(XENON_ENABLE_GRAPHICS)
       d3d12/guest_memory_mirror.cpp
       d3d12/resource_layout.cpp
       d3d12/pipeline.cpp
+      d3d12/pipeline_library.cpp
       d3d12/render_target.cpp
       d3d12/edram_transfer.cpp
       d3d12/scanout.cpp

@@ -402,15 +402,9 @@ std::unique_ptr<InputDriver> create_sdl_input_driver(SdlInputOptions options) {
   return std::make_unique<SdlInputDriver>(std::move(options));
 }
 
-#if !defined(XENON_INPUT_HAS_SDL2)
-std::unique_ptr<SdlHost> create_sdl2_host() { return {}; }
-#endif
 #if !defined(XENON_INPUT_HAS_SDL3)
 std::unique_ptr<SdlHost> create_sdl3_host() { return {}; }
 #endif
-std::unique_ptr<SdlHost> create_preferred_sdl_host() {
-  if (auto host = create_sdl3_host()) return host;
-  return create_sdl2_host();
-}
+std::unique_ptr<SdlHost> create_preferred_sdl_host() { return create_sdl3_host(); }
 
 }  // namespace xenon::input

@@ -26,7 +26,7 @@ class AudioBackend {
   [[nodiscard]] virtual bool is_open() const noexcept = 0;
 };
 
-// Production desktop backend. SDL2 provides the same implementation on
+// Production desktop backend. SDL3 provides the same implementation on
 // Windows and Linux, avoiding guest-visible backend differences.
 [[nodiscard]] std::unique_ptr<AudioBackend> create_sdl_audio_backend();
 

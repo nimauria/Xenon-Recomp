@@ -71,8 +71,20 @@ bool generate_project(const DriverOptions& options, AnalysisReport& report, std:
     options.progress("[Xenon Recomp] Codegen: " + std::to_string(codegen_items.size()) + " functions");
 
   const auto direct_call_symbols = build_direct_call_symbols(codegen_items, alternate_entries_by_owner);
+  if (!report.instruction_hooks.empty() && report.hook_sources.empty()) {
+    error = "the hint set declares " + std::to_string(report.instruction_hooks.hooks.size()) +
+            " instruction hook(s) but no hook sources implement them";
+    return fail_generation("hooks");
+  }
+  for (const auto& source : report.hook_sources) {
+    if (!std::filesystem::is_regular_file(source)) {
+      error = "instruction hook source does not exist: " + source.string();
+      return fail_generation("hooks");
+    }
+  }
   const auto emitted = emit_function_sources(codegen_items, alternate_entries_by_owner,
-                                             direct_call_symbols, graph_store, options);
+                                             direct_call_symbols, report.instruction_hooks.symbols,
+                                             graph_store, options);
   const auto& function_sources = emitted.sources;
 
   if (options.progress) options.progress("[Codegen] " + std::to_string(function_sources.size()) + " functions emitted, writing shards...");
@@ -95,7 +107,7 @@ bool generate_project(const DriverOptions& options, AnalysisReport& report, std:
   staged = write_shard_manifest(generation_stage, report, shards) && staged;
   remove_stale_shards(options.output / "functions", shards);
   staged = write_module_export(generation_stage, report) && staged;
-  staged = write_generated_cmake(generation_stage, options, shards) && staged;
+  staged = write_generated_cmake(generation_stage, options, report, shards) && staged;
   if (!staged) {
     error = "failed while writing staged generated project metadata";
     return fail_generation("staging-write");

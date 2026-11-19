@@ -138,6 +138,8 @@ JsonValue XenonSession::capability_report() const {
                     static_cast<std::int64_t>(unsupported.failed_resource_barriers));
     gpu_section.set("fallbackShaderUses",
                     static_cast<std::int64_t>(unsupported.fallback_shader_uses));
+    gpu_section.set("unsupportedBlendStates",
+                    static_cast<std::int64_t>(unsupported.unsupported_blend_states));
     gpu_section.set("unsupportedOperationsTotal", static_cast<std::int64_t>(unsupported.total()));
 
     const auto performance = gpu_->performance_counters();
@@ -147,6 +149,8 @@ JsonValue XenonSession::capability_report() const {
     gpu_section.set("resolveOperations", static_cast<std::int64_t>(performance.resolve_operations));
     gpu_section.set("textureCacheInvalidations",
                     static_cast<std::int64_t>(performance.texture_cache_invalidations));
+    gpu_section.set("textureSyncCaptures",
+                    static_cast<std::int64_t>(performance.texture_sync_captures));
 
     report.set_section("gpu", std::move(gpu_section));
 
@@ -161,6 +165,8 @@ JsonValue XenonSession::capability_report() const {
     shader_section.set("translationFailures",
                        static_cast<std::int64_t>(coverage.translation_failures));
     shader_section.set("cacheHits", static_cast<std::int64_t>(coverage.cache_hits));
+    shader_section.set("cacheDiskHits", static_cast<std::int64_t>(coverage.cache_disk_hits));
+    shader_section.set("cacheDiskWrites", static_cast<std::int64_t>(coverage.cache_disk_writes));
     shader_section.set("cacheMisses", static_cast<std::int64_t>(coverage.cache_misses));
     report.set_section("shader", std::move(shader_section));
   }

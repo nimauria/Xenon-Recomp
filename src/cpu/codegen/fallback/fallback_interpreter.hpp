@@ -168,8 +168,9 @@ inline unsigned vector_vb(const DecodedInstruction& i) noexcept {
   }
 }
 
+// vperm128's VC: the 3-bit field at bits 6-8, as lifter/vector.cpp reads it.
 inline unsigned vector_vc(const DecodedInstruction& i) noexcept {
-  if (i.info->format == InstructionFormat::VX128_2) return (i.word >> 8) & 7u;
+  if (i.info->format == InstructionFormat::VX128_2) return (i.word >> 6) & 7u;
   return i.vc5();
 }
 
@@ -218,8 +219,8 @@ inline std::optional<aot::VectorSemantic> vector_semantic_for(std::string_view m
       V(vsububm), V(vsububs), V(vsubuhm), V(vsubuhs), V(vsubuwm),
       V(vsubuws), V(vsum2sws), V(vsum4sbs), V(vsum4shs), V(vsum4ubs),
       V(vsumsws), V(vupkd3d128), V(vupkhpx), V(vupkhsb), V(vupkhsb128),
-      V(vupkhsh), V(vupklpx), V(vupklsb), V(vupklsb128), V(vupklsh),
-      V(vxor), V(vxor128),
+      V(vupkhsh), V(vupkhsh128), V(vupklpx), V(vupklsb), V(vupklsb128),
+      V(vupklsh), V(vupklsh128), V(vxor), V(vxor128),
 #undef V
   };
   const auto it = table.find(m);

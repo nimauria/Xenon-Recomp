@@ -274,10 +274,8 @@ bool Lifter::lift_memory(const DecodedInstruction& i, ir::Builder& b) const {
       static_cast<std::uint64_t>(Endian::Raw), static_cast<std::uint64_t>(Type::V128), &i); return true;
   }
   if (m == "lvebx" || m == "lvehx" || m == "lvewx" || m == "lvewx128") {
-    // AltiVec element loads write only the EA-selected element; all other
-    // destination elements are architecturally undefined. Xenon preserves the
-    // prior register contents for those undefined lanes to give deterministic
-    // native-recompilation behaviour without making them observable inputs.
+    // AltiVec leaves the other lanes undefined; the Xbox 360 loads the whole
+    // aligned quadword (aot::vector_load_element).
     auto ea = ea_x(i, b, false);
     ea = memory_address(b, ea);
     auto old = b.read_vector(vector_reg(i));

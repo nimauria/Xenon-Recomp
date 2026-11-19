@@ -3,9 +3,11 @@
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "xenon/gpu/shader_ir.hpp"
+#include "xenon/gpu/depth_format.hpp"
 #include "xenon/gpu/edram_surface.hpp"
 
 namespace xenon::gpu {
@@ -28,6 +30,16 @@ struct ShaderLoweringOptions {
   // itself memexport. Required when another stage in the same draw writes the
   // shared mirror while this stage may read it.
   bool force_guest_memory_rw{};
+  // Pixel shader: the interpolator PsParamGen replaces (0xFF for none), and
+  // whether the draw is of points (sprite coordinates in its ZW).
+  std::uint8_t param_gen_interpolator{0xFF};
+  bool param_gen_point{};
+  // Guest memory bound as `guest_memory_segment_count` segments of
+  // 1 << guest_memory_segment_shift bytes (guest_memory_segments.hpp), for
+  // backends whose descriptors cannot span the whole aperture. A count of 1
+  // is the single binding and leaves the generated HLSL unchanged.
+  std::uint8_t guest_memory_segment_shift{};
+  std::uint8_t guest_memory_segment_count{1};
 };
 
 struct LoweredShader {
@@ -61,6 +73,8 @@ class HlslShaderLowerer {
 // (three post-VS corners) to a four-corner triangle strip. This is shared by
 // Vulkan and D3D12 and contains no guest command processing.
 [[nodiscard]] LoweredShader make_rectangle_list_geometry_shader();
+// Expands each point to a sprite (see the shader's comment).
+[[nodiscard]] LoweredShader make_point_sprite_geometry_shader();
 
 // Host-only shaders used by both backends for exact EDRAM ownership transfer.
 // Unlike a native resolve, the read shader loads one explicitly mapped sample;
@@ -76,8 +90,78 @@ class HlslShaderLowerer {
 // format: drawn into the destination at sample frequency, each sample loads
 // the source sample holding the same EDRAM word (EdramTransferConstants; the
 // CPU reference is edram_transfer_source()). The constants are D3D12 root
-// constants at b0 or Vulkan push constants.
-[[nodiscard]] LoweredShader make_edram_color_transfer_shader(MsaaSamples source_host_samples);
+// constants at b0 or Vulkan push constants. `integer`: both images are bound
+// through their integer views (color_host_transfers_as_integer()), so the
+// copy keeps every bit.
+[[nodiscard]] LoweredShader make_edram_color_transfer_shader(MsaaSamples source_host_samples,
+                                                             bool integer = false);
+// The same transfer between two native depth images of one format. The
+// source depth plane is t0 and its stencil plane t1 (stencil in .y); the
+// constants are EdramDepthTransferConstants. Which output the pass writes:
+// depth and SV_StencilRef together where stencil export exists; otherwise
+// depth (the pipeline replaces stencil with 0), then one pass per stencil
+// bit that keeps only samples whose source stencil has the bit
+// EdramDepthTransferConstants::stencil[0] names (the pipeline writes that
+// bit alone).
+// A D24S8 image's depth is re-encoded as the code it holds, written as
+// `unorm24_write` stores it on this device (passing the sampled value through
+// would land a code off on devices whose conversion differs); D24FS8's float
+// depth passes through.
+enum class EdramDepthTransferPass : std::uint8_t { DepthAndStencil, Depth, StencilBit };
+[[nodiscard]] LoweredShader make_edram_depth_transfer_shader(MsaaSamples source_host_samples,
+                                                             EdramDepthTransferPass pass,
+                                                             DepthRenderTargetFormat format,
+                                                             Unorm24DepthWrite unorm24_write);
+// HLSL defining `float xe_unorm24_depth_out(uint code)`: the depth a shader
+// writes for a D24 attachment to store `code` under `write`, bit-exact with
+// unorm24_depth_for_write().
+[[nodiscard]] std::string unorm24_depth_write_hlsl(Unorm24DepthWrite write);
+// The transfers between two different views edram_converting_transfer_supported()
+// accepts: each destination sample takes the EDRAM word of the source sample
+// the shared mapping selects - packed from the source's host value as its
+// format stores it - and writes that word unpacked as the destination's
+// format. A color source is t0; a depth source is t0 (depth) and t1 (stencil,
+// in .y). A color image color_host_transfers_as_integer() accepts is read and
+// written through its integer view. The color variant's constants are EdramTransferConstants, the depth
+// variant's EdramDepthTransferConstants, with the passes of the depth transfer.
+[[nodiscard]] LoweredShader make_edram_converting_color_transfer_shader(
+    MsaaSamples source_host_samples, EdramTransferEndpoint source,
+    ColorRenderTargetFormat destination);
+// HLSL for the EDRAM word codecs (xe_pack_unorm24, xe_pack_float20e4, their
+// unpacks and the color packs) the converting transfers use, bit-exact with
+// pack_depth_stencil() and unpack_depth_stencil(); GPU resolves share them.
+[[nodiscard]] std::string_view edram_word_codec_hlsl() noexcept;
+// A D24S8 destination's depth is written as `unorm24_write` stores the word's
+// code on this device.
+[[nodiscard]] LoweredShader make_edram_converting_depth_transfer_shader(
+    MsaaSamples source_host_samples, EdramTransferEndpoint source,
+    DepthRenderTargetFormat destination, EdramDepthTransferPass pass,
+    Unorm24DepthWrite unorm24_write);
+// Canonical EDRAM loads on the GPU (edram_canonical_load_supported()): the
+// converting transfers with canonical storage as their source - each
+// destination sample's EDRAM word read from the 10 MiB EDRAM image bound as
+// a raw buffer at t0, in the layout edram_sample_address() gives - instead of
+// the CPU's per-sample conversion and upload. Constants as the converting
+// transfers' (only the destination half and the extent's stride and
+// destination depth flag are read); the depth variant's passes are theirs.
+[[nodiscard]] LoweredShader make_edram_canonical_color_load_shader(
+    ColorRenderTargetFormat destination);
+[[nodiscard]] LoweredShader make_edram_canonical_depth_load_shader(
+    DepthRenderTargetFormat destination, EdramDepthTransferPass pass,
+    Unorm24DepthWrite unorm24_write);
+
+// The reverse: a native image's EDRAM words packed into canonical storage on
+// the GPU (Phase 3: ownership flushes without a per-sample readback and CPU
+// conversion). A compute shader, one thread per host pixel and sample of a
+// region (8x8 groups, z = host sample): the sample's EDRAM word - packed as
+// the converting transfers pack it - is stored into the 10 MiB EDRAM image,
+// a raw buffer at u0 in space 1, at edram_sample_address()'s offset. The
+// source image is bound as the converting transfers bind it (t0, depth t0 and
+// t1). Constants as theirs, with the source half holding the region's left,
+// top, width and height. For the formats edram_canonical_load_supported()
+// accepts.
+[[nodiscard]] LoweredShader make_edram_canonical_store_shader(MsaaSamples source_host_samples,
+                                                              EdramTransferEndpoint source);
 
 struct ShaderCompileOptions {
   ShaderBinaryFormat format{ShaderBinaryFormat::Dxil};

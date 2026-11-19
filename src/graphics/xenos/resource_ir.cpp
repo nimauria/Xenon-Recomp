@@ -24,6 +24,25 @@ std::int32_t signed_bits(std::uint32_t value, unsigned first,
   return static_cast<std::int32_t>((raw ^ sign) - sign);
 }
 
+// The viewport transform as PA_CL_VTE_CNTL (0x2206) enables it: a scale or
+// offset whose enable bit is clear is the identity (scale 1, offset 0).
+// Direct3D's pre-transformed draws - its Clear among them - turn the X/Y
+// transform off and give vertices in render-target pixels.
+ViewportState effective_viewport(const std::uint32_t* registers) noexcept {
+  const auto vte = registers[0x2206];
+  const auto pick = [&](unsigned bit, std::uint32_t index, float identity) {
+    return bits(vte, bit, 1) ? std::bit_cast<float>(registers[index]) : identity;
+  };
+  ViewportState viewport{};
+  viewport.x_scale = pick(0, 0x210F, 1.0f);
+  viewport.x_offset = pick(1, 0x2110, 0.0f);
+  viewport.y_scale = pick(2, 0x2111, 1.0f);
+  viewport.y_offset = pick(3, 0x2112, 0.0f);
+  viewport.z_scale = pick(4, 0x2113, 1.0f);
+  viewport.z_offset = pick(5, 0x2114, 0.0f);
+  return viewport;
+}
+
 std::uint64_t hash_value(std::uint64_t hash, std::uint64_t value) noexcept {
   for (unsigned i = 0; i < 8; ++i) {
     hash ^= static_cast<std::uint8_t>(value >> (i * 8u));
@@ -161,6 +180,8 @@ NativePipelineKey DrawResourceState::native_pipeline_key(
     }
   }
   hash = hash_value(hash, raster.msaa_samples_log2);
+  hash = hash_value(hash, raster.clip_disabled);
+  hash = hash_value(hash, program.multipass());
   hash = hash_value(hash, raster.cull_front);
   hash = hash_value(hash, raster.cull_back);
   hash = hash_value(hash, raster.front_face_clockwise);
@@ -183,13 +204,18 @@ NativePipelineKey DrawResourceState::native_pipeline_key(
   return {hash};
 }
 
-ColorTargetPlan plan_color_targets(const DrawResourceState& state) noexcept {
+ColorTargetPlan plan_color_targets(const DrawResourceState& state,
+                                   std::uint8_t shader_color_outputs) noexcept {
   ColorTargetPlan plan{};
   if (state.edram_mode != EdramMode::ColorDepth) return plan;
 
   int highest_enabled = -1;
   for (std::size_t i = 0; i < state.color_targets.size(); ++i) {
-    const bool enabled = state.color_targets[i].enabled;
+    bool enabled = state.color_targets[i].enabled && ((shader_color_outputs >> i) & 1u) != 0;
+    for (std::size_t lower = 0; enabled && lower < i; ++lower)
+      if (plan.enabled[lower] &&
+          state.color_targets[lower].base_tile == state.color_targets[i].base_tile)
+        enabled = false;
     plan.enabled[i] = enabled;
     if (enabled) {
       plan.enabled_mask |= static_cast<std::uint8_t>(1u << i);
@@ -206,6 +232,72 @@ ColorTargetPlan plan_color_targets(const DrawResourceState& state) noexcept {
     }
   }
   return plan;
+}
+
+HostDepthTransform host_depth_transform(const RasterState& raster,
+                                        bool pixel_shader_writes_depth) noexcept {
+  HostDepthTransform transform{};
+  const auto& viewport = raster.viewport;
+  if (raster.clip_disabled) {
+    // Nothing is clipped: the whole Z transform runs in the vertex shader and
+    // depth is only clamped to 0...1.
+    transform.ndc_scale = viewport.z_scale;
+    transform.ndc_offset = viewport.z_offset;
+    return transform;
+  }
+  float offset = viewport.z_offset;
+  float scale = viewport.z_scale;
+  if (!raster.dx_clip_space) {
+    // -W...W becomes 0...W; the guest's scale and offset map -W...W, so the
+    // host range starts a scale lower and spans twice the scale.
+    offset = viewport.z_offset - viewport.z_scale;
+    scale = viewport.z_scale * 2.0f;
+    transform.ndc_scale = 0.5f;
+    transform.ndc_offset = 0.5f;
+  }
+  if (pixel_shader_writes_depth) return transform;
+  const auto saturate = [](float value) {
+    return value > 0.0f ? (value < 1.0f ? value : 1.0f) : 0.0f;  // NaN -> 0
+  };
+  transform.z_min = saturate(offset);
+  transform.z_max = saturate(offset + scale);
+  if (transform.z_min > transform.z_max) {
+    std::swap(transform.z_min, transform.z_max);
+    transform.ndc_scale = -transform.ndc_scale;
+    transform.ndc_offset = 1.0f - transform.ndc_offset;
+  }
+  return transform;
+}
+
+std::uint8_t shader_color_output_mask(const ShaderReflection& reflection) noexcept {
+  std::uint8_t mask = 0;
+  for (const auto index : reflection.exports)
+    if (index <= 3u) mask = static_cast<std::uint8_t>(mask | (1u << index));
+  return mask;
+}
+
+bool primitive_is_polygonal(PrimitiveType type) noexcept {
+  switch (type) {
+    case PrimitiveType::TriangleList:
+    case PrimitiveType::TriangleFan:
+    case PrimitiveType::TriangleStrip:
+    case PrimitiveType::TriangleWithWFlags:
+    case PrimitiveType::QuadList:
+    case PrimitiveType::QuadStrip:
+    case PrimitiveType::Polygon:
+      return true;
+    default:
+      return false;
+  }
+}
+
+RasterState host_raster_state(const RasterState& raster, PrimitiveType type) noexcept {
+  RasterState host = raster;
+  if (!primitive_is_polygonal(type)) {
+    host.cull_front = false;
+    host.cull_back = false;
+  }
+  return host;
 }
 
 HostPolygonMode host_polygon_mode(const RasterState& raster) noexcept {
@@ -473,12 +565,27 @@ ResolveRectangle decode_resolve_rectangle(
 void ResourceStateTracker::reset() noexcept {
   registers_.fill(0);
   generation_ = 0;
+  targets_dirty_ = true;
+  textures_dirty_ = ~0u;
+  vertex_buffers_dirty_.fill(~0u);
 }
 
 void ResourceStateTracker::apply(const ir::RegisterWrite& write) noexcept {
   if (write.index >= registers_.size()) return;
   registers_[write.index] = write.value;
   ++generation_;
+  // What the write changes of snapshot(): a fetch constant dword its texture
+  // slot (six dwords each) and vertex fetch (two); the float constants
+  // (0x4000-0x47FF) nothing; anything else the target/raster/copy state.
+  if (write.index >= kFetchConstantBase &&
+      write.index < kFetchConstantBase + kFetchConstantDwords) {
+    const auto offset = write.index - kFetchConstantBase;
+    if (offset / 6u < 32u) textures_dirty_ |= 1u << (offset / 6u);
+    if (const auto fetch = offset / 2u; fetch < 96u)
+      vertex_buffers_dirty_[fetch / 32u] |= 1u << (fetch % 32u);
+  } else if (write.index < 0x4000u || write.index >= kFetchConstantBase + kFetchConstantDwords) {
+    targets_dirty_ = true;
+  }
 }
 
 std::optional<VertexBufferDescriptor> ResourceStateTracker::vertex_buffer(
@@ -503,6 +610,29 @@ std::optional<TextureDescriptor> ResourceStateTracker::texture(
   return decode_texture_fetch_constant(
       {registers_[offset + 0u], registers_[offset + 1u], registers_[offset + 2u],
        registers_[offset + 3u], registers_[offset + 4u], registers_[offset + 5u]});
+}
+
+TextureDescriptor with_filter_override(TextureDescriptor descriptor,
+                                       const TextureFilterOverride& filters) noexcept {
+  if (filters.mag_filter != kTextureFilterUseFetchConstant)
+    descriptor.mag_filter = filters.mag_filter;
+  if (filters.min_filter != kTextureFilterUseFetchConstant)
+    descriptor.min_filter = filters.min_filter;
+  if (filters.mip_filter != kTextureFilterUseFetchConstant)
+    descriptor.mip_filter = filters.mip_filter;
+  if (filters.aniso_filter != kAnisoFilterUseFetchConstant)
+    descriptor.aniso_filter = filters.aniso_filter;
+  return descriptor;
+}
+
+std::optional<TextureFilterOverride> merge_texture_filters(
+    const std::optional<TextureFilterOverride>& pixel,
+    const std::optional<TextureFilterOverride>& vertex) noexcept {
+  if (!pixel) return vertex;
+  if (!vertex) return pixel;
+  auto merged = *pixel;
+  merged.conflicting = pixel->conflicting || vertex->conflicting || !pixel->same_filters(*vertex);
+  return merged;
 }
 
 std::optional<TextureDescriptor> decode_texture_fetch_constant(
@@ -559,6 +689,30 @@ std::optional<TextureDescriptor> decode_texture_fetch_constant(
 }
 
 DrawResourceState ResourceStateTracker::snapshot() const noexcept {
+  if (targets_dirty_) {
+    auto targets = snapshot_targets();
+    targets.textures = decoded_.textures;
+    targets.vertex_buffers = decoded_.vertex_buffers;
+    decoded_ = targets;
+    targets_dirty_ = false;
+  }
+  for (auto dirty = textures_dirty_; dirty; dirty &= dirty - 1u) {
+    const auto slot = static_cast<unsigned>(std::countr_zero(dirty));
+    decoded_.textures[slot] = texture(slot);
+  }
+  textures_dirty_ = 0u;
+  for (unsigned word = 0; word < vertex_buffers_dirty_.size(); ++word) {
+    for (auto dirty = vertex_buffers_dirty_[word]; dirty; dirty &= dirty - 1u) {
+      const auto fetch = word * 32u + static_cast<unsigned>(std::countr_zero(dirty));
+      decoded_.vertex_buffers[fetch / 3u][fetch % 3u] = vertex_buffer(fetch / 3u, fetch % 3u);
+    }
+    vertex_buffers_dirty_[word] = 0u;
+  }
+  decoded_.generation = generation_;
+  return decoded_;
+}
+
+DrawResourceState ResourceStateTracker::snapshot_targets() const noexcept {
   DrawResourceState result{};
   result.generation = generation_;
   result.edram_mode = static_cast<EdramMode>(bits(registers_[0x2208], 0, 3));
@@ -623,12 +777,16 @@ DrawResourceState ResourceStateTracker::snapshot() const noexcept {
   result.raster.window_offset_x = signed_bits(window_offset, 0, 15);
   result.raster.window_offset_y = signed_bits(window_offset, 16, 15);
   result.raster.d3d_pixel_center = bits(registers_[0x2302], 0, 1) == 0;
-  result.raster.viewport.x_scale = std::bit_cast<float>(registers_[0x210F]);
-  result.raster.viewport.x_offset = std::bit_cast<float>(registers_[0x2110]);
-  result.raster.viewport.y_scale = std::bit_cast<float>(registers_[0x2111]);
-  result.raster.viewport.y_offset = std::bit_cast<float>(registers_[0x2112]);
-  result.raster.viewport.z_scale = std::bit_cast<float>(registers_[0x2113]);
-  result.raster.viewport.z_offset = std::bit_cast<float>(registers_[0x2114]);
+  result.raster.viewport = effective_viewport(registers_.data());
+  result.raster.clip_disabled = bits(registers_[0x2204], 16, 1) != 0u;
+  result.raster.dx_clip_space = bits(registers_[0x2204], 19, 1) != 0u;
+  result.raster.user_clip_planes = result.raster.clip_disabled
+                                       ? std::uint8_t{0}
+                                       : static_cast<std::uint8_t>(bits(registers_[0x2204], 0, 6));
+  const auto program_control = registers_[0x2180];
+  result.program.vertex_export_mode = static_cast<std::uint8_t>(bits(program_control, 24, 3));
+  result.program.param_gen = bits(program_control, 18, 1) != 0u;
+  result.program.param_gen_position = static_cast<std::uint8_t>(bits(registers_[0x2181], 8, 8));
   // How far down the draw can reach (as xenia's DrawExtentEstimator::
   // EstimateMaxY, without inspecting vertices). With clipping enabled
   // (PA_CL_CLIP_CNTL.clip_disable, bit 16, clear) geometry ends at the
@@ -775,10 +933,6 @@ DrawResourceState ResourceStateTracker::snapshot() const noexcept {
   result.depth_target.stencil_back_reference = static_cast<std::uint8_t>(stencil_back);
   result.depth_target.stencil_back_read_mask = static_cast<std::uint8_t>(stencil_back >> 8u);
   result.depth_target.stencil_back_write_mask = static_cast<std::uint8_t>(stencil_back >> 16u);
-  for (unsigned i = 0; i < 32; ++i) {
-    result.textures[i] = texture(i);
-    for (unsigned j = 0; j < 3; ++j) result.vertex_buffers[i][j] = vertex_buffer(i, j);
-  }
   return result;
 }
 
@@ -910,7 +1064,7 @@ MemExportPlan ResourceStateTracker::plan_memexport(
 
 bool ResourceStateTracker::write_constant_buffer(
     std::span<std::byte> destination) const noexcept {
-  constexpr std::size_t kSize = 9472;
+  constexpr std::size_t kSize = kShaderConstantBufferBytes;
   if (destination.size() < kSize) return false;
   std::fill_n(destination.begin(), kSize, std::byte{});
   // float4[512]
@@ -947,10 +1101,10 @@ bool ResourceStateTracker::write_constant_buffer(
         pack_vertex(1u), pack_vertex(2u)};
     std::memcpy(destination.data() + 8832 + i * 16, packed.data(), sizeof(packed));
   }
-  // The final 128 bytes of the stable constant ABI are per-draw native
-  // translation state. Keep this generic rather than specializing shaders for
+  // The rest of the stable constant ABI is per-draw native translation state
+  // (XenonDrawState). Keep this generic rather than specializing shaders for
   // alpha reference or alpha-to-mask offsets.
-  std::array<std::uint32_t, 8> draw_state{};
+  std::array<std::uint32_t, (kShaderConstantBufferBytes - kDrawStateOffset) / 4u> draw_state{};
   const auto color_control = registers_[0x2202];
   draw_state[0] = (bits(color_control, 3, 1) ? 1u : 0u) |
                   (bits(color_control, 4, 1) ? 2u : 0u);
@@ -967,7 +1121,57 @@ bool ResourceStateTracker::write_constant_buffer(
   draw_state[5] = registers_[0x2102];
   draw_state[6] = registers_[0x2101];
   draw_state[7] = registers_[0x2100];
-  std::memcpy(destination.data() + 9344, draw_state.data(),
+  // The guest viewport transform, applied by the vertex shader so that a
+  // disabled transform (pre-transformed pixel coordinates) is not clipped by
+  // a host viewport: render-target pixel = position.xy * scale + offset.
+  // The offset carries the window offset when PA_SU_SC_MODE_CNTL applies it
+  // to vertices, and half a pixel for Direct3D pixel centers (PA_SU_VTX_CNTL
+  // bit 0 clear), whose pixel i is centered at i rather than the host's
+  // i + 0.5. Words 13/14 (2 / render target width, height) are the host's.
+  const auto viewport = effective_viewport(registers_.data());
+  const float center = bits(registers_[0x2302], 0, 1) == 0u ? 0.5f : 0.0f;
+  const bool window_offset = bits(registers_[0x2205], 16, 1) != 0u;
+  const auto window = registers_[0x2080];
+  draw_state[8] = std::bit_cast<std::uint32_t>(viewport.x_scale);
+  draw_state[9] = std::bit_cast<std::uint32_t>(viewport.y_scale);
+  draw_state[10] = std::bit_cast<std::uint32_t>(
+      viewport.x_offset + center +
+      (window_offset ? static_cast<float>(signed_bits(window, 0, 15)) : 0.0f));
+  draw_state[11] = std::bit_cast<std::uint32_t>(
+      viewport.y_offset + center +
+      (window_offset ? static_cast<float>(signed_bits(window, 16, 15)) : 0.0f));
+  // PA_CL_VTE_CNTL VTX_XY_FMT, VTX_Z_FMT, VTX_W0_FMT (bits 8-10).
+  draw_state[12] = bits(registers_[0x2206], 8, 3);
+  // Words 16 and 17 (XenonDrawState[4].xy): the Z part of the host depth
+  // transform, here for a pixel shader that does not write depth (the backend
+  // writes the draw's own). Word 18 holds the draw's primitive class and point
+  // size source (backend-written, see kDrawStateFlag*).
+  RasterState raster{};
+  raster.viewport = viewport;
+  raster.clip_disabled = bits(registers_[0x2204], 16, 1) != 0u;
+  raster.dx_clip_space = bits(registers_[0x2204], 19, 1) != 0u;
+  raster.user_clip_planes =
+      raster.clip_disabled ? std::uint8_t{0}
+                           : static_cast<std::uint8_t>(bits(registers_[0x2204], 0, 6));
+  const auto depth_transform = host_depth_transform(raster, false);
+  draw_state[16] = std::bit_cast<std::uint32_t>(depth_transform.ndc_scale);
+  draw_state[17] = std::bit_cast<std::uint32_t>(depth_transform.ndc_offset);
+  // Word 19 and XenonDrawState[5..10]: the enabled user clip planes and the
+  // planes themselves (PA_CL_UCP_0..5, registers 0x2388-0x239F), in guest
+  // clip space.
+  draw_state[19] = raster.user_clip_planes;
+  for (std::size_t i = 0; i < 24; ++i) draw_state[20 + i] = registers_[0x2388 + i];
+  // XenonDrawState[11]: point sprite diameters in pixels - the constant
+  // width and height (PA_SU_POINT_SIZE, radii in 12.4 fixed point), then the
+  // minimum and maximum a vertex-exported size is clamped to
+  // (PA_SU_POINT_MINMAX).
+  const auto point_size = registers_[0x2280];
+  const auto point_limits = registers_[0x2281];
+  draw_state[44] = std::bit_cast<std::uint32_t>(float(bits(point_size, 16, 16)) * (2.0f / 16.0f));
+  draw_state[45] = std::bit_cast<std::uint32_t>(float(bits(point_size, 0, 16)) * (2.0f / 16.0f));
+  draw_state[46] = std::bit_cast<std::uint32_t>(float(bits(point_limits, 0, 16)) * (2.0f / 16.0f));
+  draw_state[47] = std::bit_cast<std::uint32_t>(float(bits(point_limits, 16, 16)) * (2.0f / 16.0f));
+  std::memcpy(destination.data() + kDrawStateOffset, draw_state.data(),
               draw_state.size() * sizeof(std::uint32_t));
   return true;
 }

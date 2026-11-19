@@ -301,6 +301,24 @@ int main() {
   }
   std::cout << "  [PASS] The same provider correctly selects revision B's data for revision B's XEX\n";
 
+  // Hook sources: every .cpp in the revision's hooks/ directory, sorted;
+  // none for a revision without one.
+  {
+    const auto hooks = module_root / "revisions" / hash_a / "hooks";
+    std::filesystem::create_directories(hooks);
+    write_text_file(hooks / "b_hooks.cpp", "");
+    write_text_file(hooks / "a_hooks.cpp", "");
+    write_text_file(hooks / "notes.txt", "");
+    std::vector<std::filesystem::path> sources;
+    std::string error;
+    assert(provider.hook_sources(identity_a, sources, error) && error.empty());
+    assert(sources.size() == 2);
+    assert(sources[0].filename() == "a_hooks.cpp" && sources[1].filename() == "b_hooks.cpp");
+    sources.clear();
+    assert(provider.hook_sources(identity_b, sources, error) && sources.empty());
+  }
+  std::cout << "  [PASS] Provider supplies a revision's instruction hook sources\n";
+
   std::filesystem::remove_all(module_root);
   std::cout << "All ModuleHintProvider tests passed!\n";
   return 0;

@@ -151,6 +151,13 @@ const DiscoveredFunction* find_strongest_owner(const std::vector<DiscoveredFunct
 void build_guest_entry_map(AnalysisReport& report, std::vector<GuestEntryPoint> absorbed_entries,
                            const DriverOptions& effective,
                            const std::vector<analysis::RuntimeHelper>& expanded_runtime_helpers);
+// build_guest_entry_map, then withdraws (leaves to the interpreter) every
+// function known only from runtime observation whose own jumps leave it for
+// an address with no entry, rebuilding the map until none remains.
+void build_guest_entry_map_withdrawing_unanchored(
+    AnalysisReport& report, const std::vector<GuestEntryPoint>& absorbed_entries,
+    const DriverOptions& effective,
+    const std::vector<analysis::RuntimeHelper>& expanded_runtime_helpers);
 void diagnose_function_ownership(AnalysisReport& report, const ExecutableRangeIndex& range_index);
 void deduplicate_unresolved(AnalysisReport& report);
 

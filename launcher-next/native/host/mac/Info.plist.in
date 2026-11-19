@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>CFBundleExecutable</key><string>@XENON_MAC_EXECUTABLE@</string>
+  <key>CFBundleName</key><string>@XENON_MAC_EXECUTABLE@</string>
+  <key>CFBundleDisplayName</key><string>Xenon Launcher</string>
+  <key>CFBundleIdentifier</key><string>@XENON_MAC_BUNDLE_ID@</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleVersion</key><string>@PROJECT_VERSION@</string>
+  <key>CFBundleShortVersionString</key><string>@PROJECT_VERSION@</string>
+  <key>LSMinimumSystemVersion</key><string>13.0</string>
+  <key>NSHighResolutionCapable</key><true/>
+  <key>NSPrincipalClass</key><string>@XENON_MAC_PRINCIPAL_CLASS@</string>
+  <key>LSUIElement</key><@XENON_MAC_AGENT@/>
+</dict></plist>

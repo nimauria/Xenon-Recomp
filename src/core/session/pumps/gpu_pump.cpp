@@ -1,15 +1,22 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <iostream>
 #include <mutex>
 #include <thread>
+#include <vector>
 
 #include "core/session/session_internal.hpp"
 #include "xenon/core/frame_dump.hpp"
+#include "xenon/gpu/display_vblank.hpp"
+#include "xenon/gpu/perf_stats.hpp"
 #include "xenon/gpu/resource_ir.hpp"
+#include "xenon/logging/activity_trace.hpp"
+#include "xenon/logging/logger.hpp"
 #include "xenon/logging/probe_log.hpp"
 
 namespace xenon::core {
@@ -98,6 +105,15 @@ bool XenonSession::start_gpu_pump_thread() {
   // true yet. Ring work published from now on wakes the worker.
   gpu_pump_running_.store(true);
   kernel_process_->set_gpu_work_notifier([this] { gpu_wake_.notify(kGpuWakeRingWork); });
+  // GPU V3: graphics IR is played, and frames presented, on a backend thread
+  // of its own while the pump decodes on (gpu::BackendExecutor).
+  // XENON_GPU_BACKEND_THREAD=0 keeps both on the pump thread, for A/B
+  // measurements against the single-threaded pipeline.
+  last_presented_generation_ = 0;
+  {
+    const char* value = std::getenv("XENON_GPU_BACKEND_THREAD");
+    if (!(value && value[0] == '0' && value[1] == '\0')) graphics_system_->start_backend_thread();
+  }
 
   if (!gpu_pump_thread_->start() || !gpu_vsync_thread_->start()) {
     set_error("Failed to start the GPU pump threads");
@@ -128,6 +144,9 @@ void XenonSession::stop_gpu_pump_thread() noexcept {
     static_cast<void>(gpu_pump_thread_->join());
     gpu_pump_thread_.reset();
   }
+  // The pump no longer hands work over: play what it handed over (presents
+  // included), then join the backend thread, before gpu_ can be destroyed.
+  if (graphics_system_) graphics_system_->stop_backend_thread();
 }
 
 // XENON_FRAME_DUMP=<directory>: every XENON_FRAME_DUMP_EVERY-th presented
@@ -147,6 +166,33 @@ void XenonSession::dump_presented_frame(const gpu::PresentationFrame& frame) {
   }();
   const auto index = dumped_frame_candidates_++;
   if (index % every != 0u) return;
+  // With probe logs on, the guest bytes behind the dumped frame are hashed
+  // the same way full-frame resolves are (frontbuffer_diag.log), so a stale
+  // dump can be told apart: a hash no resolve produced means the scan-out
+  // read something other than guest memory.
+  if (logging::probe_logs_enabled() && memory_) {
+    constexpr std::uint32_t kHashedBytes = 1280u * 720u * 4u;
+    std::vector<std::byte> bytes(kHashedBytes);
+    std::uint64_t hash = 0;
+    if (memory_->copy_physical_range(frame.texture.base_address, bytes)) {
+      hash = 1469598103934665603ull;
+      for (std::size_t i = 0; i + 8u <= bytes.size(); i += 8u) {
+        std::uint64_t word{};
+        std::memcpy(&word, bytes.data() + i, 8u);
+        hash = (hash ^ word) * 1099511628211ull;
+      }
+    }
+    const auto now_us = std::chrono::duration_cast<std::chrono::microseconds>(
+                            std::chrono::steady_clock::now().time_since_epoch())
+                            .count();
+    logging::append_probe_log("frontbuffer_diag.log",
+                              "t=%lld.%03lld present frame_index=%llu base=0x%08X hash=%016llX\n",
+                              static_cast<long long>(now_us / 1000),
+                              static_cast<long long>(now_us % 1000),
+                              static_cast<unsigned long long>(index),
+                              static_cast<unsigned>(frame.texture.base_address),
+                              static_cast<unsigned long long>(hash));
+  }
   gpu::PreparedPresentationFrame image{};
   if (!gpu_->capture_scanout(frame, 640u, 360u, image)) return;
   const auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -169,6 +215,11 @@ std::uint32_t XenonSession::run_gpu_pump_thread() {
     kernel_process_->thread_manager().set_current_thread(gpu_pump_thread_);
   }
 
+  logging::set_activity_thread_label("gpu pump");
+  static const auto ring_key = logging::intern_activity(
+      {"gpu", "ring submit", {"read", "write", "capacity", ""}, true});
+  static const auto present_key =
+      logging::intern_activity({"gpu", "present", {"generation", "", "", ""}, false});
   using Clock = std::chrono::steady_clock;
   // The worker sleeps until the guest publishes ring work, the vsync thread
   // asks for a frame, or the session stops. Two cases still poll: a drain
@@ -176,8 +227,83 @@ std::uint32_t XenonSession::run_gpu_pump_thread() {
   // which raises no notification; and a bounded idle fallback.
   constexpr auto kParkedWaitPoll = std::chrono::milliseconds(1);
   constexpr auto kIdleFallback = std::chrono::milliseconds(50);
-  // The front buffer generation (VdSwap count) last presented successfully.
-  std::uint64_t last_presented_generation = 0;
+  // The VdSwap count last added to the frame statistics.
+  std::uint64_t counted_swap_generation = 0;
+
+  // Live GPU capture (XENON_GPU_CAPTURE=1): whole frames of the running
+  // title recorded as a portable capture in the probe directory
+  // (gpu_capture_<n>.xgc; tools/gpu-replay replays and times it), when
+  //   - a file named capture.signal appears in the probe directory (it is
+  //     removed once seen), or
+  //   - a second decodes at least XENON_GPU_CAPTURE_DRAWS draws (default
+  //     30000, a heavy mission scene; 0 turns this off), at most
+  //     XENON_GPU_CAPTURE_COUNT times (default 1).
+  // Each covers XENON_GPU_CAPTURE_FRAMES frames (default 2). Checked once a
+  // second; the outcome goes to the console and gpu_capture.log.
+  struct LiveCapture {
+    bool enabled{};
+    std::uint32_t frames{2};
+    std::uint64_t draw_threshold{30000};
+    std::uint64_t automatic_left{1};
+    std::uint32_t written{};
+    Clock::time_point next_check{};
+    std::uint64_t draws_at_check{};
+  } capture;
+  {
+    const auto number = [](const char* name, std::uint64_t fallback) {
+      const char* value = std::getenv(name);
+      if (!value || !*value) return fallback;
+      char* end = nullptr;
+      const auto parsed = std::strtoull(value, &end, 10);
+      return end && *end == '\0' ? static_cast<std::uint64_t>(parsed) : fallback;
+    };
+    const char* enabled = std::getenv("XENON_GPU_CAPTURE");
+    capture.enabled = enabled && enabled[0] == '1' && enabled[1] == '\0';
+    capture.frames = static_cast<std::uint32_t>(
+        (std::min<std::uint64_t>)((std::max<std::uint64_t>)(number("XENON_GPU_CAPTURE_FRAMES", 2), 1), 600));
+    capture.draw_threshold = number("XENON_GPU_CAPTURE_DRAWS", 30000);
+    capture.automatic_left = number("XENON_GPU_CAPTURE_COUNT", 1);
+  }
+  const auto poll_live_capture = [&](Clock::time_point now) {
+    if (auto result = graphics_system_->take_frame_capture_result()) {
+      const auto line =
+          result->ok
+              ? "GPU capture written: " + result->path.string() + " (" +
+                    std::to_string(result->drains) + " drains, " +
+                    std::to_string(result->commands) + " commands, " +
+                    std::to_string(result->draws) + " draws, " +
+                    std::to_string(result->physical_bytes / (1024u * 1024u)) + " MiB of guest memory)"
+              : "GPU capture failed: " + result->path.string() + ": " + result->error;
+      logging::append_run_log("gpu_capture.log", "%s\n", line.c_str());
+      if (config_.enable_logging) {
+        std::scoped_lock console_log_lock(console_log_mutex());
+        std::cout << "[XenonSession] " << line << std::endl;
+      }
+    }
+    if (now < capture.next_check) return;
+    const bool first = capture.next_check == Clock::time_point{};
+    capture.next_check = now + std::chrono::seconds(1);
+    const auto draws = graphics_system_->command_processor().draw_count();
+    const auto draws_this_second = draws - capture.draws_at_check;
+    capture.draws_at_check = draws;
+    if (first || graphics_system_->frame_capture_armed()) return;
+    const std::filesystem::path directory = logging::probe_log_directory();
+    if (directory.empty()) return;
+    std::error_code ignored;
+    bool arm = false;
+    if (std::filesystem::exists(directory / "capture.signal", ignored)) {
+      std::filesystem::remove(directory / "capture.signal", ignored);
+      arm = true;
+    } else if (capture.draw_threshold && capture.automatic_left &&
+               draws_this_second >= capture.draw_threshold) {
+      --capture.automatic_left;
+      arm = true;
+    }
+    if (arm)
+      graphics_system_->arm_frame_capture(
+          directory / ("gpu_capture_" + std::to_string(capture.written++) + ".xgc"),
+          capture.frames);
+  };
 
   while (gpu_pump_running_.load(std::memory_order_relaxed)) {
     const bool parked =
@@ -187,17 +313,51 @@ std::uint32_t XenonSession::run_gpu_pump_thread() {
     if (!gpu_pump_running_.load(std::memory_order_relaxed)) break;
     if (!graphics_system_ || !gpu_ || !kernel_process_) continue;
 
+    // A vblank scans out what the front buffer holds now, before any ring
+    // work the title queues after it: the vsync thread holds the interrupt
+    // that releases the title to render into that buffer again until this
+    // has been presented (scanout_latched_).
+    //
+    // The present is a backend operation behind the work decoded so far,
+    // which drew what the front buffer holds: it waits for that work (a
+    // pipelined drain may still be executing), and runs on this thread
+    // without a hand-off when the backend is idle (measured: posting it woke
+    // the backend thread at each vblank for no overlap).
+    if ((reasons & kGpuWakePresent) != 0u) {
+      const auto vblank = scanout_requested_.load(std::memory_order_acquire);
+      const auto front_buffer = kernel_process_->gpu_front_buffer();
+      graphics_system_->run_backend_task([this, vblank, front_buffer] {
+        // Claim the vblank; one the vsync thread already gave up on (its
+        // interrupt is out and the title may be rendering into the buffer)
+        // is not presented.
+        auto claim = scanout_claim_.load(std::memory_order_acquire);
+        do {
+          if ((claim >> 1u) >= vblank) return;
+        } while (!scanout_claim_.compare_exchange_weak(claim, vblank << 1u,
+                                                        std::memory_order_acq_rel,
+                                                        std::memory_order_acquire));
+        logging::ActivityScope present_activity(present_key,
+                                                {last_presented_generation_, 0, 0, 0});
+        present_front_buffer(front_buffer);
+        scanout_latched_.publish(vblank);
+      });
+    }
+
     const auto _tick_phase_start = Clock::now();
     const auto ring = kernel_process_->gpu_ring_buffer();
     if (ring.configured() && ring.write_index != ring.read_index) {
+      logging::ActivityScope ring_activity(
+          ring_key, {ring.read_index, ring.write_index, ring.capacity_dwords, 0u});
       try {
-        // Executes the drained work in order with its fences and interrupts,
-        // so the read pointer below is written back only once the commands
-        // before it, and the ring words they used, are done with.
+        // Executes the drained work in order with its fences and interrupts.
+        // The kernel's read index is where decoding goes on; the guest's copy
+        // below is written back only once the commands before it, and the
+        // ring words they used, are done with.
         const auto new_read_index = graphics_system_->submit_ring(
             *gpu_, ring.base_address, ring.capacity_dwords, ring.read_index,
             ring.write_index);
         kernel_process_->set_gpu_ring_buffer_read_index(new_read_index);
+        ring_activity.result = new_read_index;
         // Real Xenos read-pointer write-back hardware semantics
         // (VdEnableRingBufferRPtrWriteBack): mirror the freshly-consumed
         // read index into guest memory so the guest can poll its own copy.
@@ -205,15 +365,64 @@ std::uint32_t XenonSession::run_gpu_pump_thread() {
         // does VdInitializeRingBuffer), so write it as physical memory: treating
         // it as a guest virtual address faulted on the free page every drain and
         // the title never saw the read pointer advance.
+        //
+        // The read pointer is the command processor's FETCH position, as on
+        // the Xenos, whose read pointer advances as it fetches commands
+        // ahead of the shader pipes finishing them: it is written as soon as
+        // the drain is decoded, not behind its work. Decoding copies what
+        // it needs out of the command words (register values, immediate
+        // indices, shader microcode; indirect buffers are decoded inline),
+        // so the guest may reuse them at once; the work's own guest-visible
+        // effects (fences, interrupts, flips) stay ordered behind it. Data a
+        // draw reads by address from command memory (Direct3D's
+        // BeginVertices/DrawPrimitiveUP vertices, inline index buffers) is
+        // read only when the draw executes, so a drain with such a draw
+        // (CommandProcessor::drain_reads_command_memory()) writes its read
+        // pointer behind its work, as all drains used to. Held behind the
+        // work, the read pointer kept ring space from the guest until the
+        // backend finished each drain: AC6's Direct3D spins for ring space
+        // (0x821E6240), and in missions that spin was half of its main
+        // thread's time.
+        // XENON_GPU_RPTR_AFTER_WORK=1 (development A/B only) holds every
+        // drain's read pointer behind its work.
         if (ring.rptr_writeback_address != 0 && memory_) {
-          const std::array<std::byte, 4> big_endian{
-              static_cast<std::byte>(new_read_index >> 24), static_cast<std::byte>(new_read_index >> 16),
-              static_cast<std::byte>(new_read_index >> 8), static_cast<std::byte>(new_read_index)};
-          if (!memory_->write_physical(ring.rptr_writeback_address, big_endian) &&
-              config_.enable_logging) {
-            std::scoped_lock console_log_lock(console_log_mutex());
-            std::cout << "[XenonSession] GPU pump: read-pointer writeback to physical 0x" << std::hex
-                      << ring.rptr_writeback_address << std::dec << " has no RAM backing" << std::endl;
+          if (!memory_->physical_data(ring.rptr_writeback_address)) {
+            if (config_.enable_logging) {
+              std::scoped_lock console_log_lock(console_log_mutex());
+              std::cout << "[XenonSession] GPU pump: read-pointer writeback to physical 0x"
+                        << std::hex << ring.rptr_writeback_address << std::dec
+                        << " has no RAM backing" << std::endl;
+            }
+          } else {
+            static const bool after_work = [] {
+#if defined(_MSC_VER)
+#pragma warning(push)
+#pragma warning(disable : 4996)
+#endif
+              const char* value = std::getenv("XENON_GPU_RPTR_AFTER_WORK");
+#if defined(_MSC_VER)
+#pragma warning(pop)
+#endif
+              return value && *value == '1';
+            }();
+            const std::array<std::byte, 4> big_endian{
+                static_cast<std::byte>(new_read_index >> 24),
+                static_cast<std::byte>(new_read_index >> 16),
+                static_cast<std::byte>(new_read_index >> 8),
+                static_cast<std::byte>(new_read_index)};
+            const bool reads_command_memory =
+                graphics_system_->command_processor().drain_reads_command_memory();
+            if (after_work || reads_command_memory) {
+              graphics_system_->write_guest_after_work(
+                  ring.rptr_writeback_address,
+                  std::vector<std::byte>(big_endian.begin(), big_endian.end()));
+              gpu::perf::add(gpu::perf::Counter::ReadPointerHeld, 1u);
+            } else if (graphics_system_->write_guest_ahead_of_work(
+                           ring.rptr_writeback_address, big_endian)) {
+              gpu::perf::add(gpu::perf::Counter::ReadPointerEarly, 1u);
+            } else {
+              gpu::perf::add(gpu::perf::Counter::ReadPointerHeld, 1u);
+            }
           }
         }
       } catch (const std::exception& ex) {
@@ -230,6 +439,10 @@ std::uint32_t XenonSession::run_gpu_pump_thread() {
     }
 
     const auto _after_submit_ring = Clock::now();
+    gpu::perf::add(gpu::perf::Counter::RingNs,
+                   static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                                  _after_submit_ring - _tick_phase_start)
+                                                  .count()));
 
     // Graphics IR a failed drain left decoded is still played into the
     // backend (see GraphicsSystem::execute_ir()).
@@ -245,6 +458,18 @@ std::uint32_t XenonSession::run_gpu_pump_thread() {
 
     {
       const auto _after_execute_ir = Clock::now();
+      gpu::perf::add(gpu::perf::Counter::IrNs,
+                     static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                                    _after_execute_ir - _after_submit_ring)
+                                                    .count()));
+      const auto swap_generation = kernel_process_->gpu_front_buffer().generation;
+      if (swap_generation > counted_swap_generation) {
+        if (counted_swap_generation != 0)
+          gpu::perf::add(gpu::perf::Counter::Swaps, swap_generation - counted_swap_generation);
+        counted_swap_generation = swap_generation;
+      }
+      gpu::perf::flush_if_due(_after_execute_ir);
+      if (capture.enabled) poll_live_capture(_after_execute_ir);
       const auto _submit_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                                    _after_submit_ring - _tick_phase_start)
                                    .count();
@@ -259,9 +484,15 @@ std::uint32_t XenonSession::run_gpu_pump_thread() {
         }
       }
     }
+  }
+  return 0;
+}
 
-    if ((reasons & kGpuWakePresent) == 0u) continue;
-    const auto front_buffer = kernel_process_->gpu_front_buffer();
+void XenonSession::present_front_buffer(
+    const kernel::KernelProcess::GpuFrontBufferState& front_buffer) {
+  using Clock = std::chrono::steady_clock;
+  auto& last_presented_generation = last_presented_generation_;
+  {
     // What is scanned out is the front buffer as VdSwap's texture fetch
     // constant describes it; a front buffer published without one has no
     // known layout and is not presented.
@@ -272,6 +503,16 @@ std::uint32_t XenonSession::run_gpu_pump_thread() {
     // detiling and uploading the scan-out costs tens of milliseconds, and
     // repeating it every vsync for an unchanged frame starved ring work. A
     // present that did not succeed is retried at the next vsync.
+    if (front_buffer.base_address != 0 && !texture &&
+        front_buffer.generation != last_presented_generation) {
+      // Nothing reaches the screen while this lasts.
+      char entry[128];
+      std::snprintf(entry, sizeof(entry),
+                    "front buffer at 0x%08X has a fetch constant that does not decode to a "
+                    "texture; the frame cannot be presented",
+                    static_cast<unsigned>(front_buffer.base_address));
+      logging::Logger::instance().record(logging::Level::Error, "gpu", entry);
+    }
     if (front_buffer.base_address != 0 && texture &&
         front_buffer.generation != last_presented_generation) {
       gpu::PresentationFrame frame{};
@@ -280,7 +521,13 @@ std::uint32_t XenonSession::run_gpu_pump_thread() {
       frame.visible_height = front_buffer.height ? front_buffer.height : texture->height;
       const auto _present_start = Clock::now();
       const auto status = graphics_system_->present(*gpu_, frame);
+      const auto _present_end = Clock::now();
+      gpu::perf::add(gpu::perf::Counter::PresentNs,
+                     static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                                    _present_end - _present_start)
+                                                    .count()));
       if (status == gpu::PresentStatus::Success || status == gpu::PresentStatus::Suboptimal) {
+        gpu::perf::note_presented_frame(_present_end);
         last_presented_generation = front_buffer.generation;
         dump_presented_frame(frame);
       }
@@ -291,6 +538,13 @@ std::uint32_t XenonSession::run_gpu_pump_thread() {
       if (status == gpu::PresentStatus::Error || status == gpu::PresentStatus::Unsupported ||
           status == gpu::PresentStatus::SurfaceLost) {
         auto message = gpu_->last_error();
+        logging::Logger::instance().record(
+            logging::Level::Error, "gpu",
+            std::string("present failed (") +
+                (status == gpu::PresentStatus::Error         ? "error"
+                 : status == gpu::PresentStatus::Unsupported ? "unsupported"
+                                                             : "surface lost") +
+                "): " + message);
         std::scoped_lock lock(gpu_present_error_mutex_);
         gpu_present_error_ = std::move(message);
       }
@@ -306,7 +560,6 @@ std::uint32_t XenonSession::run_gpu_pump_thread() {
       }
     }
   }
-  return 0;
 }
 
 std::uint32_t XenonSession::run_gpu_vsync_thread() {
@@ -314,25 +567,126 @@ std::uint32_t XenonSession::run_gpu_vsync_thread() {
     kernel_process_->thread_manager().set_current_thread(gpu_vsync_thread_);
   }
 
+  logging::set_activity_thread_label("gpu vsync");
+  static const auto vblank_key = logging::intern_activity(
+      {"gpu", "vblank interrupt", {"callback", "front_buffer", "latch_timeout", ""}, true});
   using Clock = std::chrono::steady_clock;
   constexpr auto kVsyncInterval = std::chrono::nanoseconds(16'666'667);  // ~60Hz
+  // The display is re-resolved this often: the window may move to another
+  // monitor, or the mode change.
+  constexpr auto kDisplayReselect = std::chrono::seconds(2);
+  // Consecutive unusable display vblanks (a failed wait, or one returning far
+  // sooner than a refresh, as an output that is off does) before the timer
+  // takes over until the next re-resolve.
+  constexpr int kMaxUnusableDisplayVblanks = 3;
+  // Longest a vblank interrupt waits for the worker to latch the scan-out.
+  constexpr auto kScanoutLatchTimeout = std::chrono::milliseconds(8);
+  // Longest it then waits for a present already under way (a hung backend
+  // must not stop vblanks).
+  constexpr auto kScanoutPresentTimeout = std::chrono::milliseconds(100);
   auto next_vsync = Clock::now() + kVsyncInterval;
 
+  // Guest vblanks fall on host display refreshes where the refresh rate is a
+  // whole multiple of 60 Hz (gpu/display_vblank.hpp): a frame the title holds
+  // for N vblanks is then on screen for exactly N refreshes, where a free
+  // 60 Hz timer drifting against the display made it alternate N-1 / N+1.
+  gpu::HostDisplayVblank display;
+  std::uint32_t refreshes_per_vblank = 0;  // 0: timer-paced
+  int unusable_display_vblanks = 0;
+  auto reselect_at = Clock::now();
+  auto last_display_vblank = Clock::time_point{};
+
   while (gpu_pump_running_.load(std::memory_order_relaxed)) {
-    std::this_thread::sleep_until(next_vsync);
+    if (Clock::now() >= reselect_at) {
+      display.select(presentation_window_.load(std::memory_order_acquire));
+      refreshes_per_vblank =
+          display.available() ? gpu::host_refreshes_per_guest_vblank(display.refresh_hz()) : 0u;
+      unusable_display_vblanks = 0;
+      reselect_at = Clock::now() + kDisplayReselect;
+    }
+    bool display_locked = false;
+    if (refreshes_per_vblank != 0u && unusable_display_vblanks < kMaxUnusableDisplayVblanks) {
+      bool waited = true;
+      const auto wait_started = Clock::now();
+      for (std::uint32_t i = 0; waited && i < refreshes_per_vblank; ++i) waited = display.wait();
+      const auto now = Clock::now();
+      // A wait longer than the display's refreshes, or a vblank sooner than
+      // them after the last one, is a display that does not wait at its
+      // reported rate (display_wait_overran, display_wait_returned_early):
+      // timer-paced vblanks keep the guest's 60 Hz instead.
+      const bool too_long = gpu::display_wait_overran(
+          display.refresh_hz(), refreshes_per_vblank,
+          std::chrono::duration_cast<std::chrono::nanoseconds>(now - wait_started));
+      const bool too_soon = gpu::display_wait_returned_early(
+          display.refresh_hz(), refreshes_per_vblank,
+          std::chrono::duration_cast<std::chrono::nanoseconds>(now - last_display_vblank));
+      if (waited && !too_long && !too_soon) {
+        display_locked = true;
+        unusable_display_vblanks = 0;
+        last_display_vblank = now;
+        next_vsync = now + kVsyncInterval;
+      } else {
+        ++unusable_display_vblanks;
+      }
+    }
+    if (!display_locked) {
+      std::this_thread::sleep_until(next_vsync);
+      // Catch up rather than deliver a burst of back-to-back vsyncs after a
+      // callback that ran long.
+      const auto now = Clock::now();
+      do {
+        next_vsync += kVsyncInterval;
+      } while (next_vsync <= now);
+    }
     if (!gpu_pump_running_.load(std::memory_order_relaxed)) break;
     if (!kernel_process_) continue;
-    // Catch up rather than deliver a burst of back-to-back vsyncs after a
-    // callback that ran long.
-    const auto now = Clock::now();
-    do {
-      next_vsync += kVsyncInterval;
-    } while (next_vsync <= now);
+    if (display_locked) gpu_vblanks_display_locked_.fetch_add(1u, std::memory_order_relaxed);
 
-    // The worker presents the current front buffer at its next wake.
+    // The worker presents the current front buffer at its next wake, before the
+    // interrupt below lets the title render into it again. A worker still busy
+    // past kScanoutLatchTimeout (a long drain or callback) does not hold back
+    // the vblank interrupt further.
+    const auto vblank = scanout_requested_.fetch_add(1u, std::memory_order_acq_rel) + 1u;
+    logging::ActivityScope vblank_activity(vblank_key);
     gpu_wake_.notify(kGpuWakePresent);
+    if (graphics_system_ && gpu_ &&
+        !scanout_latched_.wait_until(vblank, Clock::now() + kScanoutLatchTimeout)) {
+      // Not latched in time. No interrupt goes out while a present is still
+      // reading the front buffer (the title would render into it: the tear
+      // the latch prevents). This vblank's present already under way is let
+      // finish; otherwise the vblank is given up on - the worker will not
+      // present it late - after any earlier present still in flight ends.
+      auto claim = scanout_claim_.load(std::memory_order_acquire);
+      std::uint64_t in_flight = 0;  // the vblank being presented, if any
+      while (true) {
+        if ((claim >> 1u) >= vblank) {
+          if ((claim & 1u) == 0u) in_flight = claim >> 1u;
+          break;
+        }
+        if (scanout_claim_.compare_exchange_weak(claim, (vblank << 1u) | 1u,
+                                                 std::memory_order_acq_rel,
+                                                 std::memory_order_acquire)) {
+          if ((claim & 1u) == 0u && (claim >> 1u) != 0u) in_flight = claim >> 1u;
+          break;
+        }
+      }
+      const bool presented_this_vblank = in_flight >= vblank;
+      const bool settled =
+          in_flight == 0u ||
+          scanout_latched_.wait_until(in_flight, Clock::now() + kScanoutPresentTimeout);
+      if (!presented_this_vblank || !settled) {
+        scanout_latch_timeouts_.fetch_add(1u, std::memory_order_relaxed);
+        vblank_activity.arguments[2] = 1u;
+      }
+    }
+
+    // The vblank advances the GPU progress counter EVENT_WRITE_SHD reports,
+    // as on xenia and rexglue (MarkVblank), before the title's handler runs.
+    if (graphics_system_) graphics_system_->command_processor().notify_vblank();
 
     const auto interrupt = kernel_process_->gpu_interrupt_callback();
+    vblank_activity.arguments[0] = interrupt.callback_address;
+    vblank_activity.arguments[1] = kernel_process_->gpu_front_buffer().base_address;
     {
       static std::atomic<int> _vsync_diag_count{0};
       const int _n = _vsync_diag_count.fetch_add(1) + 1;
@@ -357,6 +711,7 @@ std::uint32_t XenonSession::run_gpu_vsync_thread() {
       }
       const auto _vsync_cb_start = Clock::now();
       const bool _vsync_cb_ok = invoke_gpu_interrupt_callback(interrupt.callback_address, interrupt.context);
+      vblank_activity.result = _vsync_cb_ok ? 1u : 0u;
       const auto _vsync_cb_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                                      Clock::now() - _vsync_cb_start)
                                      .count();

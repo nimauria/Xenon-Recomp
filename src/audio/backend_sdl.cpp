@@ -1,10 +1,12 @@
 #include "xenon/audio/backend.hpp"
 
-#include <SDL.h>
+#include <SDL3/SDL.h>
 
 #include <algorithm>
 #include <mutex>
+#include <string>
 #include <utility>
+#include <vector>
 
 namespace xenon::audio {
 namespace {
@@ -21,81 +23,84 @@ class SdlAudioBackend final : public AudioBackend {
       if (error) *error = "invalid SDL audio configuration";
       return false;
     }
-    if (SDL_InitSubSystem(SDL_INIT_AUDIO) != 0) {
+    // The device buffer matches the mixer's render quantum, as SDL2's
+    // `samples` did, so callbacks keep the same cadence.
+    SDL_SetHint(SDL_HINT_AUDIO_DEVICE_SAMPLE_FRAMES,
+                std::to_string(config.callback_frames).c_str());
+    if (!SDL_InitSubSystem(SDL_INIT_AUDIO)) {
       if (error) *error = SDL_GetError();
       return false;
     }
     sdl_initialized_ = true;
 
-    SDL_AudioSpec desired{};
-    desired.freq = static_cast<int>(config.sample_rate);
-    desired.format = AUDIO_F32SYS;
-    desired.channels = static_cast<Uint8>(config.channels);
-    desired.samples = static_cast<Uint16>(std::min<std::uint32_t>(
-        config.callback_frames, 0xFFFFu));
-    desired.callback = &SdlAudioBackend::callback_thunk;
-    desired.userdata = this;
-
     {
       std::lock_guard lock(callback_mutex_);
       callback_ = std::move(callback);
+      chunk_.assign(static_cast<std::size_t>(config.callback_frames) * config.channels, 0.0f);
     }
-    device_ = SDL_OpenAudioDevice(nullptr, 0, &desired, &obtained_, 0);
-    if (!device_) {
+    // The stream converts float32 stereo at the mixer's rate to whatever the
+    // device runs at.
+    SDL_AudioSpec spec{};
+    spec.format = SDL_AUDIO_F32;
+    spec.channels = static_cast<int>(config.channels);
+    spec.freq = static_cast<int>(config.sample_rate);
+    stream_ = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &spec,
+                                        &SdlAudioBackend::callback_thunk, this);
+    if (!stream_) {
       if (error) *error = SDL_GetError();
       close();
       return false;
     }
-    if (obtained_.format != AUDIO_F32SYS || obtained_.channels != 2 ||
-        obtained_.freq != desired.freq) {
-      if (error) *error = "SDL audio device did not accept the required float32 stereo format";
+    if (!SDL_ResumeAudioStreamDevice(stream_)) {
+      if (error) *error = SDL_GetError();
       close();
       return false;
     }
-    SDL_PauseAudioDevice(device_, 0);
     return true;
   }
 
   void close() noexcept override {
-    if (device_) {
-      SDL_PauseAudioDevice(device_, 1);
-      SDL_CloseAudioDevice(device_);
-      device_ = 0;
+    if (stream_) {
+      // Destroying the stream closes its device and stops the callback.
+      SDL_DestroyAudioStream(stream_);
+      stream_ = nullptr;
     }
     {
       std::lock_guard lock(callback_mutex_);
       callback_ = {};
+      chunk_.clear();
     }
-    obtained_ = {};
     if (sdl_initialized_) {
       SDL_QuitSubSystem(SDL_INIT_AUDIO);
       sdl_initialized_ = false;
     }
   }
 
-  bool is_open() const noexcept override { return device_ != 0; }
+  bool is_open() const noexcept override { return stream_ != nullptr; }
 
  private:
-  static void callback_thunk(void* userdata, Uint8* stream, int len) {
+  // SDL asks for at least `additional_amount` more bytes. Render whole mixer
+  // quanta until that is covered, so the mixer is always called with the
+  // frame count it was configured for.
+  static void SDLCALL callback_thunk(void* userdata, SDL_AudioStream* stream,
+                                     int additional_amount, int /*total_amount*/) {
     auto* self = static_cast<SdlAudioBackend*>(userdata);
-    if (!self || !stream || len <= 0) return;
-    auto* output = reinterpret_cast<float*>(stream);
-    const auto count = static_cast<std::size_t>(len) / sizeof(float);
-    std::fill_n(output, count, 0.0f);
-
-    HostRenderCallback callback;
-    {
-      std::lock_guard lock(self->callback_mutex_);
-      callback = self->callback_;
+    if (!self || !stream || additional_amount <= 0) return;
+    std::lock_guard lock(self->callback_mutex_);
+    if (!self->callback_ || self->chunk_.empty()) return;
+    const auto chunk_bytes = static_cast<int>(self->chunk_.size() * sizeof(float));
+    for (int queued = 0; queued < additional_amount; queued += chunk_bytes) {
+      std::fill(self->chunk_.begin(), self->chunk_.end(), 0.0f);
+      self->callback_(std::span<float>(self->chunk_));
+      if (!SDL_PutAudioStreamData(stream, self->chunk_.data(), chunk_bytes)) return;
     }
-    if (callback) callback(std::span<float>(output, count));
   }
 
-  SDL_AudioDeviceID device_{};
-  SDL_AudioSpec obtained_{};
+  SDL_AudioStream* stream_{};
   bool sdl_initialized_{};
   std::mutex callback_mutex_{};
   HostRenderCallback callback_{};
+  std::vector<float> chunk_{};
 };
 
 }  // namespace

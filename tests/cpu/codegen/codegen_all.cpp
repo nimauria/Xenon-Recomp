@@ -26,5 +26,5 @@ int main(int argc,char**argv){
   for(std::size_t i=0;i<n;++i) out << "  &generated_" << i << ",\n";
   out << "};\nstd::size_t xenon_generated_all_count = " << n << ";\n";
   std::cout<<n<<" generated functions\n";
-  return n==455?0:5;
+  return n==457?0:5;
 }

@@ -79,6 +79,36 @@ void log_title_thread_creation(cpu::GuestAddress start_address, std::uint64_t ca
 // Per-vsync samples of the event-dispatcher state, the subsystem label, the
 // two render-setup handshake events and the vsync ISR's counter chain.
 void sample_title_vsync_probes(memory::AddressSpace& memory, std::uint32_t interrupt_context) {
+  // Present-interval pacing (AC6 D3D device = [[0x8200060C]]), once every 60
+  // vsyncs: the PM4-interrupt flip callback 0x821EFCE0 targets vblank
+  // [+16540] = last target + interval code (from D3DPRESENT_INTERVAL at
+  // [+13580]) and releases the ring's SCRATCH_REG1 wait ([[+10900]+4] == 0)
+  // once the vblank count [+16532] reaches it. A briefing presenting at 60
+  // Hz instead of 30 shows here as an interval of 1 or a vblank count
+  // advancing faster than the vsyncs.
+  {
+    static std::atomic<std::uint32_t> ticks{0};
+    if (ticks.fetch_add(1u) % 60u == 0u) {
+      try {
+        const auto holder = memory.read32_be(static_cast<cpu::GuestAddress>(0x8200060Cu));
+        const auto device = holder ? memory.read32_be(holder) : 0u;
+        if (device != 0u) {
+          const auto scratch = memory.read32_be(device + 10900u);
+          logging::append_probe_log(
+              "present_interval_diag.log",
+              "vsync %u: device=0x%08X ctx=0x%08X interval=[13580]=0x%08X vblanks=[16532]=%u "
+              "target=[16540]=%u callbacks=[16548]=%u queued=[16688]=%u divisor=[21536]=%u "
+              "flag=[[10900]+4]=%u\n",
+              ticks.load(), device, interrupt_context, memory.read32_be(device + 13580u),
+              memory.read32_be(device + 16532u), memory.read32_be(device + 16540u),
+              memory.read32_be(device + 16548u), memory.read32_be(device + 16688u),
+              memory.read32_be(device + 21536u), scratch ? memory.read32_be(scratch + 4u) : 0u);
+        }
+      } catch (const std::exception&) {
+      }
+    }
+  }
+
   // Event-dispatcher probe (0x823AD848 family): a global pointer at
   // 0x82916E4C leads to a per-subsystem struct whose +0x12C field looked,
   // from static reading, like a pending-event bitmask and +0x130 like a

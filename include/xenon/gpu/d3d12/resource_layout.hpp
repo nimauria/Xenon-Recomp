@@ -19,6 +19,13 @@ namespace xenon::gpu::d3d12 {
 // descriptors/constants are staged centrally, then snapshotted into the
 // rotating submission frame before a draw is recorded. This prevents later
 // guest state changes from mutating resources referenced by an in-flight draw.
+//
+// Each submission frame has one shader-visible resource heap and one sampler
+// heap, holding a descriptor table per draw slot, so a command list binds
+// them once rather than once per draw (switching descriptor heaps is among
+// the costliest things a D3D12 command list records). A draw whose bindings
+// have not changed since an earlier draw of the same batch reuses that
+// draw's tables instead of copying its own.
 class ResourceLayout {
  public:
   static constexpr std::uint32_t kTextureCount = 32;
@@ -27,7 +34,7 @@ class ResourceLayout {
   static constexpr std::uint32_t kMemoryExportDescriptor = kSrvCount;
   static constexpr std::uint32_t kResourceCount = kSrvCount + kUavCount;
   static constexpr std::uint32_t kSamplerCount = kTextureCount;
-  static constexpr std::uint64_t kConstantBufferBytes = 9472;
+  static constexpr std::uint64_t kConstantBufferBytes = kShaderConstantBufferBytes;
   static constexpr std::uint32_t kFrameCount = CommandQueue::kFrameCount;
 
   [[nodiscard]] bool initialize(ID3D12Device* device);
@@ -39,7 +46,27 @@ class ResourceLayout {
                                   std::uint32_t mip_levels,
                                   const TextureDescriptor& sampler_state);
 
-  void prepare_draw(std::uint32_t frame_index, std::uint32_t draw_slot);
+  // Where a recorded draw finds its bindings.
+  struct DrawTables {
+    D3D12_GPU_DESCRIPTOR_HANDLE resources{};
+    D3D12_GPU_DESCRIPTOR_HANDLE samplers{};
+    D3D12_GPU_DESCRIPTOR_HANDLE memory_export{};
+    D3D12_GPU_VIRTUAL_ADDRESS constants{};
+    // The batch's descriptor heaps have no room for this draw's new tables:
+    // submit the batch and prepare the draw in the next one.
+    bool exhausted{};
+    bool valid{};
+  };
+  // Snapshots the staged descriptors and constants for the draw recorded in
+  // `draw_slot` of batch `batch` (CommandQueue::batch_serial()) on
+  // `frame_index`. Slots increase within a batch. Tables are copied into the
+  // frame's heaps only when they differ from the batch's previous draw's.
+  [[nodiscard]] DrawTables prepare_draw(std::uint32_t frame_index, std::uint32_t draw_slot,
+                                        std::uint64_t batch);
+  // Table regions a frame's shader-visible heaps hold: the sampler heap is
+  // capped at 2048 descriptors.
+  static constexpr std::uint32_t kResourceRegions = 2048;
+  static constexpr std::uint32_t kSamplerRegions = 2048u / kSamplerCount;
   [[nodiscard]] std::span<std::byte> constants() noexcept {
     return constants_staging_;
   }
@@ -47,26 +74,18 @@ class ResourceLayout {
   [[nodiscard]] ID3D12RootSignature* root_signature() const noexcept {
     return root_signature_.Get();
   }
-  [[nodiscard]] ID3D12DescriptorHeap* resource_heap(
-      std::uint32_t frame_index, std::uint32_t draw_slot) const noexcept {
-    return frame_index < frames_.size() && draw_slot < CommandQueue::kBatchCommandCount
-               ? frames_[frame_index].draws[draw_slot].resource_heap.Get()
-               : nullptr;
+  // A hash of the serialized root signature (pipeline library names).
+  [[nodiscard]] std::uint64_t root_signature_hash() const noexcept { return root_signature_hash_; }
+  // The frame's shader-visible heaps (every draw slot's tables live in them).
+  [[nodiscard]] ID3D12DescriptorHeap* resource_heap(std::uint32_t frame_index) const noexcept {
+    return frame_index < frames_.size() ? frames_[frame_index].resource_heap.Get() : nullptr;
   }
-  [[nodiscard]] ID3D12DescriptorHeap* sampler_heap(
-      std::uint32_t frame_index, std::uint32_t draw_slot) const noexcept {
-    return frame_index < frames_.size() && draw_slot < CommandQueue::kBatchCommandCount
-               ? frames_[frame_index].draws[draw_slot].sampler_heap.Get()
-               : nullptr;
+  [[nodiscard]] ID3D12DescriptorHeap* sampler_heap(std::uint32_t frame_index) const noexcept {
+    return frame_index < frames_.size() ? frames_[frame_index].sampler_heap.Get() : nullptr;
   }
-  [[nodiscard]] ID3D12Resource* constants_resource(
-      std::uint32_t frame_index, std::uint32_t draw_slot) const noexcept {
-    return frame_index < frames_.size() && draw_slot < CommandQueue::kBatchCommandCount
-               ? frames_[frame_index].draws[draw_slot].constants.resource()
-               : nullptr;
-  }
-  [[nodiscard]] D3D12_GPU_DESCRIPTOR_HANDLE memory_export_handle(
-      std::uint32_t frame_index, std::uint32_t draw_slot) const noexcept;
+  // Draws whose descriptor tables were reused from an earlier draw / copied.
+  [[nodiscard]] std::uint64_t tables_reused() const noexcept { return tables_reused_; }
+  [[nodiscard]] std::uint64_t tables_copied() const noexcept { return tables_copied_; }
   [[nodiscard]] const std::string& error() const noexcept { return error_; }
   // Part 7 of the AC6 Runtime Readiness pass: count of bind_texture() calls
   // whose guest sampler clamp mode fell outside Xenos's real 0-3 range and
@@ -77,22 +96,58 @@ class ResourceLayout {
   }
 
  private:
-  struct DrawBindings {
+  struct FrameBindings {
     Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> resource_heap{};
     Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> sampler_heap{};
+    // Every draw slot's constants, kConstantBufferBytes apart.
     Buffer constants{};
     std::span<std::byte> constants_mapping{};
+    // Table regions written in `batch` so far.
+    std::uint64_t batch{UINT64_MAX};
+    std::uint32_t resource_regions{};
+    std::uint32_t sampler_regions{};
   };
-  struct FrameBindings {
-    std::array<DrawBindings, CommandQueue::kBatchCommandCount> draws{};
-  };
+  [[nodiscard]] D3D12_GPU_DESCRIPTOR_HANDLE resource_table(std::uint32_t frame_index,
+                                                           std::uint32_t region) const noexcept;
+  [[nodiscard]] D3D12_GPU_DESCRIPTOR_HANDLE sampler_table(std::uint32_t frame_index,
+                                                          std::uint32_t region) const noexcept;
 
   ID3D12Device* device_{};
+  std::uint64_t root_signature_hash_{};
   Microsoft::WRL::ComPtr<ID3D12RootSignature> root_signature_{};
   Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> staging_resource_heap_{};
   Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> staging_sampler_heap_{};
   std::array<FrameBindings, kFrameCount> frames_{};
   std::array<std::byte, kConstantBufferBytes> constants_staging_{};
+  // What each staging texture descriptor and sampler holds, so a draw that
+  // binds the same view or sampler state as the last one to use the slot
+  // skips recreating it (a driver call each; AC6 binds the same few textures
+  // across hundreds of draws). Holding a reference keeps the resource alive,
+  // so a released image's address cannot come back as a different one.
+  struct BoundView {
+    Microsoft::WRL::ComPtr<ID3D12Resource> resource{};
+    D3D12_SHADER_RESOURCE_VIEW_DESC desc{};
+  };
+  std::array<BoundView, kSrvCount> bound_views_{};
+  std::array<D3D12_SAMPLER_DESC, kSamplerCount> bound_samplers_{};
+  std::array<bool, kSamplerCount> sampler_known_{};
+  std::uint64_t descriptor_writes_skipped_{};
+  // Staged descriptors change: each table copied records the generation it
+  // holds, and a later draw of the same batch with nothing changed since
+  // points at it.
+  std::uint64_t resource_generation_{1};
+  std::uint64_t sampler_generation_{1};
+  struct LastTables {
+    std::uint32_t frame{UINT32_MAX};
+    std::uint32_t slot{};
+    std::uint32_t region{};
+    std::uint64_t generation{};
+    std::uint64_t batch{UINT64_MAX};
+  };
+  LastTables last_resources_{};
+  LastTables last_samplers_{};
+  std::uint64_t tables_reused_{};
+  std::uint64_t tables_copied_{};
   std::uint32_t resource_increment_{};
   std::uint32_t sampler_increment_{};
   std::string error_{};

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <memory>
 #include <variant>
 #include <vector>
 
@@ -92,7 +93,10 @@ struct ShaderLoad {
   bool immediate{};
   std::uint32_t physical_address{};
   ShaderProgram program{};
-  DecodedShader decoded{};
+  // Decoding depends only on the program, so every load of the same program
+  // shares one immutable decode (titles reload the same microcode many times
+  // a frame). Never null in a command the frontend emits.
+  std::shared_ptr<const DecodedShader> decoded{};
   std::vector<std::uint32_t> raw_payload{};
 };
 
@@ -138,6 +142,14 @@ class Stream {
   }
 
   void clear() { commands_.clear(); }
+  // Moves the commands out (for a hand-off to the backend thread), leaving
+  // the stream empty with `recycled`'s storage, so steady-state hand-offs
+  // allocate nothing.
+  [[nodiscard]] std::vector<Command> take(std::vector<Command> recycled = {}) {
+    recycled.clear();
+    commands_.swap(recycled);
+    return recycled;
+  }
   [[nodiscard]] const std::vector<Command>& commands() const noexcept {
     return commands_;
   }

@@ -1,6 +1,7 @@
 import type { Profile, Snapshot } from "../contracts/launcher";
 import runtime from "../contracts/profile-runtime.json";
 import definitions from "../contracts/profiles.json";
+import { profileNameKey } from "./profileNames";
 export function namePrefix(name: string, limit = definitions.nameLimit) {
   let result = name.slice(0, limit);
   const last = result.charCodeAt(result.length - 1);
@@ -13,8 +14,7 @@ export function duplicateProfileName(profiles: Profile[], name: string) {
   for (
     let suffix = 2;
     profiles.some(
-      (profile) =>
-        profile.name.toLocaleLowerCase() === candidate.toLocaleLowerCase(),
+      (profile) => profileNameKey(profile.name) === profileNameKey(candidate),
     );
     suffix++
   ) {

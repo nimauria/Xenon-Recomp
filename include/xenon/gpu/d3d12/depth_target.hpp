@@ -10,6 +10,7 @@
 #include <wrl/client.h>
 
 #include "xenon/gpu/d3d12/command_queue.hpp"
+#include "xenon/gpu/depth_format.hpp"
 #include "xenon/gpu/edram_surface.hpp"
 
 namespace xenon::gpu::d3d12 {
@@ -43,6 +44,10 @@ class DepthTargetImage {
       std::uint32_t top, std::uint32_t right, std::uint32_t bottom,
       std::span<const std::uint32_t> source, std::uint32_t row_pitch);
   void reset() noexcept;
+  // A shader-visible heap holding this image's depth plane (t0) and stencil
+  // plane (t1) SRVs, created on first use; a direct EDRAM transfer reads its
+  // source through it. Null on failure (error()).
+  [[nodiscard]] ID3D12DescriptorHeap* shader_resource_heap();
   [[nodiscard]] ID3D12Resource* resource() const noexcept { return resource_.Get(); }
   [[nodiscard]] D3D12_CPU_DESCRIPTOR_HANDLE dsv() const noexcept { return dsv_; }
   [[nodiscard]] DXGI_FORMAT format() const noexcept { return format_; }
@@ -58,16 +63,22 @@ class DepthTargetImage {
   [[nodiscard]] bool requires_float24_conversion() const noexcept {
     return float24_;
   }
+  // How depth written into this image (uploads, transfers, GPU clears) encodes
+  // a D24 code: the device's calibrated encoding (calibrate_unorm24_depth_write).
+  [[nodiscard]] Unorm24DepthWrite unorm24_depth_write() const noexcept { return unorm24_write_; }
+  void set_unorm24_depth_write(Unorm24DepthWrite write) noexcept { unorm24_write_ = write; }
   [[nodiscard]] const std::string& error() const noexcept { return error_; }
 
  private:
   Microsoft::WRL::ComPtr<ID3D12Resource> resource_{};
   Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> dsv_heap_{};
+  Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> srv_heap_{};
   D3D12_CPU_DESCRIPTOR_HANDLE dsv_{};
   DXGI_FORMAT format_{DXGI_FORMAT_UNKNOWN};
   DepthRenderTargetFormat guest_format_{DepthRenderTargetFormat::D24S8};
   MsaaSamples host_msaa_{MsaaSamples::X1};
   bool float24_{};
+  Unorm24DepthWrite unorm24_write_{Unorm24DepthWrite::Midpoint};
   std::uint32_t width_{};
   std::uint32_t height_{};
   EdramSurfaceLayout surface_{};

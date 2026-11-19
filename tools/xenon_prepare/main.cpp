@@ -151,6 +151,7 @@ int main(int argc, char** argv) {
       // --- Resolve the (optional) module hint package -----------------------
       std::unique_ptr<xenon::recomp::FileModuleHintProvider> hint_provider;
       std::optional<xenon::recomp::analysis::AnalysisHintSetV2> hint_set;
+      std::vector<std::filesystem::path> hook_sources;
       std::string module_id = options.module_id;
       std::string module_compatibility_version = "1";
       std::uint64_t hint_set_hash = 0;
@@ -168,12 +169,13 @@ int main(int argc, char** argv) {
 
         xenon::recomp::analysis::AnalysisHintSetV2 resolved{};
         std::string hint_error;
-        if (!hint_provider->provide(identity, resolved, hint_error)) {
+        if (!hint_provider->provide(identity, resolved, hint_error) ||
+            !hint_provider->hook_sources(identity, hook_sources, hint_error)) {
           status.report(Phase::Failed, 5, "Resolving module", hint_error);
           std::cerr << "xenon-prepare: " << hint_error << "\n";
           return 2;
         }
-        hint_set_hash = hash_hint_set(resolved);
+        hint_set_hash = hash_hint_set(resolved, hook_sources);
         hint_set = std::move(resolved);
       }
 
@@ -249,7 +251,8 @@ int main(int argc, char** argv) {
         return 0;
       }
 
-      const auto build = prepare_one_module(effective_image, hint_set, adaptive_observations,
+      const auto build = prepare_one_module(effective_image, hint_set, hook_sources,
+                                            adaptive_observations,
                                             knowledge_records, key, store, options, title_id_hex,
                                             media_id_hex, module.relative_path, /*is_primary=*/true,
                                             status);
@@ -386,13 +389,15 @@ int main(int argc, char** argv) {
       // module this stays exactly as fatal as it always was.
       std::string module_id = options.module_id;
       std::optional<xenon::recomp::analysis::AnalysisHintSetV2> hint_set;
+      std::vector<std::filesystem::path> hook_sources;
       std::uint64_t hint_set_hash = 0;
       if (hint_provider) {
         if (module_id.empty()) module_id = hint_provider->module_name();
         xenon::recomp::analysis::AnalysisHintSetV2 resolved{};
         std::string hint_error;
-        if (hint_provider->provide(identity, resolved, hint_error)) {
-          hint_set_hash = hash_hint_set(resolved);
+        if (hint_provider->provide(identity, resolved, hint_error) &&
+            hint_provider->hook_sources(identity, hook_sources, hint_error)) {
+          hint_set_hash = hash_hint_set(resolved, hook_sources);
           hint_set = std::move(resolved);
         } else if (module.is_primary) {
           fail_module(hint_error);
@@ -472,7 +477,8 @@ int main(int argc, char** argv) {
         continue;
       }
 
-      const auto build = prepare_one_module(effective_image, hint_set, adaptive_observations,
+      const auto build = prepare_one_module(effective_image, hint_set, hook_sources,
+                                            adaptive_observations,
                                             knowledge_records, key, store, options, title_id_hex,
                                             media_id_hex, module.relative_path, module.is_primary,
                                             status);

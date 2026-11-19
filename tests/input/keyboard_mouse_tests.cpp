@@ -29,15 +29,39 @@ void test_default_mapping_and_mouse_stick() {
   assert(driver.get_state(1, state) == input::Result::Success);
   assert((state.buttons & input::A) != 0);
   assert(state.left_trigger == 255);
-  assert(state.thumb_lx > 30000);
-  assert(state.thumb_ly > 30000);
+  // WASD navigates menus on the D-pad, like the arrow keys.
+  assert((state.buttons & input::DpadUp) != 0);
+  assert((state.buttons & input::DpadRight) != 0);
   assert(state.thumb_rx > 0);
   assert(state.thumb_ry > 0);
 
   input::GamepadState next{};
   assert(driver.get_state(1, next) == input::Result::Success);
   assert(next.thumb_rx == 0 && next.thumb_ry == 0);
-  assert(next.thumb_lx > 30000 && next.thumb_ly > 30000);
+  assert((next.buttons & (input::DpadUp | input::DpadRight)) ==
+         (input::DpadUp | input::DpadRight));
+
+  // The sticks have keys: without them a title's gameplay is unreachable
+  // (AC6's aircraft took no input). Arrows are the left stick, IJKL the
+  // right, and neither touches the D-pad.
+  driver.clear_input();
+  driver.set_key(static_cast<input::KeyCode>(input::Key::Up), true);
+  driver.set_key(static_cast<input::KeyCode>(input::Key::Left), true);
+  driver.set_key(static_cast<input::KeyCode>(input::Key::L), true);
+  driver.set_key(static_cast<input::KeyCode>(input::Key::K), true);
+  assert(driver.get_state(1, next) == input::Result::Success);
+  assert(next.thumb_ly == 32767 && next.thumb_lx == -32768);
+  assert(next.thumb_rx == 32767 && next.thumb_ry == -32768);
+  assert((next.buttons & (input::DpadUp | input::DpadDown | input::DpadLeft |
+                          input::DpadRight)) == 0);
+
+  // Enter both starts and confirms; the mouse buttons confirm and cancel.
+  driver.clear_input();
+  driver.set_key(static_cast<input::KeyCode>(input::Key::Enter), true);
+  driver.set_mouse_button(input::MouseButton::Right, true);
+  assert(driver.get_state(1, next) == input::Result::Success);
+  assert((next.buttons & (input::Start | input::A | input::B)) ==
+         (input::Start | input::A | input::B));
 }
 
 void test_simultaneous_custom_bindings_and_mouse_buttons() {

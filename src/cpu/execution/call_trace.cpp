@@ -20,19 +20,27 @@ namespace xenon::cpu::call_trace {
 namespace {
 
 constexpr std::uint32_t kMaxDumpBytes = 4096u;
+// The guarded pages of a watch hold at most 64 KiB (memory_port.cpp).
+constexpr std::uint32_t kMaxWatchBytes = 0x10000u;
 constexpr std::size_t kGraphEdgesPerThread = 4000u;
 
-// Bytes at a register's value, or at a fixed guest address.
+// Bytes at a register's value, at a fixed guest address, or (indirect) at the
+// big-endian pointer stored at a register's value plus `offset`. A watch
+// ("@watch...") is not dumped: the first call arms the write watch on it.
 struct Dump {
   std::uint8_t reg{};
   bool fixed{};
+  bool indirect{};
+  bool watch{};
   GuestAddress address{};
+  std::uint32_t offset{};
   std::uint32_t bytes{};
 };
 
 struct Traced {
   GuestAddress address{};
   std::vector<Dump> dumps;
+  bool has_watch{};
   // The entry the trampoline forwards to: the first one a lookup returned.
   std::atomic<NativeCompiledEntry> original{};
   std::atomic<std::uint64_t> calls{};
@@ -65,6 +73,7 @@ struct TraceState {
   std::atomic<std::uint64_t> generation{};
   FILE* trace_file{};
   bool trace_started{};  // Later opens append to this configuration's log.
+  std::atomic<bool> watch_armed{};  // One watch per configuration.
 };
 
 TraceState& state() {
@@ -119,31 +128,56 @@ struct ParsedFunction {
     function.address = static_cast<GuestAddress>(address);
     auto rest = at == std::string_view::npos ? std::string_view{} : item.substr(at);
     while (!rest.empty()) {
-      // "@r<reg>:<bytes>" or "@<hex address>:<bytes>"
+      // "@r<reg>:<bytes>", "@<hex address>:<bytes>" or
+      // "@[r<reg>+<hex offset>]:<bytes>" (the pointer stored there)
       if (rest.size() < 2 || rest[0] != '@') return false;
       rest.remove_prefix(1);
-      const bool fixed = rest[0] != 'r' && rest[0] != 'R';
-      if (!fixed) rest.remove_prefix(1);
+      Dump dump;
+      std::uint64_t offset = 0;
+      if (rest.substr(0, 5) == "watch") {
+        dump.watch = true;
+        rest.remove_prefix(5);
+        if (rest.empty()) return false;
+      }
+      if (rest[0] == '[') {
+        const auto close = rest.find(']');
+        if (close == std::string_view::npos || close < 3u || (rest[1] != 'r' && rest[1] != 'R'))
+          return false;
+        const auto inside = rest.substr(2, close - 2);
+        const auto plus = inside.find('+');
+        std::uint64_t reg = 0;
+        if (!parse_number(inside.substr(0, plus), 10, reg) || reg > 31u) return false;
+        if (plus != std::string_view::npos &&
+            (!parse_number(inside.substr(plus + 1), 16, offset) || offset > 0xFFFFFFFFull))
+          return false;
+        dump.indirect = true;
+        dump.reg = static_cast<std::uint8_t>(reg);
+        dump.offset = static_cast<std::uint32_t>(offset);
+        rest.remove_prefix(close + 1);
+        if (rest.empty() || rest[0] != ':') return false;
+      }
+      const bool fixed = !dump.indirect && rest[0] != 'r' && rest[0] != 'R';
+      if (!fixed && !dump.indirect) rest.remove_prefix(1);
       const auto colon = rest.find(':');
       if (colon == std::string_view::npos) return false;
       const auto next = rest.find('@', colon);
       std::uint64_t where = 0;
       std::uint64_t bytes = 0;
-      if (fixed ? !parse_number(rest.substr(0, colon), 16, where) || (where & 3u) != 0u
-                : !parse_number(rest.substr(0, colon), 10, where) || where > 31u) {
+      if (!dump.indirect &&
+          (fixed ? !parse_number(rest.substr(0, colon), 16, where) || (where & 3u) != 0u
+                 : !parse_number(rest.substr(0, colon), 10, where) || where > 31u)) {
         return false;
       }
       if (!parse_number(rest.substr(colon + 1, next == std::string_view::npos
                                                    ? std::string_view::npos
                                                    : next - colon - 1),
                         0, bytes) ||
-          bytes == 0u || bytes > kMaxDumpBytes) {
+          bytes == 0u || bytes > (dump.watch ? kMaxWatchBytes : kMaxDumpBytes)) {
         return false;
       }
-      Dump dump;
       dump.fixed = fixed;
       if (fixed) dump.address = static_cast<GuestAddress>(where);
-      else dump.reg = static_cast<std::uint8_t>(where);
+      else if (!dump.indirect) dump.reg = static_cast<std::uint8_t>(where);
       dump.bytes = static_cast<std::uint32_t>((bytes + 3u) & ~3ull);
       function.dumps.push_back(dump);
       rest = next == std::string_view::npos ? std::string_view{} : rest.substr(next);
@@ -202,26 +236,48 @@ void append_format(std::string& out, const char* format, ...) {
     out.append(buffer, std::min<std::size_t>(static_cast<std::size_t>(written), sizeof(buffer) - 1));
 }
 
+// One big-endian guest word, read without faulting.
+[[nodiscard]] bool read_guest_word(ExecutionContext& context, GuestAddress address,
+                                   std::uint32_t& value) {
+  MemoryAccessContext::PhysicalResolution resolved{};
+  if (!context.memory_access.resolve_physical_ram(address, 4u, false, 4u, resolved)) return false;
+  std::memcpy(&value, resolved.ptr, sizeof(value));
+  if constexpr (std::endian::native == std::endian::little)
+    value = (value >> 24u) | ((value >> 8u) & 0xFF00u) | ((value << 8u) & 0xFF0000u) | (value << 24u);
+  return true;
+}
+
 void append_dump(std::string& out, ExecutionContext& context, const Dump& dump,
                  const std::array<std::uint64_t, 32>& gpr) {
-  const auto base = dump.fixed ? dump.address : static_cast<GuestAddress>(gpr[dump.reg]);
+  if (dump.watch) return;
+  GuestAddress base = dump.fixed ? dump.address : static_cast<GuestAddress>(gpr[dump.reg]);
   const auto bytes = dump.bytes;
-  if (dump.fixed) append_format(out, "    %08X, %u bytes:\n", base, bytes);
-  else append_format(out, "    r%u=%08X, %u bytes:\n", static_cast<unsigned>(dump.reg), base, bytes);
+  if (dump.indirect) {
+    const auto slot = static_cast<GuestAddress>(base + dump.offset);
+    std::uint32_t pointer = 0;
+    if (!read_guest_word(context, slot, pointer)) {
+      append_format(out, "    [r%u+%X] (%08X) is not readable\n", static_cast<unsigned>(dump.reg),
+                    dump.offset, slot);
+      return;
+    }
+    append_format(out, "    [r%u+%X]=%08X, %u bytes:\n", static_cast<unsigned>(dump.reg), dump.offset,
+                  pointer, bytes);
+    base = pointer;
+  } else if (dump.fixed) {
+    append_format(out, "    %08X, %u bytes:\n", base, bytes);
+  } else {
+    append_format(out, "    r%u=%08X, %u bytes:\n", static_cast<unsigned>(dump.reg), base, bytes);
+  }
   for (std::uint32_t offset = 0; offset < bytes; offset += 16u) {
     append_format(out, "      +%03X:", offset);
     std::string floats;
     for (std::uint32_t word = offset; word < std::min(bytes, offset + 16u); word += 4u) {
-      MemoryAccessContext::PhysicalResolution resolved{};
-      if (!context.memory_access.resolve_physical_ram(base + word, 4u, false, 4u, resolved)) {
+      std::uint32_t raw{};
+      if (!read_guest_word(context, base + word, raw)) {
         out += " --------";
         floats += " ?";
         continue;
       }
-      std::uint32_t raw{};
-      std::memcpy(&raw, resolved.ptr, sizeof(raw));
-      if constexpr (std::endian::native == std::endian::little)
-        raw = (raw >> 24u) | ((raw >> 8u) & 0xFF00u) | ((raw << 8u) & 0xFF0000u) | (raw << 24u);
       append_format(out, " %08X", raw);
       append_format(floats, " %.6g", static_cast<double>(std::bit_cast<float>(raw)));
     }
@@ -236,6 +292,34 @@ long long now_milliseconds() noexcept {
   return static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(
                                     std::chrono::steady_clock::now().time_since_epoch())
                                     .count());
+}
+
+// Arms the write watch on the first watch dump that resolves to guest RAM
+// (later calls retry while it does not), and logs where.
+void arm_watch(const Traced& traced, std::uint64_t call, ExecutionContext& context) {
+  auto& s = state();
+  for (const auto& dump : traced.dumps) {
+    if (!dump.watch) continue;
+    const auto& gpr = context.state.gpr;
+    GuestAddress address = dump.fixed ? dump.address : static_cast<GuestAddress>(gpr[dump.reg]);
+    if (dump.indirect) {
+      std::uint32_t pointer = 0;
+      if (!read_guest_word(context, address + dump.offset, pointer)) continue;
+      address = pointer;
+    }
+    MemoryAccessContext::PhysicalResolution resolved{};
+    if (!context.memory_access.resolve_physical_ram(address, 1u, false, 1u, resolved)) continue;
+    bool expected = false;
+    if (!s.watch_armed.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) return;
+    const bool armed = arm_write_watch(resolved.physical_address, dump.bytes, address);
+    std::string out;
+    append_format(out, "== %08X #%llu: write watch %s %08X (physical %08X), %u bytes\n",
+                  traced.address, static_cast<unsigned long long>(call),
+                  armed ? "armed on" : "NOT armed (a guarded watch is already set) on", address,
+                  resolved.physical_address, dump.bytes);
+    write_record(out);
+    return;
+  }
 }
 
 void log_entry(const Traced& traced, std::uint64_t call, ExecutionContext& context) {
@@ -280,6 +364,8 @@ ExecutionResult trampoline(ExecutionContext& context) {
   auto& traced = s.traced[Index];
   auto* original = traced.original.load(std::memory_order_acquire);
   const auto call = traced.calls.fetch_add(1u, std::memory_order_relaxed) + 1u;
+  if (traced.has_watch && !s.watch_armed.load(std::memory_order_acquire))
+    arm_watch(traced, call, context);
   const bool logged = call <= s.limit || (s.every && (call - s.limit) % s.every == 0u);
   if (!logged) return original(context);
   const auto entry_gpr = context.state.gpr;
@@ -390,6 +476,8 @@ bool configure(const Settings& settings) {
       auto& traced = s.traced[i];
       traced.address = i < functions.size() ? functions[i].address : 0u;
       traced.dumps = i < functions.size() ? functions[i].dumps : std::vector<Dump>{};
+      traced.has_watch = std::any_of(traced.dumps.begin(), traced.dumps.end(),
+                                     [](const Dump& dump) { return dump.watch; });
       traced.original.store(nullptr);
       traced.calls.store(0u);
     }
@@ -400,6 +488,7 @@ bool configure(const Settings& settings) {
     s.interpret = std::move(interpret);
     s.directory = settings.directory;
     s.graphs.clear();
+    s.watch_armed.store(false);
     s.generation.fetch_add(1u, std::memory_order_acq_rel);
   }
   g_configured.store(true);

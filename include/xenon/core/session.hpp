@@ -15,6 +15,7 @@
 #include <string_view>
 #include <thread>
 #include <tuple>
+#include <unordered_map>
 #include <vector>
 
 #include "xenon/core/boot_checkpoints.hpp"
@@ -35,6 +36,7 @@
 #include "xenon/gpu/backend.hpp"
 #include "xenon/gpu/graphics_system.hpp"
 #include "xenon/gpu/register_aperture.hpp"
+#include "xenon/input/keyboard_mouse_driver.hpp"
 #include "xenon/input/system.hpp"
 #include "xenon/input/xam_guest.hpp"
 #include "xenon/kernel/exception.hpp"
@@ -59,6 +61,14 @@ namespace xenon::core {
 struct SessionConfig {
   bool enable_graphics{false};
   std::string graphics_backend{"null"};
+  // Where the graphics backend keeps compiled shaders between sessions;
+  // empty keeps them for this session only.
+  std::string shader_cache_directory{};
+  // Vulkan instance extensions the host's window system needs to give the
+  // backend a presentation surface (VK_KHR_surface and the platform's
+  // surface extension), supplied by the host that owns the window, so the
+  // renderer stays independent of the windowing library.
+  std::vector<std::string> vulkan_instance_extensions{};
   bool enable_input{false};
   std::vector<std::string> input_drivers{};
 
@@ -123,7 +133,7 @@ struct SessionConfig {
   // report. The words are sampled at kernel-call and compiled-dispatch
   // boundaries plus by a background poll thread, never by hooking guest stores,
   // so a change is attributed to the observer, not to the storing instruction.
-  std::vector<std::uint32_t> memory_watch_addresses{};
+  std::vector<WatchTarget> memory_watch_targets{};
   std::uint32_t memory_watch_history{static_cast<std::uint32_t>(GuestMemoryWatch::kDefaultCapacity)};
   // Poll thread period in milliseconds; 0 disables the poll thread (boundary
   // sampling alone still runs).
@@ -152,6 +162,16 @@ struct SessionConfig {
   // run and start() will report that clearly rather than pretending to
   // execute anything.
   std::string native_extension_path{};
+
+  // The game module's hint package (<module>/xenon-analysis). At launch the
+  // session reads per-revision runtime data from it, such as the temporal
+  // rendering profile revisions/<effective image hash>/rendering.json
+  // (gpu/temporal_profile.hpp). Empty: the game has none.
+  std::filesystem::path module_package_path{};
+  // Temporal probe: every this many frames, log the temporal classification
+  // of a frame, with the camera-matrix and HUD-shader candidates a module
+  // author needs to write a rendering profile. 0 disables it.
+  std::uint32_t temporal_probe_interval{0};
 };
 
 // Diagnostic summary of a single unresolved XEX import, kept for status
@@ -286,12 +306,29 @@ class XenonSession final : public cpu::RuntimeServices {
   // was requested. Safe to call before graphics/audio/input are enabled.
   void set_focused(bool focused);
 
+  // Host keyboard and mouse events from the presentation window, fed to the
+  // keyboard + mouse virtual controller (player 1's companion source). `key`
+  // is a USB HID keyboard usage (SDL scancodes are HID usages); `button` is
+  // 1 = left, 2 = right, 3 = middle, 4/5 = extra. No-ops without input.
+  void input_key(std::uint16_t key, bool pressed);
+  void input_mouse_button(std::uint8_t button, bool pressed);
+  void input_mouse_motion(float dx, float dy);
+  // True while the module's active input context steers with the mouse, so
+  // the presentation window should capture the cursor (relative motion).
+  [[nodiscard]] bool wants_mouse_capture() const;
+
   // Subsystem access
   [[nodiscard]] memory::AddressSpace* memory() noexcept { return memory_.get(); }
   [[nodiscard]] filesystem::VirtualFileSystem* filesystem() noexcept;
   [[nodiscard]] kernel::KernelIoManager* kernel_io() noexcept;
   [[nodiscard]] input::InputSystem* input() noexcept { return input_.get(); }
   [[nodiscard]] gpu::Backend* gpu() noexcept { return gpu_.get(); }
+  // The native window frames are presented to (an HWND on Windows). Guest
+  // vblanks lock to the refresh of the display it is on (gpu/display_vblank.hpp);
+  // without one they run from a 60 Hz timer.
+  void set_presentation_window(void* native_window) noexcept {
+    presentation_window_.store(native_window, std::memory_order_release);
+  }
   // The Xenos PM4 frontend (register file, EDRAM, IR stream, command
   // processor) that decodes a guest's GPU command ring buffer into IR and
   // plays it into gpu_. Constructed in init_gpu() once memory_ exists (it
@@ -308,15 +345,15 @@ class XenonSession final : public cpu::RuntimeServices {
   }
   [[nodiscard]] xam::XamSession* xam() noexcept { return xam_.get(); }
   [[nodiscard]] ExportRegistry* exports() noexcept { return &export_registry_; }
-  // History of the words named by SessionConfig::memory_watch_addresses. Inactive
+  // History of the words named by SessionConfig::memory_watch_targets. Inactive
   // (and empty) when none were configured.
   [[nodiscard]] const GuestMemoryWatch& memory_watch() const noexcept { return memory_watch_; }
-  // Replaces the watched set (see SessionConfig::memory_watch_addresses), clearing
+  // Replaces the watched set (see SessionConfig::memory_watch_targets), clearing
   // history. Takes effect for boundary sampling immediately and for the poll thread
   // at the next start().
-  void configure_memory_watch(std::vector<std::uint32_t> addresses,
+  void configure_memory_watch(std::vector<WatchTarget> targets,
                               std::size_t history = GuestMemoryWatch::kDefaultCapacity) {
-    memory_watch_.configure(std::move(addresses), history);
+    memory_watch_.configure(std::move(targets), history);
   }
   // Samples the watched words now, attributing any change to `observer`. Used by
   // the session's own boundaries; public so embedders/tests can add their own.
@@ -390,8 +427,13 @@ class XenonSession final : public cpu::RuntimeServices {
   bool external_call(std::string_view module, std::uint32_t ordinal,
                     cpu::CpuState& state, cpu::MemoryPort& memory) override;
   bool is_recognized_import_thunk(cpu::GuestAddress target) override;
+  const cpu::ModuleServicesV1* module_services() noexcept override { return &module_services_; }
 
  private:
+  // Applies the module's input profile (input.json beside its analysis) to
+  // the keyboard + mouse controller: its contexts and initial context.
+  bool configure_module_input();
+  static std::int32_t module_set_input_context(void* context, const char* name);
   friend struct SessionExecutionTestAccess;
   bool init_memory();
   bool init_filesystem();
@@ -412,6 +454,9 @@ class XenonSession final : public cpu::RuntimeServices {
   bool refresh_dynamic_kernel_variables();
   bool resolve_xex_imports();
   bool bind_compiled_code();
+  // Loads the running revision's temporal rendering profile from the
+  // module package and arms the temporal probe (lifecycle/temporal_rendering.cpp).
+  bool configure_temporal_rendering();
   bool create_guest_process();
   // Stack size for the main thread and for thread creation that passes zero.
   [[nodiscard]] std::uint32_t default_guest_stack_size() const noexcept;
@@ -548,14 +593,17 @@ class XenonSession final : public cpu::RuntimeServices {
   // AudioSystem's guest-callback pump loop until stop_guest_callback_pump().
   [[nodiscard]] std::uint32_t run_audio_callback_thread();
 #endif
-  // Single combined GPU pump thread: drains the guest's PM4 command ring
-  // buffer into graphics_system_/gpu_ and, at ~60Hz, presents the current
-  // front buffer and fires the guest's registered vsync interrupt callback -
-  // all serialized on this ONE dedicated host thread. This is deliberate:
-  // gpu::Backend's begin_submission()/consume()/end_submission()/present()
-  // have no internal synchronization over shared mutable state (pipeline
-  // caches, EDRAM trackers, presentation state), so ring-drain and present
-  // must never run concurrently on two different threads. Mirrors the audio
+  // GPU pump thread (the ordered frontend): drains the guest's PM4 command
+  // ring through graphics_system_'s command processor, raises PM4 interrupts
+  // and, at each vblank, asks for the current front buffer to be presented.
+  // The graphics IR it decodes, and the presents, are executed by
+  // graphics_system_'s backend thread (gpu::BackendExecutor) in the order
+  // they were handed over. gpu::Backend's begin_submission()/consume()/
+  // end_submission()/present() have no internal synchronization over shared
+  // mutable state (pipeline caches, EDRAM trackers, presentation state), so
+  // the executor never lets two backend operations overlap: each runs on the
+  // backend thread, or inline on the pump while that thread is idle and held
+  // off. Mirrors the audio
   // callback thread's KernelThread/KPCR/TLS machinery exactly (see
   // start_audio_guest_thread()/invoke_audio_callback() above) because vsync
   // also needs to call INTO GUEST CODE (the registered graphics interrupt
@@ -587,6 +635,14 @@ class XenonSession final : public cpu::RuntimeServices {
   // and delivers the vsync interrupt, whatever the worker is doing - as on
   // hardware, vertical blank does not wait for the GPU.
   [[nodiscard]] std::uint32_t run_gpu_vsync_thread();
+  // Presents `front_buffer` (the front buffer as the pump saw it at the
+  // vblank) if the title swapped in a frame since the last one presented.
+  // Runs as a GPU backend task, in order behind the work decoded before the
+  // vblank (GraphicsSystem::post_backend_task()).
+  void present_front_buffer(const kernel::KernelProcess::GpuFrontBufferState& front_buffer);
+  // The front buffer generation (VdSwap count) last presented successfully;
+  // GPU backend tasks only.
+  std::uint64_t last_presented_generation_{0};
   // Signals the pump loop to stop and joins gpu_pump_thread_ if it was ever
   // started. Safe to call unconditionally (including when the thread was
   // never created, e.g. graphics disabled or start_gpu_pump_thread() never
@@ -689,12 +745,17 @@ class XenonSession final : public cpu::RuntimeServices {
   std::unique_ptr<kernel::xbox::GuestIoBridge> io_bridge_{};
   xbox::ImportRegistry xbox_imports_{};
   std::unique_ptr<input::InputSystem> input_{};
+  // Owned by input_ (a registered driver); null when keyboard + mouse is off.
+  input::KeyboardMouseInputDriver* keyboard_mouse_{};
   // Bridges guest XamInput* calls to input_. Registered into the same
   // export_registry_ that XAM/Audio use (see init_exports()) rather than the
   // separate cpu::ExternalCallRegistry input::xam::guest historically
   // targeted, so guest input calls reach the active session through the one
   // canonical dispatch path. Declared after input_ so it is destroyed first.
   std::unique_ptr<input::xam::guest::GuestInputBridge> input_bridge_{};
+  cpu::ModuleServicesV1 module_services_{cpu::ModuleServicesV1::kAbiVersion,
+                                         sizeof(cpu::ModuleServicesV1), this,
+                                         &XenonSession::module_set_input_context};
   std::unique_ptr<gpu::Backend> gpu_{};
   // See graphics_system()'s doc comment above. Declared after gpu_ (destroyed
   // first) since nothing here holds a reference the other way.
@@ -709,6 +770,24 @@ class XenonSession final : public cpu::RuntimeServices {
   ExportRegistry export_registry_{};
   cpu::ExternalCallRegistry legacy_call_registry_{};
   std::optional<xbox::LoadedXex> loaded_xex_{};
+  // The loaded XEX's callable import thunks by guest address, each with its
+  // export lookup key built once: a title calls kernel exports (TLS, waits,
+  // critical sections) constantly, and per-call key building and a linear
+  // import scan made every one cost several allocations. Rebuilt by
+  // index_import_thunks() whenever loaded_xex_ is set.
+  struct ImportThunkBinding {
+    std::string module;
+    std::uint32_t ordinal{};
+    std::string export_key;
+  };
+  std::unordered_map<cpu::GuestAddress, ImportThunkBinding> import_thunks_{};
+  void index_import_thunks();
+  bool dispatch_export(std::string_view module, std::uint32_t ordinal,
+                       const ExportDescriptor* descriptor, cpu::CpuState& state,
+                       cpu::MemoryPort& memory);
+  // Throws cpu::GuestThreadTerminated when the calling guest thread was
+  // terminated by (or during) the kernel call that is returning.
+  void leave_guest_code_if_terminated();
   // Guest module records (XexGetModuleHandle) and dynamic export thunks
   // (XexGetProcedureAddress); consulted by call()/is_recognized_import_thunk()
   // alongside the loaded XEX's own import thunks. Created by init_exports().
@@ -784,6 +863,14 @@ class XenonSession final : public cpu::RuntimeServices {
   // joined/released in shutdown() before kernel_process_ is destroyed.
   std::shared_ptr<kernel::KernelThread> audio_thread_{};
   GuestThreadTlsContext audio_thread_tls_{};
+  // XENON_AUDIO_STALL_PROBE: a host thread that, while a guest audio render
+  // callback overruns, logs what every guest thread is doing
+  // (audio_stall_probe.log) - what the callback is waiting on when the
+  // device underruns.
+  std::thread audio_stall_probe_thread_{};
+  std::atomic<bool> audio_stall_probe_running_{false};
+  void run_audio_stall_probe();
+  void stop_audio_stall_probe();
 #endif
 
   // GPU pump thread state. Not gated behind a feature macro like
@@ -807,6 +894,24 @@ class XenonSession final : public cpu::RuntimeServices {
   static constexpr std::uint32_t kGpuWakePresent = 1u << 1u;   // vsync: present a frame
   static constexpr std::uint32_t kGpuWakeStop = 1u << 2u;
   WakeSignal gpu_wake_{};
+  // Scan-out latching. The display samples the front buffer at vertical blank,
+  // and the title waits for the vblank interrupt before it renders into that
+  // buffer again (AC6 resolves every frame into one front buffer). The vsync
+  // thread numbers each vblank in scanout_requested_ and delivers the interrupt
+  // once the worker has presented what the front buffer held then
+  // (scanout_latched_); delivering it first let the next frame's resolve
+  // overwrite the buffer before it was read, tearing its top rows.
+  std::atomic<std::uint64_t> scanout_requested_{0};
+  SequenceLatch scanout_latched_{};
+  // Who settled the latest vblank's scan-out, as (vblank << 1) | abandoned:
+  // the worker claims a vblank as it starts presenting it; the vsync thread,
+  // its wait over, either finds the present under way (and waits for it to
+  // finish) or claims the vblank abandoned, and the worker then skips that
+  // present - the screen keeps the previous frame for one vblank rather than
+  // being scanned out while the title already renders into it.
+  std::atomic<std::uint64_t> scanout_claim_{0};
+  // Vblanks whose interrupt went out without the scan-out latched in time.
+  std::atomic<std::uint64_t> scanout_latch_timeouts_{0};
   std::atomic<std::uint64_t> gpu_presents_{0};
   // Presents by gpu::PresentStatus: a window that stays black because
   // every present fails looks the same as one showing a black frame.
@@ -828,6 +933,11 @@ class XenonSession final : public cpu::RuntimeServices {
   // Vsync interrupt deliveries into the title's registered callback (diagnostics).
   std::atomic<std::uint64_t> gpu_interrupts_delivered_{0};
   std::atomic<std::uint64_t> gpu_interrupts_failed_{0};
+  // See set_presentation_window().
+  std::atomic<void*> presentation_window_{nullptr};
+  // Guest vblanks the vsync thread delivered on a host display vblank, rather
+  // than from its timer (diagnostics).
+  std::atomic<std::uint64_t> gpu_vblanks_display_locked_{0};
   // The guest callback each pump is running and how long its callbacks take.
   CallbackWatch gpu_callback_watch_{};
   CallbackWatch audio_callback_watch_{};

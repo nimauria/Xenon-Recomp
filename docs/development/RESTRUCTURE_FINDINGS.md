@@ -186,9 +186,15 @@ of them also built without `--parallel`. `registry_numeric_format` timed out at
 generator and compiler (`tests/support/nested_cmake.hpp`) with
 `--parallel 4`.
 
-## Runtime observations
+## Historical runtime observations
 
-See `docs/runtime/AC6_RUNTIME_INVESTIGATION.md`. In short:
+These observations were recorded during the structural refactor; they are
+not a current AC6 blocker list. AC6 now loads through the main menu into the
+first cutscene with working audio; cutscene frame rate/pacing is being fixed
+(owner report, 11 November 2026). See the
+[current milestone](../../README.md#current-milestone-project-gracemeria).
+The earlier [stall investigation](../runtime/AC6_RUNTIME_INVESTIGATION.md)
+records these architectural properties:
 
 - Audio render callbacks stop after `kMaxQueuedRenderFrames` (8)
   invocations unless the guest submits frames.

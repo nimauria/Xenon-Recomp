@@ -1097,6 +1097,141 @@ int main() {
   }
   std::cout << "  [PASS] Adaptive observations are scoped to the exact effective executable revision\n";
 
+  // Test 21c (AC6 preparation failure): a branch-target observation recorded
+  // at a DIRECT branch is a jump inside one function, not a function entry.
+  // AC6's copy routine 0x82382F18 jumps forward to its loop check 0x82382F3C,
+  // whose loop branches back to 0x82382F28; seeding 0x82382F3C made it a
+  // function whose loop left it without an entry, and generation stopped.
+  // The observation came from the interpreter looking up the `b` target.
+  // The routine's own words (all branches PC-relative), called with `bl`.
+  {
+    constexpr std::uint32_t kCopy = 8u;  // byte offset of the copy routine
+    const std::vector<std::uint32_t> words = {
+        0x48000009u,  // bl copy
+        kBlr,
+        // copy (AC6 0x82382F18):
+        0x38050001u, 0x60660000u, 0x7C0903A6u,
+        0x48000018u,  // +0x0C b +0x24 (the loop check)
+        0x38A5FFFFu,  // +0x10 loop body (0x82382F28)
+        0x88040000u, 0x38840001u, 0x98060000u, 0x38C60001u,
+        0x70C00003u,  // +0x24 loop check (0x82382F3C)
+        0x4002FFE8u,  // +0x28 bdnzf -> +0x10
+        0x54A0F0BFu, 0x41C20024u, 0x7C0903A6u, 0x70800003u, 0x40C2003Cu, 0x80E40000u,
+        0x38840004u, 0x90E60000u, 0x38C60004u, 0x4320FFF0u, 0x70A00003u, 0x7C0903A6u,
+        0x4DE20020u, 0x88040000u, 0x38840001u, 0x98060000u, 0x38C60001u, 0x4320FFF0u,
+        0x4E800020u, 0x88E40003u, 0x89040002u, 0x5107442Eu, 0x89240001u, 0x5127821Eu,
+        0x89440000u, 0x5147C00Eu, 0x38840004u, 0x90E60000u, 0x38C60004u, 0x4200FFD8u,
+        0x4BFFFFB0u,
+    };
+    const auto xex_bytes = make_xex(words);
+    xbox::XexImage image{};
+    std::string parse_error;
+    assert(xbox::parse_xex_image(xex_bytes, image, &parse_error));
+    DriverOptions options{};
+    options.pre_parsed_image = image;
+    options.output = root / "adaptive_direct_branch_site";
+    options.analysis_jobs = 1u;
+    AdaptiveObservation jump{};
+    jump.address = base + kCopy + 0x24u;
+    jump.site = base + kCopy + 0x0Cu;
+    jump.kind = AdaptiveObservationKind::IndirectBranchTarget;
+    options.adaptive_observations.push_back(jump);
+    AnalysisReport report;
+    std::string error;
+    assert(load_and_analyze(options, report, error) && error.empty());
+    assert(std::none_of(report.functions.begin(), report.functions.end(), [&](const auto& function) {
+             return function.guest_start == base + kCopy + 0x24u;
+           }) &&
+           "a direct jump's target must not become a function");
+    assert(std::any_of(report.functions.begin(), report.functions.end(), [&](const auto& function) {
+      return function.guest_start == base + kCopy && function.compiled &&
+             owns_address(function, base + kCopy + 0x10u);
+    }));
+    assert(generate_project(options, report, error) && error.empty());
+  }
+  std::cout << "  [PASS] A branch-target observation at a direct branch never seeds a function\n";
+
+  // Test 21d (AC6 preparation failure): an observed entry inside code analysis
+  // never found - AC6's switch case 0x820B54D4 inside a loop whose function
+  // was unknown - becomes a function whose own loop jumps back before its
+  // start, to an address with no entry. It cannot be compiled on its own; it
+  // must stay with the interpreter instead of failing the whole generation.
+  {
+    const std::vector<std::uint32_t> words = {
+        kBlr,         // +0x00 the entry point, the only static function
+        0x00000000u,  // +0x04 (nothing reaches the code below statically)
+        0x00000000u,  // +0x08
+        0x00000000u,  // +0x0C
+        0x38A5FFFFu,  // +0x10 loop: addi r5, r5, -1
+        0x38C60001u,  // +0x14 addi r6, r6, 1
+        0x2C050000u,  // +0x18 observed: cmpwi r5, 0
+        0x4082FFF4u,  // +0x1C bne loop
+        kBlr,         // +0x20
+    };
+    const auto xex_bytes = make_xex(words);
+    xbox::XexImage image{};
+    std::string parse_error;
+    assert(xbox::parse_xex_image(xex_bytes, image, &parse_error));
+    DriverOptions options{};
+    options.pre_parsed_image = image;
+    options.output = root / "adaptive_unanchored_region";
+    options.analysis_jobs = 1u;
+    AdaptiveObservation entered{};
+    entered.address = base + 0x18u;
+    entered.site = base + 0x18u;
+    entered.kind = AdaptiveObservationKind::ExecutedEntry;
+    options.adaptive_observations.push_back(entered);
+    AnalysisReport report;
+    std::string error;
+    assert(load_and_analyze(options, report, error) && error.empty());
+    assert(std::none_of(report.functions.begin(), report.functions.end(), [&](const auto& function) {
+             return function.compiled && owns_address(function, base + 0x18u) &&
+                    !owns_address(function, base + 0x10u);
+           }) &&
+           "a region whose loop leaves it without an entry is not compiled on its own");
+    assert(generate_project(options, report, error) && error.empty());
+  }
+  std::cout << "  [PASS] A runtime-observed region that cannot stand alone stays interpreted\n";
+
+  // Test 21e (AC6 audio worker 0x82379938): a function that ends in a call
+  // that never returns, followed by padding, is complete at that call. The
+  // padding word was read as the function's next instruction and the whole
+  // thread loop was rejected as invalid PPC, leaving it to the interpreter.
+  {
+    const std::vector<std::uint32_t> words = {
+        0x48000011u,  // +0x00 bl worker
+        kBlr,         // +0x04
+        0x00000000u,  // +0x08
+        0x00000000u,  // +0x0C
+        0x38630001u,  // +0x10 worker: addi r3, r3, 1
+        0x2C030000u,  // +0x14 cmpwi r3, 0
+        0x4082FFF8u,  // +0x18 bne worker
+        0x4800000Du,  // +0x1C bl exit (never returns)
+        0x00000000u,  // +0x20 padding
+        0x00000000u,  // +0x24 padding
+        kBlr,         // +0x28 exit
+    };
+    const auto xex_bytes = make_xex(words);
+    xbox::XexImage image{};
+    std::string parse_error;
+    assert(xbox::parse_xex_image(xex_bytes, image, &parse_error));
+    DriverOptions options{};
+    options.pre_parsed_image = image;
+    options.output = root / "noreturn_tail_call";
+    options.analysis_jobs = 1u;
+    AnalysisReport report;
+    std::string error;
+    assert(load_and_analyze(options, report, error) && error.empty());
+    const auto worker = std::find_if(report.functions.begin(), report.functions.end(), [&](const auto& function) {
+      return function.guest_start == base + 0x10u;
+    });
+    assert(worker != report.functions.end() && worker->compiled && worker->error.empty() &&
+           "a function ending in a call followed by padding is compiled");
+    assert(worker->guest_end == base + 0x20u);
+    assert(generate_project(options, report, error) && error.empty());
+  }
+  std::cout << "  [PASS] A function ending in a call that never returns is compiled up to the call\n";
+
   // Test 22 (forward terminal branch closure): a non-linked forward `b` must
   // not become a tail-call/function boundary merely because it crosses the
   // current tentative extent. This is the generic form of AC6's
@@ -1447,6 +1582,82 @@ int main() {
     remove_all_tolerant(test_root);
   }
   std::cout << "  [PASS] Jump-table cases of a weakly evidenced dispatcher are absorbed into it\n";
+
+  // Regression (Ace Combat 6 startup): MSVC switch dispatch - a cmplwi/bgt
+  // bound, the table address, the scaled index, lwzx, mtctr, bctr - was never
+  // resolved, so its case blocks were not compiled and every dispatch ran in
+  // the interpreter. A qsort comparator whose address is only ever built as
+  // a constant (lis + addi into r6) was never discovered at all and ran
+  // interpreted for seconds. Both are found statically now; the switch table
+  // after the bctr, whose address is also built with lis + addi, is data.
+  {
+    const auto dispatcher = base + 0x10u;
+    const auto table = base + 0x30u;
+    const auto case0 = base + 0x3Cu;
+    const auto case1 = base + 0x40u;
+    const auto case2 = base + 0x44u;
+    const auto comparator = base + 0x4Cu;
+    const auto rlwinm = [](std::uint32_t ra, std::uint32_t rs, std::uint32_t sh, std::uint32_t mb,
+                           std::uint32_t me) {
+      return (21u << 26) | (rs << 21) | (ra << 16) | (sh << 11) | (mb << 6) | (me << 1);
+    };
+    const std::uint32_t cmplwi_cr6_r3_2 = (10u << 26) | (6u << 23) | (3u << 16) | 2u;
+    const std::uint32_t lwzx_r0_r12_r0 = (31u << 26) | (0u << 21) | (12u << 16) | (0u << 11) | (23u << 1);
+    const std::vector<std::uint32_t> text = {
+        bl_word(base, dispatcher),                                     // +0x00 entry point
+        lis_word(11u, static_cast<std::uint16_t>(comparator >> 16)),   // +0x04
+        addi_word(6u, 11u, static_cast<std::uint16_t>(comparator)),    // +0x08 qsort(..., cmp)
+        kBlr,                                                          // +0x0C
+        cmplwi_cr6_r3_2,                                               // +0x10 dispatcher
+        bc_word(base + 0x14u, case2, 12u, 25u),                        // +0x14 bgt cr6, default
+        lis_word(12u, static_cast<std::uint16_t>(table >> 16)),        // +0x18
+        addi_word(12u, 12u, static_cast<std::uint16_t>(table)),        // +0x1C
+        rlwinm(0u, 3u, 2u, 0u, 29u),                                   // +0x20 index * 4
+        lwzx_r0_r12_r0,                                                // +0x24
+        mtctr_word(0u),                                                // +0x28
+        kBctr,                                                         // +0x2C
+        case0, case1, case2,                                           // +0x30 jump table
+        addi_word(3u, 3u, 1u),                                         // +0x3C case 0
+        addi_word(3u, 3u, 2u),                                         // +0x40 case 1
+        kBlr,                                                          // +0x44 case 2 / default
+        0u,                                                            // +0x48 alignment padding
+        lwz_word(11u, 3u, 0),                                          // +0x4C comparator
+        kBlr,                                                          // +0x50
+    };
+    AnalysisReport report;
+    const auto test_root = root / "switch_and_address_taken";
+    assert(run(make_xex(text), std::nullopt, report, test_root, std::nullopt, 1u));
+    const auto* owner = find_function(report, dispatcher);
+    assert(owner != nullptr && owner->compiled);
+    for (const auto case_start : {case0, case1, case2}) {
+      assert(owns_address(*owner, case_start) && "switch cases are blocks of their dispatcher");
+      assert(find_function(report, case_start) == nullptr);
+      const auto* entry = find_entry(report, case_start);
+      assert(entry != nullptr && entry->owner_function == dispatcher &&
+             "every case, fall-through ones included, is a dispatchable block");
+    }
+    assert(report.diagnostics.resolved_indirect_via_jump_table >= 1u);
+    assert(std::none_of(report.unresolved.begin(), report.unresolved.end(),
+                        [&](const auto& site) { return site.address == base + 0x2Cu; }));
+    const auto* callback = find_function(report, comparator);
+    assert(callback != nullptr && callback->compiled);
+    assert(has_source(*callback, DiscoverySource::AddressTakenCode));
+    assert(find_function(report, table) == nullptr && "a switch table after bctr is data");
+
+    DriverOptions options{};
+    options.input = test_root / "fixture.xex";
+    options.output = test_root / "generated";
+    remove_all_tolerant(test_root);
+    std::filesystem::create_directories(test_root);
+    const auto xex_bytes = make_xex(text);
+    std::ofstream(options.input, std::ios::binary)
+        .write(reinterpret_cast<const char*>(xex_bytes.data()),
+               static_cast<std::streamsize>(xex_bytes.size()));
+    std::string error;
+    assert(generate_project(options, report, error) && error.empty());
+    remove_all_tolerant(test_root);
+  }
+  std::cout << "  [PASS] Switch tables and address-taken callbacks are compiled, not interpreted\n";
 
   std::cout << "All Recomp Analysis V3 + Gen 6 discovery quality tests passed!\n";
   return 0;

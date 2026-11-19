@@ -45,6 +45,10 @@ Json apply_review(LauncherService &service, const Json &review) {
   return terminal(service, state.at("jobs").back().at("id"));
 }
 int main() {
+  check(legacy_macos_key("frontend/paths/screenshots")=="frontend.paths.screenshots",
+        "macOS preference keys must use QSettings separators");
+  check(legacy_macos_key("version.1/a\xC2\xB7" "b")=="version\xC2\xB7" "1.a/b",
+        "macOS preference key rotation must preserve literal dots and middle dots");
   const auto root = fs::temp_directory_path() / ("xenon-migration-" + make_id());
   const auto source = root / "old", storage = root / "next";
   auto cancel = std::make_shared<std::atomic_bool>(false);

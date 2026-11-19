@@ -43,6 +43,36 @@ bool EdramOwnershipPlan::requires_preservation() const noexcept {
 
 void EdramOwnershipTracker::reset() noexcept {
   owners_.fill(kCanonicalEdramOwner);
+  changed();
+}
+
+namespace {
+std::uint64_t holding_key(EdramOwnerId owner, const EdramSurfaceLayout& surface) noexcept {
+  return surface.hash() ^ (owner * 0x9E3779B97F4A7C15ull) ^ 0xC3A5C85C97CB3127ull;
+}
+}  // namespace
+
+bool EdramOwnershipTracker::known_to_hold(EdramOwnerId owner,
+                                          const EdramSurfaceLayout& surface) const noexcept {
+  if (owner == kCanonicalEdramOwner) return false;
+  const auto key = holding_key(owner, surface);
+  for (const auto& holding : holdings_)
+    if (holding.key == key && holding.generation == generation_) return true;
+  return false;
+}
+
+void EdramOwnershipTracker::note_holds(EdramOwnerId owner,
+                                       const EdramSurfaceLayout& surface) noexcept {
+  if (owner == kCanonicalEdramOwner) return;
+  const auto key = holding_key(owner, surface);
+  for (auto& holding : holdings_) {
+    if (holding.key == key) {
+      holding.generation = generation_;
+      return;
+    }
+  }
+  holdings_[next_holding_] = {key, generation_};
+  next_holding_ = (next_holding_ + 1u) % holdings_.size();
 }
 
 EdramOwnershipPlan EdramOwnershipTracker::plan(
@@ -65,6 +95,7 @@ bool EdramOwnershipTracker::commit(const EdramOwnershipPlan& plan) noexcept {
     for (const auto tile : change.tiles)
       if (owners_[tile] != change.previous_owner) return false;
   for (const auto tile : plan.covered_tiles) owners_[tile] = plan.requested_owner;
+  if (!plan.changes.empty()) changed();
   return true;
 }
 
@@ -72,18 +103,21 @@ void EdramOwnershipTracker::make_canonical(
     const EdramSurfaceLayout& surface) noexcept {
   for (const auto tile : covered_tiles(surface))
     owners_[tile] = kCanonicalEdramOwner;
+  changed();
 }
 
 void EdramOwnershipTracker::make_canonical_region(
     const EdramSurfaceLayout& surface, EdramSurfaceRegion region) noexcept {
   for (const auto tile : covered_edram_tiles(surface, region))
     owners_[tile] = kCanonicalEdramOwner;
+  changed();
 }
 
 void EdramOwnershipTracker::release(EdramOwnerId owner_id) noexcept {
   if (owner_id == kCanonicalEdramOwner) return;
   for (auto& tile_owner : owners_)
     if (tile_owner == owner_id) tile_owner = kCanonicalEdramOwner;
+  changed();
 }
 
 void EdramOwnershipTracker::release_tiles(EdramOwnerId owner_id,
@@ -93,6 +127,7 @@ void EdramOwnershipTracker::release_tiles(EdramOwnerId owner_id,
     auto& tile_owner = owners_[tile % Edram::kTileCount];
     if (tile_owner == owner_id) tile_owner = kCanonicalEdramOwner;
   }
+  changed();
 }
 
 EdramOwnerId EdramOwnershipTracker::owner(std::uint32_t tile) const noexcept {

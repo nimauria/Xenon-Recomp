@@ -184,6 +184,13 @@ bool Context::initialize(const ContextConfig& config) {
   // Sample-rate fragment execution is required so writes can preserve every
   // unrelated host sample instead of using a native averaging resolve.
   enabled_features.sampleRateShading = VK_TRUE;
+  // PA_CL_CLIP_CNTL.CLIP_DISABLE turns depth clipping off; depth clamping is
+  // how a Vulkan pipeline does that.
+  enabled_features.depthClamp = VK_TRUE;
+  // Rectangle lists and point sprites are expanded by geometry shaders, and
+  // user clip planes (PA_CL_CLIP_CNTL.UCP_ENA) are clip distances.
+  enabled_features.geometryShader = VK_TRUE;
+  enabled_features.shaderClipDistance = VK_TRUE;
   const float priority = 1.0f;
   VkDeviceQueueCreateInfo queue_info{VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};
   queue_info.queueFamilyIndex = graphics_queue_family_;

@@ -2,6 +2,8 @@
 
 ## Overview
 
+The current Qt-free launcher implements this contract in [`launcher-next/native/adapters/runtime_adapter.cpp`](../../launcher-next/native/adapters/runtime_adapter.cpp). Host selection, live verification and remaining preparation/content/service work are recorded in [the integration status](../../launcher-next/INTEGRATION.md). Qt `RuntimeBridge` names below refer to the retired launcher implementation, not a runtime dependency.
+
 `xenon_runtime_host` is the only process that ever creates a `XenonSession`
 and executes guest code. The launcher (`xenon_launcher`) never runs a game
 itself — pressing Play spawns a detached `xenon_runtime_host` process and
@@ -118,6 +120,15 @@ a loose `.xex`, an Xbox 360 `.iso`/`.xgd` GDFX/XDVDFS image, or a `.dvd`
 descriptor. `runtime_host/src/content_source.cpp` normalizes all four forms.
 Disc images are read and mounted directly without whole-image extraction; a
 loose XEX uses its containing directory as the runtime `game:` filesystem.
+
+`modulePath` also locates the module's hint package,
+`<modulePath>/xenon-analysis`. At launch the session reads the running
+revision's `revisions/<effective image hash>/rendering.json` from it, the
+temporal rendering profile. A malformed profile fails the launch.
+`temporalProbeFrames` (default `0`, off) logs a `[TemporalProbe]` frame
+report every that many frames. It lists camera-matrix and HUD-shader
+candidates, which is how a module author writes that profile (see
+[`TEMPORAL_RENDERING.md`](../graphics/TEMPORAL_RENDERING.md)).
 
 `headlessMode` (defaults to `false`, i.e. Normal Play) is a Gracemeria
 readiness pass addition (Part 5) - see "Normal Play vs. headless/test mode"
@@ -371,7 +382,7 @@ install. See `launcher/tests/runtime/runtime_bridge_tests.cpp` and
   "Vulkan"/"D3D12" request is honored or fails initialization outright, and
   "Null"/"None" is the only way to get `gpu::NullBackend` (a deliberate,
   explicit choice, never a silent fallback). `runtime_host/src/
-  presentation_host.{hpp,cpp}` now creates a real SDL2 window and wires it
+  presentation_host.{hpp,cpp}` now creates a real SDL3 window and wires it
   to that backend's `configure_presentation()` whenever one is active (never
   for `NullBackend`), and the main loop pumps window events (close ->
   orderly `session.stop()`, resize -> `resize_presentation()`, focus ->

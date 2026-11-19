@@ -89,8 +89,13 @@ class Sdl3Host final : public SdlHost {
     SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI_PS5_PLAYER_LED, "1");
 #endif
 #ifdef SDL_HINT_JOYSTICK_HIDAPI_STEAM
+    // Valve's controllers, the 2026 Steam Controller and its dongles
+    // included, read directly over HID without Steam running.
     SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI_STEAM, "1");
 #endif
+    // Whether input reaches the guest while the window is unfocused is
+    // InputSystem's background policy; SDL must keep reporting regardless.
+    SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
     if (!SDL_InitSubSystem(SDL_INIT_GAMEPAD)) return Result::Failed;
     setup_ = true;
     return Result::Success;
@@ -117,11 +122,14 @@ class Sdl3Host final : public SdlHost {
     out.clear();
     if (!setup_) return Result::Failed;
 
+    std::scoped_lock lock(mutex_);
+    // Device arrival and removal are detected while updating; nothing else
+    // pumps SDL's joystick state for this host.
+    SDL_UpdateGamepads();
     int count = 0;
     SDL_JoystickID* ids = SDL_GetGamepads(&count);
     if (!ids && count > 0) return Result::Failed;
 
-    std::scoped_lock lock(mutex_);
     out.reserve(static_cast<std::size_t>(std::max(count, 0)));
     for (int index = 0; index < count; ++index) {
       const auto id = ids[index];
@@ -152,6 +160,7 @@ class Sdl3Host final : public SdlHost {
   Result get_state(NativeDeviceId id, GamepadState& out) override {
     out = {};
     std::scoped_lock lock(mutex_);
+    SDL_UpdateGamepads();
     auto* gamepad = find(id);
     if (!gamepad) return Result::DeviceNotConnected;
 

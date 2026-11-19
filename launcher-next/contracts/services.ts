@@ -7,6 +7,7 @@ export interface HostServices {
     filesystem: boolean;
     input: boolean;
     network: boolean;
+    networkConfiguration?: boolean;
     content: boolean;
   };
   filesystem: {

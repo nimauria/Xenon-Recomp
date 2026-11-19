@@ -81,8 +81,8 @@ ScanoutPlan plan_scanout(const PresentationFrame& frame, std::uint32_t target_wi
     plan.error = "presentation source format has no RGBA8 scanout conversion";
     return plan;
   }
-  // One 2D slice. guest_size_bytes is a layer's stride, which pads to four
-  // slices for 3D textures, four times the front buffer. Tiled addressing
+  // One 2D slice. guest_size_bytes is a layer's stride, rounded up to whole
+  // 4 KiB blocks (four slices for a 3D texture). Tiled addressing
   // spreads a slice over whole 4 KiB blocks (a 32x32 16-bit slice puts rows
   // 16-31 in its second 2 KiB), so the slice is rounded up to one.
   const std::uint64_t slice_bytes = (std::uint64_t(base.storage_pitch_blocks) *

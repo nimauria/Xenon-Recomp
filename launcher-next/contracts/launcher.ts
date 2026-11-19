@@ -4,10 +4,12 @@ export const protocolVersion = 1 as const;
 export type Page =
   | "Library"
   | "Home"
+  | "Discover"
   | "Modules"
   | "Profiles"
   | "Captures"
   | "Downloads"
+  | "Updates"
   | "Settings"
   | "Support"
   | "Network"
@@ -43,6 +45,8 @@ export interface Dlc {
   catalogId?: string;
 }
 export interface Game {
+  runtimeOverrides?: Record<string, unknown>;
+  moduleOverrides?: Record<string, Record<string, unknown>>;
   playCount?: number;
   totalPlayTimeMs?: number;
   fixtureActivity?: {
@@ -120,11 +124,21 @@ export interface Module {
   schema: ModuleSetting[];
   settings: Record<string, unknown>;
   previousVersions?: { version: string; path: string }[];
+  canUninstall?: boolean;
+  compatibility?: {
+    status: "unverified" | "incompatible";
+    message: string;
+    issues: string[];
+    warnings: string[];
+    binaryAbiVerified: false;
+    platform: string;
+  };
 }
 export interface Notification {
   id: string;
   title: string;
   message: string;
+  programTitle?: boolean;
   read: boolean;
   time: string;
   severity?: string;
@@ -144,6 +158,7 @@ export interface Capture {
 }
 export interface Job {
   id: string;
+  gameId?: string;
   title: string;
   state: string;
   progress: number;
@@ -220,7 +235,60 @@ export interface UpdateHistory {
   message: string;
   time: string;
 }
+export interface Community {
+  name: string;
+  discordUrl: string;
+  projectUrl: string;
+  presenceProvider: string;
+  consentVersion: string;
+  presence: {
+    enabled: boolean;
+    requestedEnabled: boolean;
+    suppressed: boolean;
+    providerAvailable: boolean;
+    providerStatus: string;
+    connected: boolean;
+    published: boolean;
+    showGameTitle: boolean;
+    lastPublishError: string;
+    activity: { details: string; state: string };
+  };
+}
 export interface Snapshot {
+  developmentDemo?: boolean;
+  community?: Community;
+  cache?: {
+    configuredPath: string;
+    effectivePath: string;
+    pending: boolean;
+    previousLocations: string[];
+  };
+  application?: {
+    version: string;
+    platform: string;
+    architecture: string;
+    protocolVersion: number;
+  };
+  locations?: {
+    destinations: {
+      id: string;
+      key: string;
+      label: string;
+      defaultPath: string;
+      configuredPath: string;
+      effectivePath: string;
+      invalid: boolean;
+      description?: string;
+    }[];
+    fixed: {
+      id: string;
+      label: string;
+      path: string;
+      description: string;
+      legacyKey: string;
+      legacyConfiguredPath: string;
+    }[];
+  };
   activitySummary?: {
     playCount: number;
     totalPlayTimeMs: number;
@@ -260,6 +328,15 @@ export interface Snapshot {
     captures: boolean;
     online?: boolean;
     networkFixture?: boolean;
+  };
+  runtimeConnection?: {
+    configuredPath: string;
+    effectivePath: string;
+    source: "fixture" | "command-line" | "saved" | "beside-launcher";
+    available: boolean;
+    fixture: boolean;
+    locked: boolean;
+    protocolVersion: number;
   };
   settings?: Record<string, unknown>;
   modules?: Module[];
@@ -312,12 +389,25 @@ export interface Snapshot {
     fixture: boolean;
     lastError?: string;
     logTail?: string;
+    phaseMessage?: string;
+    errorCategory?: string;
     startedAtEpochMs?: number;
     endedAtEpochMs?: number;
   };
-  recovery?: { previousUncleanExit: boolean; safeMode: boolean };
+  recovery?: {
+    previousUncleanExit: boolean;
+    safeMode: boolean;
+    pendingIncident?: boolean;
+    consecutiveUncleanStarts?: number;
+    automaticSafeMode?: boolean;
+    automaticSafeModeReason?: "" | "startup-failure" | "repeated-unclean";
+    previousPhase?: string;
+    currentPhase?: string;
+  };
 }
 export interface Commands {
+  "community.state": { input: Record<string, never>; output: Community };
+  "community.refresh": { input: Record<string, never>; output: Community };
   "application.snapshot": { input: Record<string, never>; output: Snapshot };
   "profiles.create": {
     input: Partial<Omit<Profile, "id">> & { name: string };

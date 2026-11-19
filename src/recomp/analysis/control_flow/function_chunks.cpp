@@ -121,6 +121,8 @@ void ingest_function_chunks(CandidateScan& scan) {
                 ++result.resolved_indirect_via_backward_slice;
               if (resolution.kind == value_analysis::IndirectResolverKind::ReadOnlyTable)
                 ++result.resolved_indirect_via_readonly_table;
+              if (resolution.kind == value_analysis::IndirectResolverKind::JumpTable)
+                ++result.resolved_indirect_via_jump_table;
               for (const auto target : resolution.targets) {
                 if (instruction.lk()) {
                   function.calls.push_back(target);

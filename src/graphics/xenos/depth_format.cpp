@@ -80,25 +80,65 @@ std::uint32_t pack_depth_stencil(DepthRenderTargetFormat format, float depth,
     depth_bits = static_cast<std::uint32_t>(
         std::nearbyint(static_cast<double>(clamped) * 16777215.0));
   }
-  return depth_bits | (std::uint32_t(stencil) << 24u);
+  return (depth_bits << 8u) | stencil;
 }
 
 DepthStencilSample unpack_depth_stencil(DepthRenderTargetFormat format,
                                         std::uint32_t packed) noexcept {
-  const auto depth_bits = packed & 0x00FFFFFFu;
+  const auto depth_bits = packed >> 8u;
   DepthStencilSample result{};
   result.depth = format == DepthRenderTargetFormat::D24FS8
                      ? float20e4_to_float32(depth_bits)
                      : float(depth_bits + (depth_bits >> 23u)) *
                            (1.0f / float(1u << 24u));
-  result.stencil = static_cast<std::uint8_t>(packed >> 24u);
+  result.stencil = static_cast<std::uint8_t>(packed & 0xFFu);
   return result;
 }
 
-DepthStencilSample depth_stencil_to_host(DepthRenderTargetFormat format,
-                                         std::uint32_t packed) noexcept {
+std::string_view unorm24_depth_write_name(Unorm24DepthWrite write) noexcept {
+  switch (write) {
+    case Unorm24DepthWrite::Midpoint: return "midpoint";
+    case Unorm24DepthWrite::PowerOfTwo: return "power-of-two";
+    case Unorm24DepthWrite::Split: return "split";
+  }
+  return "unknown";
+}
+
+float unorm24_depth_for_write(std::uint32_t code, Unorm24DepthWrite write) noexcept {
+  code &= 0xFFFFFFu;
+  // Integer to float rounds to nearest even here and in the HLSL alike; the
+  // power-of-two scale is exact.
+  if (write == Unorm24DepthWrite::PowerOfTwo ||
+      (write == Unorm24DepthWrite::Split && code < 0x800000u))
+    return float(code) * (1.0f / 16777216.0f);
+  return float(2u * code + 1u + (code >> 23u)) * (1.0f / 33554432.0f);
+}
+
+std::vector<std::uint32_t> unorm24_depth_calibration_words(std::uint32_t count) {
+  constexpr std::array<std::uint32_t, 10> kEdges{0u,        1u,        2u,        0x3FFFFFu,
+                                                 0x7FFFFEu, 0x7FFFFFu, 0x800000u, 0x800001u,
+                                                 0xFFFFFEu, 0xFFFFFFu};
+  count = std::max<std::uint32_t>(count, 16u);
+  std::vector<std::uint32_t> words;
+  words.reserve(count);
+  for (const auto code : kEdges) words.push_back(code);
+  const auto spread = count - std::uint32_t(kEdges.size());
+  for (std::uint32_t i = 0; i < spread; ++i) {
+    // Evenly over [0, 0xFFFFFF], with the low bits stirred so every residue
+    // of a code's low byte turns up.
+    const auto even = std::uint32_t(std::uint64_t(i) * 0xFFFFFFu / (spread - 1u));
+    words.push_back(std::min<std::uint32_t>(even ^ ((i * 0x9Du) & 0x3Fu), 0xFFFFFFu));
+  }
+  for (std::uint32_t i = 0; i < count; ++i)
+    words[i] = (words[i] << 8u) | ((i * 0x5Bu + 0x11u) & 0xFFu);
+  return words;
+}
+
+DepthStencilSample depth_stencil_to_host(DepthRenderTargetFormat format, std::uint32_t packed,
+                                         Unorm24DepthWrite unorm24_write) noexcept {
   auto result = unpack_depth_stencil(format, packed);
   if (format == DepthRenderTargetFormat::D24FS8) result.depth *= 0.5f;
+  else result.depth = unorm24_depth_for_write(packed >> 8u, unorm24_write);
   return result;
 }
 
@@ -108,6 +148,11 @@ std::uint32_t host_to_depth_stencil(DepthRenderTargetFormat format,
                                     Float20e4Rounding rounding) noexcept {
   if (format == DepthRenderTargetFormat::D24FS8) host_depth *= 2.0f;
   return pack_depth_stencil(format, host_depth, stencil, rounding);
+}
+
+float host_viewport_depth(DepthRenderTargetFormat format, float guest_depth) noexcept {
+  if (format != DepthRenderTargetFormat::D24FS8) return guest_depth;
+  return quantize_float20e4(guest_depth) * 0.5f;
 }
 
 }  // namespace xenon::gpu

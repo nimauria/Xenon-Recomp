@@ -76,6 +76,9 @@ bool Lifter::lift_fpu(const DecodedInstruction& i, ir::Builder& b) const {
     auto a=f64(b,i.rb()); const ValueId args[]={a};
     auto r=b.emit(m=="fresx"?Op::FReciprocalEstimate:Op::FReciprocalSqrtEstimate,
                   Type::F64,args,0,0,&i);
+    // The Xenon's fres/frsqrte deliver a single-precision estimate (xenia
+    // and rexglue round the result to single).
+    r=maybe_single(b,r,true);
     store_f64(b,i.frt(),r); update_status(b,r,i); return true;
   }
   if (m == "fselx") {

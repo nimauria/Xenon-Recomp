@@ -1,8 +1,11 @@
 #include <cassert>
+#include <chrono>
 #include <cstdint>
 #include <deque>
 #include <memory>
+#include <mutex>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -445,6 +448,146 @@ void test_failed_driver_does_not_break_working_driver() {
   assert(system.device_for_user(0).has_value());
 }
 
+// Keyboard + mouse and a controller are interchangeable for player 1: the
+// device used last drives the user, the companion stands in when no
+// controller is connected, and it never claims a user of its own.
+void test_companion_source_takes_over_on_use() {
+  input::InputSystem system;
+  auto pad_driver = std::make_unique<MockDriver>("pad");
+  auto keys_driver = std::make_unique<MockDriver>("keys");
+  auto* pad = pad_driver.get();
+  auto* keys = keys_driver.get();
+  pad->devices = {make_pad(1, "pad-1", "Pad")};
+  pad->states = {{1, {}}};
+  keys->devices = {make_pad(9, "kbm", "Keyboard + Mouse")};
+  keys->states = {{9, {}}};
+  assert(system.add_driver(std::move(pad_driver)));
+  assert(system.add_driver(std::move(keys_driver)));
+  assert(system.setup() == input::Result::Success);
+  system.set_companion_source(0, "keys:kbm");
+  assert(!system.device_for_user(1).has_value());
+
+  const auto set = [](MockDriver* driver, input::GamepadState state) {
+    driver->states.front().second = state;
+  };
+  input::State state{};
+
+  set(keys, {input::A});
+  assert(system.get_state(0, state) == input::Result::Success);
+  assert(state.gamepad.buttons == input::A);
+
+  // A drifting pad stick is not a takeover; the released keyboard still owns.
+  set(keys, {});
+  input::GamepadState drift{};
+  drift.thumb_lx = 3000;
+  set(pad, drift);
+  assert(system.get_state(0, state) == input::Result::Success);
+  assert(state.gamepad.buttons == 0 && state.gamepad.thumb_lx == 0);
+
+  // Pressing a pad button hands control back to the pad.
+  drift.buttons = input::B;
+  set(pad, drift);
+  assert(system.get_state(0, state) == input::Result::Success);
+  assert(state.gamepad.buttons == input::B && state.gamepad.thumb_lx == 3000);
+
+  // Unplugged pad: the keyboard stands in as player 1's controller.
+  pad->devices.clear();
+  system.refresh_devices();
+  set(keys, {input::Start});
+  assert(system.get_state(0, state) == input::Result::Success);
+  assert(state.gamepad.buttons == input::Start);
+  input::Capabilities caps{};
+  assert(system.get_capabilities(0, 0, caps) == input::Result::Success);
+
+  // Replugged pad takes player 1 back, not player 2.
+  pad->devices = {make_pad(1, "pad-1", "Pad")};
+  system.refresh_devices();
+  assert(system.device_for_user(0).has_value());
+  assert(!system.device_for_user(1).has_value());
+}
+
+// A pad the host connects while the monitor's thread enumerates, so the
+// device list is guarded.
+class HotplugDriver final : public input::InputDriver {
+ public:
+  std::string_view name() const noexcept override { return "hotplug"; }
+  input::Result setup() override { return input::Result::Success; }
+  void shutdown() noexcept override {}
+  void enumerate_devices(std::vector<input::DriverDeviceInfo>& out_devices) override {
+    std::scoped_lock lock(mutex_);
+    out_devices = devices_;
+  }
+  input::Result get_state(input::NativeDeviceId device,
+                          input::GamepadState& out_state) override {
+    std::scoped_lock lock(mutex_);
+    for (const auto& info : devices_) {
+      if (info.native_id != device) continue;
+      out_state = {};
+      out_state.buttons = input::Start;
+      return input::Result::Success;
+    }
+    return input::Result::DeviceNotConnected;
+  }
+  input::Result get_capabilities(input::NativeDeviceId, input::Capabilities&) override {
+    return input::Result::Unsupported;
+  }
+  input::Result set_vibration(input::NativeDeviceId, const input::Vibration&) override {
+    return input::Result::Unsupported;
+  }
+  input::Result get_keystroke(input::NativeDeviceId, input::Keystroke&) override {
+    return input::Result::Empty;
+  }
+  void connect(input::DriverDeviceInfo info) {
+    std::scoped_lock lock(mutex_);
+    devices_.push_back(std::move(info));
+  }
+  void disconnect_all() {
+    std::scoped_lock lock(mutex_);
+    devices_.clear();
+  }
+
+ private:
+  std::mutex mutex_{};
+  std::vector<input::DriverDeviceInfo> devices_{};
+};
+
+template <typename Predicate>
+bool eventually(Predicate predicate) {
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+  while (std::chrono::steady_clock::now() < deadline) {
+    if (predicate()) return true;
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  }
+  return predicate();
+}
+
+// Regression: setup() enumerated once and nothing refreshed afterwards, so a
+// controller plugged in (or a wireless pad paired) after launch never reached
+// the guest - AC6 sat on PRESS START with a working pad connected.
+void test_hotplug_monitor_picks_up_pads_connected_after_setup() {
+  input::InputSystem system;
+  auto driver = std::make_unique<HotplugDriver>();
+  auto* pad = driver.get();
+  assert(system.add_driver(std::move(driver)));
+  assert(system.setup() == input::Result::Success);
+  system.start_hotplug_monitor(std::chrono::milliseconds(10));
+  system.start_hotplug_monitor(std::chrono::milliseconds(10));
+
+  input::State state{};
+  assert(system.get_state(0, state) == input::Result::DeviceNotConnected);
+
+  pad->connect(make_pad(7, "late-pad", "Late Pad"));
+  assert(eventually([&] { return system.device_for_user(0).has_value(); }));
+  assert(system.get_state(0, state) == input::Result::Success);
+  assert(state.gamepad.buttons == input::Start);
+
+  pad->disconnect_all();
+  assert(eventually([&] { return system.get_state(0, state) != input::Result::Success; }));
+
+  // shutdown() stops the monitor before the drivers go away.
+  system.shutdown();
+}
+
 // "input v2" coverage: InputSystem::get_motion_state()/get_touchpad_state()/
 // set_light_color() dispatch to the underlying InputDriver, independent of
 // any particular host backend. tests/input/sdl_driver_tests.cpp's
@@ -529,6 +672,8 @@ int main() {
   test_any_user_keystroke_routing();
   test_advanced_power_focus_indicators_and_diagnostics();
   test_failed_driver_does_not_break_working_driver();
+  test_hotplug_monitor_picks_up_pads_connected_after_setup();
+  test_companion_source_takes_over_on_use();
   test_motion_touchpad_and_light_color_routing();
   return 0;
 }

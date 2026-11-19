@@ -25,8 +25,8 @@ option(XENON_FETCH_MISSING_DEPS
   "Compatibility alias controlling automatic dependency provisioning" ON)
 option(XENON_PREFER_BUNDLED_FFMPEG
   "Prefer Xenon's committed Windows x64 static FFmpeg bundle in AUTO mode" ON)
-set(XENON_SDL2_ROOT "" CACHE PATH
-  "Optional SDL2 installation root; overrides managed/system discovery")
+set(XENON_SDL3_ROOT "" CACHE PATH
+  "Optional SDL3 installation root; overrides managed/system discovery")
 set(XENON_AUDIO_FFMPEG_ROOT "" CACHE PATH
   "Optional FFmpeg root exposing AV_CODEC_ID_XMAFRAMES")
 set(XENON_VULKAN_ROOT "" CACHE PATH
@@ -181,79 +181,53 @@ function(_xenon_bootstrap_dependency dependency_name out_result)
   set(${out_result} "${_bootstrap_result}" PARENT_SCOPE)
 endfunction()
 
-function(_xenon_select_sdl2_target out_target root_path allow_system)
+function(_xenon_select_sdl3_target out_target root_path allow_system)
   set(_target "")
 
   if(root_path)
-    find_package(SDL2 2.0.9 QUIET CONFIG
-      PATHS "${root_path}" "${root_path}/lib/cmake/SDL2" "${root_path}/lib64/cmake/SDL2"
+    find_package(SDL3 3.4 QUIET CONFIG
+      PATHS "${root_path}" "${root_path}/lib/cmake/SDL3" "${root_path}/lib64/cmake/SDL3"
       NO_DEFAULT_PATH)
   elseif(allow_system)
-    find_package(SDL2 2.0.9 QUIET CONFIG)
-    if(NOT TARGET SDL2::SDL2 AND NOT TARGET SDL2::SDL2-static)
-      find_package(SDL2 2.0.9 QUIET)
-    endif()
+    find_package(SDL3 3.4 QUIET CONFIG)
   endif()
 
-  if(TARGET SDL2::SDL2-static)
-    set(_target SDL2::SDL2-static)
-  elseif(TARGET SDL2::SDL2)
-    set(_target SDL2::SDL2)
-  elseif(allow_system AND SDL2_FOUND AND SDL2_LIBRARIES)
-    if(NOT TARGET xenon_sdl2_system_external)
-      add_library(xenon_sdl2_system_external INTERFACE)
-      target_include_directories(xenon_sdl2_system_external INTERFACE ${SDL2_INCLUDE_DIRS})
-      target_link_libraries(xenon_sdl2_system_external INTERFACE ${SDL2_LIBRARIES})
-    endif()
-    set(_target xenon_sdl2_system_external)
-  elseif(root_path)
-    find_path(_xenon_sdl2_include SDL.h
-      HINTS "${root_path}/include" "${root_path}/include/SDL2"
-      PATH_SUFFIXES SDL2
-      NO_DEFAULT_PATH NO_CACHE)
-    find_library(_xenon_sdl2_library
-      NAMES SDL2-static SDL2 libSDL2
-      HINTS "${root_path}/lib" "${root_path}/lib64"
-      NO_DEFAULT_PATH NO_CACHE)
-    if(_xenon_sdl2_include AND _xenon_sdl2_library)
-      string(MD5 _sdl_target_suffix "${root_path};${_xenon_sdl2_include};${_xenon_sdl2_library}")
-      set(_candidate "xenon_sdl2_external_${_sdl_target_suffix}")
-      if(NOT TARGET ${_candidate})
-        add_library(${_candidate} INTERFACE)
-        target_include_directories(${_candidate} INTERFACE "${_xenon_sdl2_include}")
-        target_link_libraries(${_candidate} INTERFACE "${_xenon_sdl2_library}")
-      endif()
-      set(_target ${_candidate})
-    endif()
+  # The managed build is static; a system package may provide either.
+  if(TARGET SDL3::SDL3-static)
+    set(_target SDL3::SDL3-static)
+  elseif(TARGET SDL3::SDL3)
+    set(_target SDL3::SDL3)
   endif()
 
   set(${out_target} "${_target}" PARENT_SCOPE)
 endfunction()
 
-function(xenon_resolve_sdl2 out_target)
-  _xenon_managed_prefix("sdl2" _managed_root)
-  _xenon_managed_dependency_ready("sdl2" _managed_ready)
+# SDL3 hosts the runtime window, audio output and controller input. One SDL
+# per process: SDL2 and SDL3 export the same symbol names.
+function(xenon_resolve_sdl3 out_target)
+  _xenon_managed_prefix("sdl3" _managed_root)
+  _xenon_managed_dependency_ready("sdl3" _managed_ready)
   set(_target "")
 
-  if(XENON_SDL2_ROOT)
-    _xenon_select_sdl2_target(_target "${XENON_SDL2_ROOT}" FALSE)
+  if(XENON_SDL3_ROOT)
+    _xenon_select_sdl3_target(_target "${XENON_SDL3_ROOT}" FALSE)
   elseif(NOT XENON_DEPENDENCY_MODE STREQUAL "SYSTEM" AND _managed_ready)
-    _xenon_select_sdl2_target(_target "${_managed_root}" FALSE)
+    _xenon_select_sdl3_target(_target "${_managed_root}" FALSE)
   endif()
 
   if(NOT _target AND (XENON_DEPENDENCY_MODE STREQUAL "AUTO" OR
                       XENON_DEPENDENCY_MODE STREQUAL "SYSTEM"))
-    _xenon_select_sdl2_target(_target "" TRUE)
+    _xenon_select_sdl3_target(_target "" TRUE)
   endif()
 
-  if(NOT _target AND NOT XENON_SDL2_ROOT AND
+  if(NOT _target AND NOT XENON_SDL3_ROOT AND
      NOT XENON_DEPENDENCY_MODE STREQUAL "SYSTEM")
-    _xenon_bootstrap_dependency("sdl2" _bootstrap_result)
+    _xenon_bootstrap_dependency("sdl3" _bootstrap_result)
     if(_bootstrap_result EQUAL 0)
-      _xenon_managed_dependency_ready("sdl2" _managed_ready)
+      _xenon_managed_dependency_ready("sdl3" _managed_ready)
       if(_managed_ready)
-        unset(SDL2_DIR CACHE)
-        _xenon_select_sdl2_target(_target "${_managed_root}" FALSE)
+        unset(SDL3_DIR CACHE)
+        _xenon_select_sdl3_target(_target "${_managed_root}" FALSE)
       endif()
     endif()
   endif()
@@ -717,7 +691,7 @@ function(xenon_install_runtime_dependencies runtime_destination license_destinat
       install(DIRECTORY "${_license_dir}/" DESTINATION "${license_destination}/${_name}")
     endif()
   endforeach()
-  foreach(_dep IN ITEMS sdl2 vulkan-headers)
+  foreach(_dep IN ITEMS sdl3 vulkan-headers)
     _xenon_managed_prefix("${_dep}" _prefix)
     if(EXISTS "${_prefix}/licenses/${_dep}")
       install(DIRECTORY "${_prefix}/licenses/${_dep}/" DESTINATION "${license_destination}/${_dep}")
@@ -728,8 +702,8 @@ function(xenon_install_runtime_dependencies runtime_destination license_destinat
 endfunction()
 
 function(xenon_dependency_help dependency_name)
-  if(dependency_name STREQUAL "sdl2")
-    message(STATUS "Run: python tools/deps/bootstrap.py ensure --only sdl2")
+  if(dependency_name STREQUAL "sdl3")
+    message(STATUS "Run: python tools/deps/bootstrap.py ensure --only sdl3")
   elseif(dependency_name STREQUAL "xenia-ffmpeg")
     message(STATUS "Run: python tools/deps/bootstrap.py ensure --only xenia-ffmpeg")
   elseif(dependency_name STREQUAL "dxc")
