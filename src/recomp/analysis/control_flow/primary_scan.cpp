@@ -106,6 +106,22 @@ void scan_primary_range(CandidateScan& scan) {
     }
     const auto instruction = decoder.decode(address, word);
     if (!instruction.valid()) {
+      // A function may end in a call that never returns (ExitThread, an
+      // assert or abort helper), followed by padding. Then the undecodable
+      // word after the final `bl` is past the function, not inside it - unless
+      // one of the function's own branches reaches it or beyond. AC6's audio
+      // worker thread 0x82379938 ends `bl 0x82380B18; .long 0`; rejecting it
+      // left the thread's whole loop to the interpreter.
+      const bool after_final_call =
+          !words.empty() && (words.back() >> 26u) == 18u && (words.back() & 1u) != 0u &&
+          std::none_of(pending_direct_branch_targets.begin(), pending_direct_branch_targets.end(),
+                       [address](const auto& pending) { return pending.first >= address; });
+      if (after_final_call) {
+        result.warnings.push_back("function 0x" + hex_string(start) + " ends in a call at 0x" +
+                                  hex_string(address - 4u) + " followed by non-code");
+        function.guest_end = address;
+        break;
+      }
       const std::string classification = classify_decode_failure(word);
       function.error = (classification == "invalid-ppc" ? "invalid PPC at 0x" : "unsupported PPC encoding at 0x") +
                        [&] { std::ostringstream s; s << std::hex << address; return s.str(); }();
