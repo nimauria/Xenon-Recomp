@@ -224,6 +224,45 @@ void test_return_from_a_tail_branched_callback_unwinds_to_its_caller(AddressSpac
   std::cout << "return from a tail-branched callback: unwinds to its caller" << std::endl;
 }
 
+// Only indirect jumps (bctr) report a compiled-lookup miss to the adaptive
+// observer. A direct `b` inside interpreted code is an ordinary jump; reported
+// as an "indirect-branch target" it made preparation seed a function at a
+// loop head (AC6's 0x82382F3C) and generation failed.
+std::vector<GuestAddress> g_missed;
+NativeCompiledEntry no_compiled_code(void*, ExecutionContext&, GuestAddress, CompiledLookupKind) {
+  return nullptr;
+}
+void record_miss(void*, ExecutionContext&, GuestAddress target, CompiledLookupKind) {
+  g_missed.push_back(target);
+}
+
+void test_only_indirect_jumps_report_lookup_misses(AddressSpace& memory) {
+  constexpr GuestAddress kJumps = kCode + 0xE00u;
+  write_instruction(memory, kJumps + 0x00u, 0x48000008u);  // b +8
+  write_instruction(memory, kJumps + 0x04u, 0x60000000u);  // nop (skipped)
+  write_instruction(memory, kJumps + 0x08u, 0x4E800420u);  // bctr
+  write_instruction(memory, kJumps + 0x18u, 0x4E800020u);  // blr
+  NullRuntimeServices runtime;
+  CpuState state{};
+  DynamicFallbackExecutor fallback({}, {});
+  ExecutionContext context(state, memory, runtime);
+  fallback.bind(context);
+  context.compiled_registry = &g_registry_tag;
+  context.compiled_lookup = &no_compiled_code;
+  context.compiled_lookup_miss = &record_miss;
+  state.lr = kReturn;
+  state.ctr = kJumps + 0x18u;
+  g_missed.clear();
+  const auto result = context.try_dynamic_fallback(kJumps, CompiledLookupKind::Call);
+  assert(result.handled && result.result.reason == FlowReason::Return &&
+         result.result.next_address == kReturn);
+  assert(std::find(g_missed.begin(), g_missed.end(), kJumps + 0x08u) == g_missed.end() &&
+         "a direct jump's target is not an indirect-branch observation");
+  assert(std::find(g_missed.begin(), g_missed.end(), kJumps + 0x18u) != g_missed.end() &&
+         "an indirect jump's uncompiled target is still observed");
+  std::cout << "only indirect jumps report compiled-lookup misses" << std::endl;
+}
+
 }  // namespace
 
 int main() {
@@ -695,6 +734,7 @@ int main() {
 
   test_branch_loop_through_fallback_keeps_host_stack_flat(memory);
   test_return_from_a_tail_branched_callback_unwinds_to_its_caller(memory);
+  test_only_indirect_jumps_report_lookup_misses(memory);
   std::cout << "dynamic fallback tests passed\n";
   return 0;
 }

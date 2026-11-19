@@ -229,8 +229,19 @@ DynamicFallbackExecutor::RunResult DynamicFallbackExecutor::run(
   // branched back to interpreter-only code - a guest loop made of jumps -
   // each lap went one host frame deeper; AC6 missions overflowed the host
   // stack after ~8,000 laps (a branch costs no stack on the console).
-  const auto execute_tail_branch = [&](GuestAddress branch_target) -> bool {
-    if (context.lookup_compiled(branch_target, CompiledLookupKind::Branch)) {
+  // `indirect`: the target came from LR/CTR. Only those misses are reported to
+  // the adaptive observer (as indirect-branch targets); a direct b/bc inside
+  // code being interpreted is an ordinary jump that static analysis already
+  // sees, and reporting it seeded a function at a loop head (see
+  // seed_collection.cpp).
+  const auto execute_tail_branch = [&](GuestAddress branch_target, bool indirect) -> bool {
+    const auto* compiled =
+        indirect ? context.lookup_compiled(branch_target, CompiledLookupKind::Branch)
+        : context.compiled_lookup
+            ? context.compiled_lookup(context.compiled_registry, context, branch_target,
+                                      CompiledLookupKind::Branch)
+            : nullptr;
+    if (compiled) {
       out.reason = DynamicFallbackStopReason::CompiledHandoff;
       out.exit = branch_target;
       context.state.nia = branch_target;
@@ -297,7 +308,7 @@ DynamicFallbackExecutor::RunResult DynamicFallbackExecutor::run(
           return out;
         }
       } else {
-        if (execute_tail_branch(branch_target)) return out;
+        if (execute_tail_branch(branch_target, false)) return out;
         next_pc = branch_target;
       }
     } else if (mnemonic == "bcx") {
@@ -315,7 +326,7 @@ DynamicFallbackExecutor::RunResult DynamicFallbackExecutor::run(
             return out;
           }
         } else {
-          if (execute_tail_branch(branch_target)) return out;
+          if (execute_tail_branch(branch_target, false)) return out;
           next_pc = branch_target;
         }
       }
@@ -361,7 +372,7 @@ DynamicFallbackExecutor::RunResult DynamicFallbackExecutor::run(
           out.public_result.result = {FlowReason::Return, branch_target, 0u};
           return out;
         } else {
-          if (execute_tail_branch(branch_target)) return out;
+          if (execute_tail_branch(branch_target, true)) return out;
           next_pc = branch_target;
         }
       }
