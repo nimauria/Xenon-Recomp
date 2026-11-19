@@ -135,7 +135,6 @@ DynamicFallbackExecutor::RunResult DynamicFallbackExecutor::run(
     out.public_result.result = {FlowReason::Trap, target, kFallbackCallDepthDetail};
     return out;
   }
-  const auto entry_return = static_cast<GuestAddress>(context.state.lr & ~3ull);
   std::unordered_map<GuestAddress, ExecutablePageStamp> page_stamps;
   Decoder decoder;
   GuestAddress pc = target;
@@ -336,25 +335,26 @@ DynamicFallbackExecutor::RunResult DynamicFallbackExecutor::run(
             out.public_result.result = *escaped;
             return out;
           }
-        } else if (mnemonic == "bclrx" && kind == CompiledLookupKind::Call &&
-                   branch_target == entry_return) {
+        } else if (mnemonic == "bclrx") {
+          // Every return goes back to whoever entered this interpreter, as a
+          // compiled function's blr does: {Return, LR}. A native caller resumes
+          // when it is its own return address and passes it up otherwise; the
+          // dispatcher continues at it (or ends the thread at the sentinel).
+          //
+          // Interpreting on at LR instead ran the caller's own continuation
+          // inside this frame while the caller's native frame stayed below it
+          // on the host stack. A compiled thunk that tail-branches into
+          // interpreter-only code enters here as a Branch with LR pointing back
+          // into its compiled caller: AC6's list walk at 0x82345DE0 calls the
+          // compiled dispatcher 0x8233AAA0, whose callback thunk branches into
+          // interpreted code, which returned by interpreting 0x8233AACC, the
+          // walk's next iteration, and the next call one host frame deeper.
+          // The guest stack stayed balanced; the host stack overflowed after
+          // ~8,000 iterations, about five minutes into play.
+          //
           // NIA is architecturally the taken return target. Gen 8 differential
           // verification caught the fallback returning the correct
           // ExecutionResult while leaving CpuState::nia at pc+4.
-          context.state.nia = branch_target;
-          out.reason = DynamicFallbackStopReason::Returned;
-          out.exit = branch_target;
-          out.public_result.result = {FlowReason::Return, branch_target, 0u};
-          return out;
-        } else if (mnemonic == "bclrx" &&
-                   !context.memory.executable_page_stamp(branch_target).executable() &&
-                   !context.lookup_compiled(branch_target, CompiledLookupKind::Branch) &&
-                   !context.runtime.is_recognized_import_thunk(branch_target)) {
-          // A return to an address that is not guest code at all (the thread-exit
-          // sentinel, a host-owned return address) cannot be interpreted. This is
-          // reached after an instruction-budget yield re-entered the function as a
-          // Branch, where entry_return no longer identifies the real caller. Hand
-          // the return back to the dispatcher, which owns those sentinels.
           context.state.nia = branch_target;
           out.reason = DynamicFallbackStopReason::Returned;
           out.exit = branch_target;
