@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <bit>
 #include <cassert>
 #include <cstdint>
@@ -61,6 +62,72 @@ class ImportThunkRuntimeServices final : public RuntimeServices {
   int call_count = 0;
   GuestAddress last_call_target = 0;
 };
+// Regression (AC6 mission crash, host stack overflow after ~5 minutes): a
+// guest loop made of jumps between interpreter-only code and compiled code.
+// The interpreter ran a tail branch into compiled code as a nested host call,
+// and that code's indirect branch back entered the interpreter one level
+// deeper - 7,957 levels in the crash dump, ~1.5 KB of host stack each. On the
+// console a branch costs no stack. Code at kLoop decrements r3 and jumps to
+// the compiled kCompiled, which jumps back through the fallback (as generated
+// code's indirect branch does) until r3 reaches 0, then returns. The nesting
+// must stay flat however many laps run.
+constexpr GuestAddress kLoop = kCode + 0x100u;
+constexpr GuestAddress kCompiled = kCode + 0x200u;
+int g_compiled_depth = 0;
+int g_compiled_max_depth = 0;
+int g_registry_tag = 0;
+
+ExecutionResult compiled_loop_body(ExecutionContext& context) {
+  ++g_compiled_depth;
+  g_compiled_max_depth = (std::max)(g_compiled_max_depth, g_compiled_depth);
+  ExecutionResult result{};
+  if (context.state.gpr[3] == 0u) {
+    result = {FlowReason::Return, static_cast<GuestAddress>(context.state.lr & ~3ull), 0u};
+  } else if (auto* native = context.lookup_compiled(kLoop, CompiledLookupKind::Branch)) {
+    result = native(context);
+  } else {
+    const auto fallback = context.try_dynamic_fallback(kLoop, CompiledLookupKind::Branch);
+    result = fallback.handled ? fallback.result
+                              : ExecutionResult{FlowReason::Branch, kLoop, 0u};
+  }
+  --g_compiled_depth;
+  return result;
+}
+
+NativeCompiledEntry loop_lookup(void*, ExecutionContext&, GuestAddress target, CompiledLookupKind) {
+  return target == kCompiled ? &compiled_loop_body : nullptr;
+}
+
+void test_branch_loop_through_fallback_keeps_host_stack_flat(AddressSpace& memory) {
+  write_instruction(memory, kLoop + 0x0u, 0x3863FFFFu);  // addi r3, r3, -1
+  write_instruction(memory, kLoop + 0x4u, 0x480000FCu);  // b kCompiled (kLoop+4 -> +0x100)
+  NullRuntimeServices runtime;
+  CpuState state{};
+  DynamicFallbackExecutor fallback({}, {});
+  ExecutionContext context(state, memory, runtime);
+  fallback.bind(context);
+  context.compiled_registry = &g_registry_tag;
+  context.compiled_lookup = &loop_lookup;
+  for (const std::uint64_t laps : {200ull, 100000ull}) {
+    state = {};
+    state.gpr[3] = laps;
+    state.lr = kReturn;
+    g_compiled_depth = g_compiled_max_depth = 0;
+    // A call site: the fallback for kLoop, with its tail branches followed.
+    const auto entered = context.try_dynamic_fallback(kLoop, CompiledLookupKind::Call);
+    assert(entered.handled);
+    const auto result = context.follow_tail_branches(entered.result);
+    if (g_compiled_max_depth > 1) {
+      std::cerr << laps << " laps nested the compiled code " << g_compiled_max_depth
+                << " deep: each lap grew the host stack\n";
+      assert(false);
+    }
+    assert(result.reason == FlowReason::Return && result.next_address == kReturn);
+    assert(state.gpr[3] == 0u);
+  }
+  std::cout << "branch loop through the fallback: constant host stack" << std::endl;
+}
+
 }  // namespace
 
 int main() {
@@ -530,6 +597,7 @@ int main() {
     assert(std::bit_cast<float>(memory.read32_be(kVecDot + i * 4u)) == 38.0f);
   }
 
+  test_branch_loop_through_fallback_keeps_host_stack_flat(memory);
   std::cout << "dynamic fallback tests passed\n";
   return 0;
 }

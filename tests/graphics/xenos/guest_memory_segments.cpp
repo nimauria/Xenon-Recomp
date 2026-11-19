@@ -44,7 +44,10 @@ void check_covers_every_access(const GuestMemorySegmentation& plan, std::uint64_
 
 int main() {
   // Devices that span the aperture keep the single binding.
-  for (const auto range : {kAperture, 4096u * kMiB, ~0ull}) {
+  // One element type: kMiB is unsigned long on Linux, unsigned long long with
+  // MSVC, and a braced list of mixed types deduces nothing.
+  for (const std::uint64_t range : {std::uint64_t{kAperture}, std::uint64_t{4096u * kMiB},
+                                    std::uint64_t{~0ull}}) {
     const auto plan = plan_guest_memory_segments(range, kAperture);
     assert(plan && !plan->segmented() && plan->count == 1u && plan->shift == 0u);
     assert(plan->range(0) == kAperture);

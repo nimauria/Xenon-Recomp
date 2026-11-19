@@ -222,11 +222,20 @@ DynamicFallbackExecutor::RunResult DynamicFallbackExecutor::run(
   // trap for what is really a perfectly resolvable import call - real guest
   // code make no ABI distinction between reaching an import via `bl` or via
   // a tail branch, so neither should Xenon.
+  //
+  // A tail branch into compiled code is handed back as {Branch, target}, not
+  // run here: every call site and the dispatcher follow it
+  // (ExecutionContext::follow_tail_branches) at their own level. Calling it
+  // from here nested it inside this interpreter frame, and when that code
+  // branched back to interpreter-only code - a guest loop made of jumps -
+  // each lap went one host frame deeper; AC6 missions overflowed the host
+  // stack after ~8,000 laps (a branch costs no stack on the console).
   const auto execute_tail_branch = [&](GuestAddress branch_target) -> bool {
-    if (auto* native = context.lookup_compiled(branch_target, CompiledLookupKind::Branch)) {
+    if (context.lookup_compiled(branch_target, CompiledLookupKind::Branch)) {
       out.reason = DynamicFallbackStopReason::CompiledHandoff;
       out.exit = branch_target;
-      out.public_result.result = native(context);
+      context.state.nia = branch_target;
+      out.public_result.result = {FlowReason::Branch, branch_target, 0u};
       return true;
     }
     if (context.runtime.is_recognized_import_thunk(branch_target)) {

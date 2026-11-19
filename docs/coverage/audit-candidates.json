@@ -1,24 +1,11 @@
 {
-  "content_digest": "sha256:f682fff4b233ce5c3db0cc9d5939574b03ef59636990d58a585bfc85f16cd111",
+  "content_digest": "sha256:c1127f0d7575aa2ca660f5b21f38c3f06d7526d72472404bb00127d34fc417dc",
   "description": "Audit candidates and validation problems. Candidates are suggestions for review; they are never applied to tools/coverage/coverage.json automatically.",
   "metadata": {
-    "assessed_commit": "41ebad3d3383c45f17fc02e7cf2a988d7cb9f630",
+    "assessed_commit": "1dd700a537973a894c41220ed70caa0fa9746ece",
     "worktree": "clean"
   },
-  "problems": [
-    {
-      "detail": "linux: job log contains no CTest result lines",
-      "id": null,
-      "kind": "ci_unavailable",
-      "severity": "warning"
-    },
-    {
-      "detail": "linux results come from cfb0e8a5b3c7, not the assessed revision 41ebad3d3383",
-      "id": null,
-      "kind": "ci_stale",
-      "severity": "warning"
-    }
-  ],
+  "problems": [],
   "schema": 1,
   "candidates": [
     {"category": "kernel", "detail": "registration declares partial", "id": "kernel:registered:ExRegisterTitleTerminateNotification", "kind": "declared_limitation"},

@@ -150,17 +150,29 @@ std::optional<Result> Store::lookup(const Node& node) const {
 Result Store::publish(const Node& node, std::string bytes) const {
   if(auto hit=lookup(node)) return *hit;
   auto hash=digest(bytes); const auto final=root_/"nodes"/node.key();
-  std::filesystem::create_directories(root_/"staging"); std::filesystem::create_directories(root_/"nodes");
   static std::atomic<std::uint64_t> serial{};
   std::random_device rng;
   auto stage=root_/"staging"/(node.key()+"-"+std::to_string(rng())+"-"+std::to_string(serial++));
-  if(!std::filesystem::create_directory(stage)) throw std::runtime_error("graph staging collision");
+  // staging/ and nodes/ are created when an operation finds them missing, not
+  // checked on every publish: every worker publishes into the same two
+  // directories, and the existence checks queued behind each other's renames
+  // there (most of an analysis of ~19,000 functions was spent in them).
+  std::error_code stage_ec;
+  if(!std::filesystem::create_directory(stage,stage_ec)) {
+    if(!stage_ec) throw std::runtime_error("graph staging collision");
+    std::filesystem::create_directories(root_/"staging");
+    if(!std::filesystem::create_directory(stage)) throw std::runtime_error("graph staging collision");
+  }
   try {
     write(stage/"payload",bytes);
     if(read(stage/"payload")!=bytes) throw std::runtime_error("graph staging verification failed");
     Json j=Json::make_object(); j.set("request",node.canonical()); j.set("sha256",hash); j.set("verified",true);
     write(stage/"manifest.json",j.dump());
     std::error_code ec; std::filesystem::rename(stage,final,ec);
+    if(ec && !std::filesystem::exists(root_/"nodes")) {
+      std::filesystem::create_directories(root_/"nodes");
+      ec.clear(); std::filesystem::rename(stage,final,ec);
+    }
     if(ec) {
       if(auto hit=lookup(node)) { std::filesystem::remove_all(stage); return *hit; }
       // Never replace a corrupt entry in place: readers must not observe a
@@ -224,10 +236,13 @@ RegionResult compile_region(const Store& store,const Versions& v,cpu::GuestAddre
   result.nodes={decoded,analysis,ir};
   if(auto cached=store.lookup(ir);cached && deserialize_ir(cached->bytes,result.compiled.function)) {result.compiled.ok=true;result.ir_hit=true;return result;}
   result.compiled=cpu::StaticFunctionCompiler{}.compile_ranges(entry,ranges,extra_leaders,hooks);
-  if(result.compiled.ok){
-    (void)store.publish(decoded,raw);(void)store.publish(analysis,raw);
-    (void)store.publish(ir,serialize_ir(result.compiled.function));
-  }
+  // Only the IR is stored. The decoded and analysis nodes are identities: the
+  // IR's key depends on theirs, and compilation-graph.json records them, but
+  // nothing ever looks them up, and their payload would be the guest words
+  // again. Storing them doubled the cache's file traffic (a staging
+  // directory, two files, a read-back and a rename each) for nothing: with
+  // ~19,000 functions that was minutes of filesystem work.
+  if(result.compiled.ok) (void)store.publish(ir,serialize_ir(result.compiled.function));
   return result;
 }
 } // namespace xenon::recomp::graph
