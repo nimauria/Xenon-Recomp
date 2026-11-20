@@ -106,7 +106,10 @@ int main(){
   try { (void)mem_fault_site(s, mem, rt); }
   catch (const std::out_of_range&) { faulted = true; }
   assert(faulted);
-  assert(s.cia == 0x5004u && s.nia == 0x5008u);
+  // A data storage interrupt names the faulting instruction (SRR0 = its
+  // address); nothing resumes from nia after a load or store, so generated
+  // code does not spend a store publishing it before every access.
+  assert(s.cia == 0x5004u);
   assert(s.gpr[3] == 1u);  // The instruction following the fault did not run.
 
   std::cout<<"xenon_cpu_scalar_memory: ok\n";

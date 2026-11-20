@@ -32,7 +32,8 @@ bool has_guest_source(const Instruction& instruction) noexcept {
 
 void emit_guest_pc(std::ostringstream& out, const Instruction& instruction,
                    std::optional<GuestAddress>& current_guest,
-                   std::optional<GuestAddress>& materialized_guest) {
+                   std::optional<GuestAddress>& materialized_guest,
+                   std::optional<GuestAddress>& materialized_next) {
   if (!has_guest_source(instruction)) return;
   current_guest = instruction.guest_address;
   const auto effect = ir::effects(instruction.op);
@@ -42,9 +43,23 @@ void emit_guest_pc(std::ostringstream& out, const Instruction& instruction,
                         ir::has_effect(effect, ir::Effect::ControlFlow) ||
                         ir::has_effect(effect, ir::Effect::Barrier) ||
                         ir::has_effect(effect, ir::Effect::Synchronization);
-  if (!boundary || materialized_guest == current_guest) return;
-  materialized_guest = current_guest;
-  out << "  state.cia=" << *current_guest << "u;\n";
+  if (!boundary) return;
+  if (materialized_guest != current_guest) {
+    materialized_guest = current_guest;
+    out << "  state.cia=" << *current_guest << "u;\n";
+  }
+  // A load or store needs only its own address on record (a fault names
+  // cia); nothing resumes from nia after one. Calls, traps, branches and
+  // barriers still publish nia - their handlers continue from it - even when
+  // an earlier access of the same instruction already stored cia. One store
+  // instead of two before every memory access in generated code.
+  const bool only_memory = !ir::has_effect(effect, ir::Effect::Call) &&
+                           !ir::has_effect(effect, ir::Effect::Trap) &&
+                           !ir::has_effect(effect, ir::Effect::ControlFlow) &&
+                           !ir::has_effect(effect, ir::Effect::Barrier) &&
+                           !ir::has_effect(effect, ir::Effect::Synchronization);
+  if (only_memory || materialized_next == current_guest) return;
+  materialized_next = current_guest;
   out << "  state.nia=" << static_cast<GuestAddress>(*current_guest + 4u)
       << "u;\n";
 }
@@ -141,6 +156,20 @@ bool is_back_edge(const Instruction& i, const ir::Block& block, GuestAddress tar
 }
 
 constexpr std::string_view kSafepointPoll = "context.poll_safepoint(); ";
+
+// MSVC's global optimizer is far worse than linear in a function's size: an
+// AC6 shard holding one 12,000-line dispatch function took over 15 minutes at
+// /O2 and 4 s with global optimization off for that function alone, and a few
+// dozen such functions made a cold AC6 preparation take hours. A function
+// whose emitted body is longer than this many lines is compiled with global
+// optimization off (local optimization and inlining stay on); every other
+// function keeps the full command-line optimization. Other compilers are not
+// affected (the pragma is MSVC's own).
+constexpr std::size_t kGlobalOptimizationBodyLineLimit = 3000u;
+constexpr std::string_view kReduceOptimizationBegin =
+    "#if defined(_MSC_VER) && !defined(__clang__)\n#pragma optimize(\"g\", off)\n#endif\n";
+constexpr std::string_view kReduceOptimizationEnd =
+    "#if defined(_MSC_VER) && !defined(__clang__)\n#pragma optimize(\"\", on)\n#endif\n";
 
 const std::string& hook_symbol(const Instruction& i, std::span<const std::string> hook_symbols) {
   if (i.imm0 >= hook_symbols.size())
@@ -337,12 +366,13 @@ std::string CppAotBackend::emit_function(const ir::Block& block,std::string_view
   for (const auto& i : block.instructions) if (i.result != ir::kNoValue) { if (value_types.size() <= i.result) value_types.resize(i.result + 1, Type::Void); value_types[i.result] = i.type; }
   std::optional<GuestAddress> current_guest;
   std::optional<GuestAddress> materialized_guest;
+  std::optional<GuestAddress> materialized_next;
   if (block.instructions.empty() || !has_guest_source(block.instructions.front())) {
     o<<"  state.cia="<<block.guest_address<<"u;\n";
     o<<"  state.nia="<<static_cast<GuestAddress>(block.guest_address+4u)<<"u;\n";
   }
   for(const auto&i:block.instructions){
-    emit_guest_pc(o,i,current_guest,materialized_guest);
+    emit_guest_pc(o,i,current_guest,materialized_guest,materialized_next);
     o<<emit_one(i,value_types);
   }
   emit_exit_pc(o,current_guest,materialized_guest);
@@ -446,12 +476,13 @@ std::string CppAotBackend::emit_function(
 
     std::optional<GuestAddress> current_guest;
     std::optional<GuestAddress> materialized_guest;
+    std::optional<GuestAddress> materialized_next;
     if (block.instructions.empty() || !has_guest_source(block.instructions.front())) {
       o << "  state.cia=" << block.guest_address << "u;\n";
       o << "  state.nia=" << static_cast<GuestAddress>(block.guest_address + 4u) << "u;\n";
     }
     for (const auto& i : block.instructions) {
-      emit_guest_pc(o, i, current_guest, materialized_guest);
+      emit_guest_pc(o, i, current_guest, materialized_guest, materialized_next);
       o << emit_one_in_function(i, value_types, block, local_targets, direct_calls, dispatch_symbol,
                                 hook_symbols);
     }
@@ -500,6 +531,9 @@ std::string CppAotBackend::emit_function(
   const bool uses_longjump = uses("goto " + std::string(kLongJumpLabel) + ";");
   const bool uses_local_branch = uses("goto " + std::string(kLocalBranchLabel) + ";");
   const bool uses_is_local = uses(is_local_symbol(dispatch_symbol) + "(");
+  const bool reduce_optimization =
+      static_cast<std::size_t>(std::count(body_text.begin(), body_text.end(), '\n')) >
+      kGlobalOptimizationBodyLineLimit;
 
   if (uses_is_local) {
     o << "static bool " << is_local_symbol(dispatch_symbol) << "(GuestAddress target) {\n"
@@ -507,6 +541,7 @@ std::string CppAotBackend::emit_function(
     for (const auto target : sorted_targets) o << "    case " << target << "u:\n";
     o << "      return true;\n    default: return false;\n  }\n}\n";
   }
+  if (reduce_optimization) o << kReduceOptimizationBegin;
   o << "static ExecutionResult " << dispatch_symbol << "([[maybe_unused]] ExecutionContext& context, GuestAddress entry) {\n";
   o << "  auto& state = context.state;\n";
   o << "  auto& memory = context.memory;\n";
@@ -540,6 +575,7 @@ std::string CppAotBackend::emit_function(
       << ",0x80000003u};\n  }\n";
   }
   o << "}\n";
+  if (reduce_optimization) o << kReduceOptimizationEnd;
   o << "ExecutionResult " << name << "_v2([[maybe_unused]] ExecutionContext& context) {\n";
   o << "  return " << dispatch_symbol << "(context," << function.guest_address << "u);\n}\n";
   for (const auto entry : alternate_entries) {

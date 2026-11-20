@@ -53,8 +53,9 @@ std::string describe_guest_memory_fault(const memory::MemoryFault& fault,
 
   std::ostringstream diagnostic;
   diagnostic << "Guest memory fault: " << fault.what()
+             // cia is the faulting load or store; generated code does not
+             // publish nia before a memory access (nothing resumes from it).
              << " [cia=0x" << std::hex << std::uppercase << state.cia
-             << " nia=0x" << state.nia
              << " lr=0x" << state.lr
              << " ctr=0x" << state.ctr
              << " request=0x" << info.request_address
