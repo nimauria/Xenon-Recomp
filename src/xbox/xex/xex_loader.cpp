@@ -163,8 +163,9 @@ bool parse_xex_image(std::span<const std::byte> bytes, XexImage& out_image, std:
   parse_pe_tls_directory(out_image.effective_image, tls_rva, out_image.tls);
   parse_relocation_directory(out_image.effective_image, relocation_rva, relocation_size,
                              out_image.relocations);
-  parse_function_metadata_directory(out_image.effective_image, out_image.image_base, exception_rva,
-                                    exception_size, out_image.function_metadata);
+  const auto machine = read_le16(out_image.effective_image, coff_offset);
+  parse_function_metadata_directory(out_image.effective_image, out_image.image_base, machine,
+                                    exception_rva, exception_size, out_image.function_metadata);
 
   return true;
 }

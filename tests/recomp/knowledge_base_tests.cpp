@@ -257,7 +257,7 @@ int main() {
     std::string json_error;
     assert(xenon::core::JsonValue::parse(format_report_json(reused_report), parsed_report, &json_error));
     assert(json_error.empty());
-    assert(parsed_report.get_number("analysis_engine_revision") == 9.0);
+    assert(parsed_report.get_number("analysis_engine_revision") == 10.0);
   }
 
   std::cout << "Gen 9 knowledge-base tests passed\n";

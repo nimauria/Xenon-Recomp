@@ -236,8 +236,12 @@ void parse_pe_tls_directory(std::span<const std::byte> bytes, std::uint32_t rva,
                            std::optional<XexTls>& tls);
 void parse_relocation_directory(std::span<const std::byte> bytes, std::uint32_t rva, std::uint32_t size,
                                std::vector<XexRelocation>& relocations);
+// `machine` is the PE file header's Machine field; only the Xbox 360's
+// IMAGE_FILE_MACHINE_POWERPCBE (0x01F2) layout is decoded.
+inline constexpr std::uint16_t kMachinePowerPcBigEndian = 0x01F2u;
 void parse_function_metadata_directory(std::span<const std::byte> bytes,
-                                      std::uint32_t image_base, std::uint32_t rva, std::uint32_t size,
+                                      std::uint32_t image_base, std::uint16_t machine,
+                                      std::uint32_t rva, std::uint32_t size,
                                       std::vector<XexFunctionMetadata>& output);
 bool try_parse_pe_sections(std::span<const std::byte> effective_image, std::uint32_t image_base,
                           std::vector<XexSection>& out_sections, std::uint32_t& out_entry_point_rva,

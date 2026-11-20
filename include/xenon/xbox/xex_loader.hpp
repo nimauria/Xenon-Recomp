@@ -121,11 +121,27 @@ struct XexRelocation {
   std::vector<std::uint32_t> entries;
 };
 
+// One entry of the image's exception directory (.pdata). On the Xbox 360
+// (IMAGE_FILE_MACHINE_POWERPCBE) each entry is 8 big-endian bytes: the
+// function's address, then a packed word - bits 0-7 the prolog length and
+// bits 8-29 the function length, both in instructions, bit 30 set for 32-bit
+// code and bit 31 set when the function has an exception handler. The
+// compiler places such a function's handler address and handler data (its
+// scope table) in the 8 bytes just before the function: data, never code.
 struct XexFunctionMetadata {
   memory::GuestAddress begin{};
-  memory::GuestAddress end{};
-  std::uint32_t unwind_data{};
+  memory::GuestAddress end{};              // begin + length
+  std::uint32_t unwind_data{};             // the packed word, as stored
+  std::uint32_t prolog_instructions{};
+  bool exception_handler{};
+  memory::GuestAddress handler_address{};  // [begin - 8] when exception_handler
+  memory::GuestAddress handler_data{};     // [begin - 4] when exception_handler
   bool valid{};
+
+  // Where the function's bytes start, its handler words included.
+  [[nodiscard]] memory::GuestAddress code_start() const noexcept {
+    return exception_handler && begin >= 8u ? begin - 8u : begin;
+  }
 };
 
 struct XexSection {
@@ -378,6 +394,21 @@ inline constexpr std::uint32_t kFallbackThreadStackSize = 1u * 1024u * 1024u;
 // reproduces the same hash. See docs/xbox/XEX_LOADER_V2.md "Effective executable
 // identity".
 [[nodiscard]] std::array<std::byte, 20> compute_effective_image_hash(const XexImage& image);
+
+// Lookups over XexImage::function_metadata (kept ordered by begin, entries
+// disjoint): the entry beginning exactly at `begin`, the entry whose
+// [begin, end) holds `address`, and the first entry whose code_start() lies
+// after `address`. Null when there is none.
+[[nodiscard]] const XexFunctionMetadata* function_metadata_at(const XexImage& image,
+                                                              memory::GuestAddress begin) noexcept;
+[[nodiscard]] const XexFunctionMetadata* function_metadata_containing(
+    const XexImage& image, memory::GuestAddress address) noexcept;
+[[nodiscard]] const XexFunctionMetadata* next_function_metadata_after(
+    const XexImage& image, memory::GuestAddress address) noexcept;
+// True when `address` is one of the 8 bytes of handler address and handler
+// data in front of a function with an exception handler.
+[[nodiscard]] bool is_exception_handler_data(const XexImage& image,
+                                             memory::GuestAddress address) noexcept;
 
 // Lowercase hex string form of a compute_effective_image_hash() result, used
 // wherever the hash needs to be a plain string (native-extension ABI,

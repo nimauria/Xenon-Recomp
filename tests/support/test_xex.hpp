@@ -127,7 +127,7 @@ inline PeBuildResult build_pe_body(std::uint32_t image_base, bool with_export) {
   const auto pe_sig_offset = w.size();
   assert(pe_sig_offset == kPeHeaderOffset);
   w.append_bytes(std::array<std::byte, 4>{std::byte{'P'}, std::byte{'E'}, std::byte{0}, std::byte{0}});
-  w.append_le16(0x01F2u);  // Machine (arbitrary, unchecked by the loader).
+  w.append_le16(0x01F2u);  // Machine: IMAGE_FILE_MACHINE_POWERPCBE, as on every Xbox 360 image.
   w.append_le16(3u);       // NumberOfSections
   w.append_le32(0u);       // TimeDateStamp
   w.append_le32(0u);       // PointerToSymbolTable

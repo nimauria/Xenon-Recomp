@@ -19,7 +19,7 @@ namespace xenon::recomp::detail {
 // invalidate stale generated artifacts without forcing every existing hint
 // file to be rewritten.
 inline constexpr std::uint32_t kAnalysisReportSchemaVersion = 4u;
-inline constexpr std::uint32_t kAnalysisEngineRevision = 9u;
+inline constexpr std::uint32_t kAnalysisEngineRevision = 10u;
 
 inline std::uint32_t be32(const std::vector<std::byte>& data, std::size_t offset) {
   if (offset + 4 > data.size()) return 0;

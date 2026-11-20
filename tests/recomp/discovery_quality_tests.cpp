@@ -1659,6 +1659,70 @@ int main() {
   }
   std::cout << "  [PASS] Switch tables and address-taken callbacks are compiled, not interpreted\n";
 
+  // .pdata: a function with an exception handler has its handler address and
+  // scope table in the 8 bytes in front of it. Those words are addresses
+  // (0x8xxxxxxx decodes as lwz), never code: no seed - not even a module
+  // hint - may start a function there and no function may own them, while
+  // the .pdata entries themselves seed and bound their functions.
+  {
+    const std::uint32_t base = kLoadAddress + kTextRva;
+    const std::vector<std::uint32_t> words = {
+        bl_word(base, base + 0x10u),  // A (entry): call B
+        kBlr,
+        base + 0x20u,                 // B's handler address (lwz r0,32(r1))
+        base + 0x40u,                 // B's scope table (lwz r0,64(r1))
+        addi_word(3u, 0u, 0u),        // B: li r3,0
+        kBlr,
+    };
+    const auto xex_bytes = make_xex(words);
+    xbox::XexImage image{};
+    std::string parse_error;
+    assert(xbox::parse_xex_image(xex_bytes, image, &parse_error));
+    xbox::XexFunctionMetadata a{};
+    a.begin = base;
+    a.end = base + 8u;
+    a.valid = true;
+    xbox::XexFunctionMetadata b{};
+    b.begin = base + 0x10u;
+    b.end = base + 0x18u;
+    b.exception_handler = true;
+    b.handler_address = base + 0x20u;
+    b.handler_data = base + 0x40u;
+    b.valid = true;
+    image.function_metadata = {a, b};
+    assert(xbox::is_exception_handler_data(image, base + 8u));
+
+    AnalysisHintSetV2 hints{};
+    hints.identity = xbox::compute_effective_identity(image);
+    FunctionHint wrong{};
+    wrong.address = base + 8u;
+    hints.functions.push_back(wrong);
+
+    const auto test_root = root / "exception_handler_words";
+    DriverOptions options{};
+    options.pre_parsed_image = image;
+    options.hint_set_v2 = hints;
+    options.output = test_root / "generated";
+    options.analysis_jobs = 1u;
+    options.allow_partial = true;
+    AnalysisReport report;
+    std::string error;
+    assert(load_and_analyze(options, report, error) && error.empty());
+    const auto* handled = find_function(report, base + 0x10u);
+    assert(handled != nullptr && handled->compiled);
+    assert(has_source(*handled, DiscoverySource::UnwindMetadata));
+    assert(find_function(report, base + 8u) == nullptr);
+    assert(find_function(report, base + 0xCu) == nullptr);
+    for (const auto& function : report.functions) {
+      assert(!owns_address(function, base + 8u));
+      assert(!owns_address(function, base + 0xCu));
+    }
+    const auto* entry = find_function(report, base);
+    assert(entry != nullptr && entry->compiled && has_source(*entry, DiscoverySource::UnwindMetadata));
+    remove_all_tolerant(test_root);
+  }
+  std::cout << "  [PASS] Exception-handler words in front of a .pdata function are never code\n";
+
   std::cout << "All Recomp Analysis V3 + Gen 6 discovery quality tests passed!\n";
   return 0;
 }

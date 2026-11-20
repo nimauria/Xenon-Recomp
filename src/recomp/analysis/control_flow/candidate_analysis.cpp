@@ -128,13 +128,16 @@ bool establish_scan_bounds(CandidateScan& scan) {
   scan.max_words = std::min<std::size_t>((section->bytes.size() - scan.offset) / 4, 4096);
   auto& metadata_end = scan.metadata_end;
   auto& explicit_function_end = scan.explicit_function_end;
-  for (const auto& metadata : ctx.image.function_metadata) {
-    if (metadata.valid && metadata.begin == start) {
-      metadata_end = metadata.end;
-      add_source(function, DiscoverySource::UnwindMetadata);
-      break;
-    }
+  if (const auto* metadata = xbox::function_metadata_at(ctx.image, start)) {
+    metadata_end = metadata->end;
+    add_source(function, DiscoverySource::UnwindMetadata);
   }
+  // .pdata functions are disjoint: a function starting here ends before the
+  // next one's code, which starts at its handler words when it has an
+  // exception handler (decoding those as instructions made bogus code).
+  if (const auto* next = xbox::next_function_metadata_after(ctx.image, start);
+      next && (!metadata_end || next->code_start() < *metadata_end))
+    metadata_end = next->code_start();
   for (const auto& hint : ctx.hints)
     for (const auto boundary : hint.function_boundaries)
       if (boundary > start && (!metadata_end || boundary < *metadata_end)) metadata_end = boundary;

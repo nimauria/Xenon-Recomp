@@ -154,7 +154,8 @@ void collect_seeds(const DriverOptions& effective, AnalysisReport& report,
   // reconciliation absorbs the weak candidate and keeps only an alternate
   // dispatch entry.
   const auto blocked_by_non_code_hint = [&](GuestAddress address) {
-    return in_non_code_hint_region(hint_set_v2 ? &*hint_set_v2 : nullptr, address);
+    return in_non_code_hint_region(hint_set_v2 ? &*hint_set_v2 : nullptr, address) ||
+           xbox::is_exception_handler_data(report.image, address);
   };
   const auto is_import_thunk = [&](GuestAddress address) {
     return find_callable_import_thunk(report.image, address) != nullptr;
@@ -229,6 +230,12 @@ void collect_seeds(const DriverOptions& effective, AnalysisReport& report,
       if (!already_seeded) ++knowledge_seed_candidates;
     }
   }
+
+  // The handler address and handler data in front of a function with an
+  // exception handler (.pdata) are data: no source may seed a function there.
+  for (const auto& metadata : report.image.function_metadata)
+    if (metadata.valid && metadata.exception_handler)
+      erase_seed_range(metadata.code_start(), metadata.begin);
 }
 
 }  // namespace xenon::recomp::detail

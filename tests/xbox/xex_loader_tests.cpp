@@ -273,6 +273,104 @@ void test_relocation_entries_are_inline_in_directory() {
   assert(image.relocations.front().entries.front() == 0x30123u);
 }
 
+// The exception directory (.pdata) of an Xbox 360 image: 8-byte big-endian
+// entries, not the 12-byte little-endian {begin, end, unwind} records of
+// x64 images. Reading AC6's 65,304-byte directory the x64 way produced 2,739
+// "functions" such as 0x82000982..0x86120040 that seeded analysis; read the
+// Xbox way it holds 8,163 functions, 42 with exception handlers.
+std::uint32_t pdata_word(std::uint32_t prolog, std::uint32_t instructions, bool handler) {
+  return (prolog & 0xFFu) | ((instructions & 0x3FFFFFu) << 8u) | (1u << 30u) |
+         (handler ? 1u << 31u : 0u);
+}
+
+PeBuildResult pe_with_exception_directory(std::uint16_t machine,
+                                          const std::vector<std::uint32_t>& words) {
+  auto pe = build_pe_body(kImageBase, /*with_export=*/false);
+  const auto put_le = [&](std::size_t offset, std::uint32_t value, unsigned bytes) {
+    for (unsigned i = 0; i < bytes; ++i)
+      pe.bytes[offset + i] = static_cast<std::byte>((value >> (8u * i)) & 0xFFu);
+  };
+  const auto put_be32 = [&](std::size_t offset, std::uint32_t value) {
+    for (unsigned i = 0; i < 4u; ++i)
+      pe.bytes[offset + i] = static_cast<std::byte>((value >> (24u - 8u * i)) & 0xFFu);
+  };
+  constexpr std::size_t kMachineOffset = 0x84u;
+  constexpr std::size_t kDataDirectoryOffset = 0xF8u;
+  constexpr std::uint32_t kPdataRva = 0x00020800u;  // inside .rdata
+  put_le(kMachineOffset, machine, 2u);
+  put_le(kDataDirectoryOffset + 3u * 8u, kPdataRva, 4u);
+  put_le(kDataDirectoryOffset + 3u * 8u + 4u, static_cast<std::uint32_t>(words.size() * 4u), 4u);
+  for (std::size_t i = 0; i < words.size(); ++i) put_be32(kPdataRva + i * 4u, words[i]);
+  // The handled function at .text+0x100 has its handler address and scope
+  // table in the 8 bytes in front of it: words that decode as lwz.
+  put_be32(0x000100F8u, kImageBase + 0x00010040u);
+  put_be32(0x000100FCu, kImageBase + 0x00020000u);
+  return pe;
+}
+
+xbox::XexImage parse_with_exception_directory(std::uint16_t machine,
+                                              const std::vector<std::uint32_t>& words) {
+  XexBuildOptions opts{};
+  opts.with_import_libraries = false;
+  auto fixture = build_base_xex(pe_with_exception_directory(machine, words), opts);
+  xbox::XexImage image{};
+  std::string error;
+  assert(xbox::parse_xex_image(fixture.file, image, &error) && error.empty());
+  return image;
+}
+
+void test_exception_directory_uses_the_xbox_360_layout() {
+  const std::uint32_t text = kImageBase + 0x00010000u;
+  const std::vector<std::uint32_t> words = {
+      // Out of order on purpose: the loader orders entries by address.
+      text + 0x100u, pdata_word(3u, 10u, true),   // handled function, 0x100..0x128
+      text + 0x000u, pdata_word(2u, 4u, false),   // 0x000..0x010
+      0u, 0u,                                     // padding
+      text + 0x202u, pdata_word(1u, 4u, false),   // unaligned: not a function
+      kImageBase - 0x100u, pdata_word(1u, 4u, false),  // before the image
+      kImageBase + 0x00090000u, pdata_word(1u, 4u, false),  // past the image
+      text + 0x300u, pdata_word(1u, 0u, false),   // empty
+      text + 0x008u, pdata_word(1u, 4u, false),   // overlaps the first: corrupt
+      text + 0x12Cu, pdata_word(1u, 2u, true),    // handler words overlap 0x100..0x128
+  };
+  const auto image = parse_with_exception_directory(0x01F2u, words);
+  assert(image.function_metadata.size() == 2u);
+  const auto& first = image.function_metadata[0];
+  assert(first.valid && first.begin == text && first.end == text + 0x10u);
+  assert(first.prolog_instructions == 2u && !first.exception_handler);
+  assert(first.code_start() == first.begin);
+  const auto& handled = image.function_metadata[1];
+  assert(handled.begin == text + 0x100u && handled.end == text + 0x128u);
+  assert(handled.prolog_instructions == 3u && handled.exception_handler);
+  assert(handled.unwind_data == pdata_word(3u, 10u, true));
+  assert(handled.handler_address == text + 0x40u);
+  assert(handled.handler_data == kImageBase + 0x00020000u);
+  assert(handled.code_start() == text + 0xF8u);
+
+  assert(xbox::function_metadata_at(image, text) == &first);
+  assert(xbox::function_metadata_at(image, text + 4u) == nullptr);
+  assert(xbox::function_metadata_containing(image, text + 0xCu) == &first);
+  assert(xbox::function_metadata_containing(image, text + 0x10u) == nullptr);
+  assert(xbox::function_metadata_containing(image, text + 0x124u) == &handled);
+  assert(xbox::next_function_metadata_after(image, text) == &handled);
+  assert(xbox::next_function_metadata_after(image, text + 0xF7u) == &handled);
+  assert(xbox::next_function_metadata_after(image, text + 0xF8u) == nullptr);
+  assert(xbox::next_function_metadata_after(image, kImageBase) == &first);
+  assert(!xbox::is_exception_handler_data(image, text + 0xF4u));
+  assert(xbox::is_exception_handler_data(image, text + 0xF8u));
+  assert(xbox::is_exception_handler_data(image, text + 0xFCu));
+  assert(!xbox::is_exception_handler_data(image, text + 0x100u));
+  assert(!xbox::is_exception_handler_data(image, text + 0x8u));
+}
+
+void test_exception_directory_of_another_machine_is_not_guessed() {
+  // An x64-layout directory (12-byte records) under a non-PowerPC machine
+  // yields nothing rather than misread entries.
+  const auto image = parse_with_exception_directory(
+      0x8664u, {0x00010000u, 0x00010010u, 0x00000000u});
+  assert(image.function_metadata.empty());
+}
+
 void test_parse_and_load_uncompressed_unencrypted() {
   auto fixture = make_uncompressed_fixture();
 
@@ -1632,6 +1730,8 @@ void test_truncated_file_rejected_cleanly() {
 }  // namespace
 
 int main() {
+  test_exception_directory_uses_the_xbox_360_layout();
+  test_exception_directory_of_another_machine_is_not_guessed();
   test_malformed_xex();
   test_invalid_header_size();
   test_missing_security_info_rejected();

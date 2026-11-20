@@ -11,8 +11,7 @@ bool CandidateScan::independently_proven_function_start(GuestAddress target) con
   if (const auto seed = ctx.seeds.find(target); seed != ctx.seeds.end() &&
       source_is_semantic_boundary(seed->second))
     return true;
-  for (const auto& metadata : ctx.image.function_metadata)
-    if (metadata.valid && metadata.begin == target) return true;
+  if (xbox::function_metadata_at(ctx.image, target)) return true;
   if (ctx.hint_set_v2)
     for (const auto& function_hint : ctx.hint_set_v2->functions)
       if (function_hint.address == target) return true;

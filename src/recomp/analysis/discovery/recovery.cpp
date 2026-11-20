@@ -18,8 +18,9 @@ std::size_t recover_multi_source_orphans(DiscoveryWaveEngine& engine,
   auto& discovered_evidence = engine.discovered_evidence();
   const auto& claimed = engine.claimed;
   auto& frontier = engine.frontier;
-  const auto blocked_by_non_code_hint = [hint_set_v2](GuestAddress address) {
-    return in_non_code_hint_region(hint_set_v2, address);
+  const auto blocked_by_non_code_hint = [hint_set_v2, &report](GuestAddress address) {
+    return in_non_code_hint_region(hint_set_v2, address) ||
+           xbox::is_exception_handler_data(report.image, address);
   };
   const auto process_frontier = [&engine] { engine.process_frontier(); };
   std::size_t orphan_entries_recovered = 0;
@@ -70,8 +71,9 @@ std::size_t recover_unowned_gaps(DiscoveryWaveEngine& engine,
   auto& discovered_evidence = engine.discovered_evidence();
   const auto& claimed = engine.claimed;
   auto& frontier = engine.frontier;
-  const auto blocked_by_non_code_hint = [hint_set_v2](GuestAddress address) {
-    return in_non_code_hint_region(hint_set_v2, address);
+  const auto blocked_by_non_code_hint = [hint_set_v2, &report](GuestAddress address) {
+    return in_non_code_hint_region(hint_set_v2, address) ||
+           xbox::is_exception_handler_data(report.image, address);
   };
   const auto process_frontier = [&engine] { engine.process_frontier(); };
   std::size_t gap_functions_recovered = 0;

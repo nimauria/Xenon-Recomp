@@ -18,8 +18,8 @@ PointerTableScanResult scan_static_pointer_tables(
 
   const auto credible_target = [&](GuestAddress target) {
     if (known_starts.contains(target)) return true;
-    for (const auto& metadata : image.function_metadata)
-      if (metadata.valid && metadata.begin == target) return true;
+    if (xbox::function_metadata_at(image, target)) return true;
+    if (xbox::is_exception_handler_data(image, target)) return false;
     const auto* section = executable_section(range_index, target);
     if (!section || target < section->virtual_address) return false;
     const auto offset = static_cast<std::size_t>(target - section->virtual_address);

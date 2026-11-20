@@ -172,21 +172,50 @@ void parse_relocation_directory(std::span<const std::byte> bytes, std::uint32_t 
 }
 
 void parse_function_metadata_directory(std::span<const std::byte> bytes,
-                                      std::uint32_t image_base, std::uint32_t rva, std::uint32_t size,
+                                      std::uint32_t image_base, std::uint16_t machine,
+                                      std::uint32_t rva, std::uint32_t size,
                                       std::vector<XexFunctionMetadata>& output) {
-  if (rva == 0u || size < 12u) return;
+  // The Xbox 360 layout (see XexFunctionMetadata). Xbox 360 executables are
+  // PowerPC; a directory in another machine's layout is not guessed at.
+  if (machine != kMachinePowerPcBigEndian || rva == 0u || size < 8u) return;
   const auto file_offset = rva_to_image_offset(bytes, rva, size);
   if (!file_offset) return;
-  const auto available = static_cast<std::size_t>(size);
-  if (available % 12u != 0u) return;
-  for (std::size_t offset = 0u; offset < available; offset += 12u) {
-    const auto begin = read_le32(bytes, *file_offset + offset);
-    const auto end = read_le32(bytes, *file_offset + offset + 4u);
-    const auto unwind = read_le32(bytes, *file_offset + offset + 8u);
-    if (begin == 0u && end == 0u && unwind == 0u) continue;
-    if (end <= begin) continue;
-    output.push_back({static_cast<memory::GuestAddress>(image_base + begin),
-                      static_cast<memory::GuestAddress>(image_base + end), unwind, true});
+  const auto image_end = static_cast<std::uint64_t>(image_base) + bytes.size();
+  const auto count = static_cast<std::size_t>(size) / 8u;
+  std::vector<XexFunctionMetadata> parsed;
+  parsed.reserve(count);
+  for (std::size_t index = 0u; index < count; ++index) {
+    const auto entry = *file_offset + index * 8u;
+    const auto begin = read_be32(bytes, entry);
+    const auto packed = read_be32(bytes, entry + 4u);
+    if (begin == 0u && packed == 0u) continue;  // padding
+    const auto instructions = (packed >> 8u) & 0x3FFFFFu;
+    const auto end = static_cast<std::uint64_t>(begin) + std::uint64_t{instructions} * 4u;
+    // Addresses are absolute (the image's preferred base); anything outside
+    // the image, unaligned or empty is not a function.
+    if ((begin & 3u) != 0u || instructions == 0u || begin < image_base || end > image_end) continue;
+    XexFunctionMetadata metadata{};
+    metadata.begin = static_cast<memory::GuestAddress>(begin);
+    metadata.end = static_cast<memory::GuestAddress>(end);
+    metadata.unwind_data = packed;
+    metadata.prolog_instructions = packed & 0xFFu;
+    metadata.exception_handler = (packed >> 31u) != 0u;
+    if (metadata.exception_handler) {
+      const auto function_offset = static_cast<std::size_t>(begin - image_base);
+      if (function_offset < 8u) continue;
+      metadata.handler_address = read_be32(bytes, function_offset - 8u);
+      metadata.handler_data = read_be32(bytes, function_offset - 4u);
+    }
+    metadata.valid = true;
+    parsed.push_back(metadata);
+  }
+  std::sort(parsed.begin(), parsed.end(),
+            [](const auto& a, const auto& b) { return a.begin < b.begin; });
+  // Entries are disjoint; one overlapping the entry before it is corrupt and
+  // is dropped rather than allowed to bound another function.
+  for (const auto& metadata : parsed) {
+    if (!output.empty() && metadata.code_start() < output.back().end) continue;
+    output.push_back(metadata);
   }
 }
 
@@ -269,3 +298,47 @@ bool try_parse_pe_sections(std::span<const std::byte> effective_image, std::uint
 }
 
 }  // namespace xenon::xbox::detail
+
+namespace xenon::xbox {
+
+const XexFunctionMetadata* function_metadata_at(const XexImage& image,
+                                                memory::GuestAddress begin) noexcept {
+  const auto& entries = image.function_metadata;
+  const auto it = std::lower_bound(entries.begin(), entries.end(), begin,
+                                   [](const auto& entry, auto value) { return entry.begin < value; });
+  return it != entries.end() && it->begin == begin && it->valid ? &*it : nullptr;
+}
+
+const XexFunctionMetadata* function_metadata_containing(const XexImage& image,
+                                                        memory::GuestAddress address) noexcept {
+  const auto& entries = image.function_metadata;
+  auto it = std::upper_bound(entries.begin(), entries.end(), address,
+                             [](auto value, const auto& entry) { return value < entry.begin; });
+  if (it == entries.begin()) return nullptr;
+  --it;
+  return it->valid && address < it->end ? &*it : nullptr;
+}
+
+const XexFunctionMetadata* next_function_metadata_after(const XexImage& image,
+                                                        memory::GuestAddress address) noexcept {
+  const auto& entries = image.function_metadata;
+  // code_start() is begin or begin - 8 and entries are disjoint, so the first
+  // entry whose begin is past address + 8 bounds the search from above.
+  auto it = std::upper_bound(entries.begin(), entries.end(), address,
+                             [](auto value, const auto& entry) { return value < entry.begin; });
+  for (; it != entries.end(); ++it)
+    if (it->valid && it->code_start() > address) return &*it;
+  return nullptr;
+}
+
+bool is_exception_handler_data(const XexImage& image, memory::GuestAddress address) noexcept {
+  // The handler words sit just before their function: the first entry that
+  // begins past `address` is the only one whose words can hold it.
+  const auto& entries = image.function_metadata;
+  const auto it = std::upper_bound(entries.begin(), entries.end(), address,
+                                   [](auto value, const auto& entry) { return value < entry.begin; });
+  return it != entries.end() && it->valid && it->exception_handler &&
+         address >= it->code_start();
+}
+
+}  // namespace xenon::xbox
