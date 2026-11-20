@@ -307,15 +307,16 @@ int main() {
   // compiled entry with no decode error, tagged with the right kind.
   {
     // The "memcpy" address holds 0xFFFFFFFF (not valid PPC if ever decoded) -
-    // proves the driver never attempts to decode/compile it.
-    const auto xex_bytes = make_xex({kBlr, 0xFFFFFFFFu}, 0x40);
+    // proves the driver never attempts to decode/compile it. The entry calls
+    // it: `bl +8; blr`.
+    const auto xex_bytes = make_xex({0x48000009u, kBlr, 0xFFFFFFFFu}, 0x40);
     xbox::XexImage image{};
     std::string parse_error;
     assert(xbox::parse_xex_image(xex_bytes, image, &parse_error));
     AnalysisHintSetV2 hints{};
     hints.identity = xbox::compute_effective_identity(image);
     NativeReplacement replacement{};
-    replacement.guest_address = kLoadAddress + kTextRva + 4u;
+    replacement.guest_address = kLoadAddress + kTextRva + 8u;
     replacement.kind = NativeReplacementKind::Memcpy;
     replacement.source_name = "memcpy";
     hints.native_replacements.push_back(replacement);
@@ -355,6 +356,18 @@ int main() {
     assert(registry_text.find("native_replacements::memcpy_v2") != std::string::npos &&
            "generate_project() must emit a lookup_compiled() case calling Xenon's own memcpy "
            "implementation for a NativeReplacement-hinted address");
+    // A call to it is a direct call of the native routine, declared by its
+    // header - no lookup per call.
+    std::string shards;
+    for (const auto& entry : std::filesystem::directory_iterator(options.output / "functions")) {
+      std::ifstream f(entry.path());
+      std::ostringstream s; s << f.rdbuf(); shards += s.str();
+    }
+    assert(shards.find("#include \"xenon/recomp/native_replacements.hpp\"") != std::string::npos);
+    assert(shards.find("xenon::recomp::native_replacements::memcpy_v2(context)") != std::string::npos &&
+           "a call to a native replacement must call it directly");
+    assert(shards.find("lookup_compiled(" + std::to_string(replacement.guest_address) + "u") ==
+           std::string::npos);
     std::filesystem::remove_all(root);
   }
   std::cout << "  [PASS] NativeReplacement hint skips decoding and emits a real registry entry\n";

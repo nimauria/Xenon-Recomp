@@ -103,6 +103,32 @@ bool valid_cpp_identifier(std::string_view symbol) {
   return true;
 }
 
+// A runtime routine's name: identifiers joined by "::", optionally ending in
+// one template argument list of digits ("ns::save_gpr_lr_v2<20>").
+bool valid_cpp_runtime_symbol(std::string_view symbol) {
+  if (const auto open = symbol.find('<'); open != std::string_view::npos) {
+    if (symbol.back() != '>' || open + 2u >= symbol.size()) return false;
+    for (const char c : symbol.substr(open + 1u, symbol.size() - open - 2u))
+      if (!std::isdigit(static_cast<unsigned char>(c))) return false;
+    symbol = symbol.substr(0, open);
+  }
+  for (;;) {
+    const auto separator = symbol.find("::");
+    if (!valid_cpp_identifier(symbol.substr(0, separator))) return false;
+    if (separator == std::string_view::npos) return true;
+    symbol.remove_prefix(separator + 2u);
+  }
+}
+
+bool valid_include_path(std::string_view header) {
+  if (header.empty()) return false;
+  for (const char c : header) {
+    const auto ch = static_cast<unsigned char>(c);
+    if (!(std::isalnum(ch) || c == '_' || c == '/' || c == '.' || c == '-')) return false;
+  }
+  return true;
+}
+
 const DirectCallBinding* find_direct_call(
     GuestAddress target, std::span<const DirectCallBinding> direct_calls) {
   for (const auto& binding : direct_calls)
@@ -251,6 +277,10 @@ std::string emit_one_in_function(const Instruction& i,
       if (local_targets.contains(guest_target)) {
         if (is_back_edge(i, block, guest_target)) o << "  " << kSafepointPoll << "\n";
         o << "  goto " << local_label(guest_target) << ";\n";
+      } else if (const auto* leaf = find_direct_call(guest_target, direct_calls);
+                 leaf && leaf->leaf) {
+        // What the caller's follow_tail_branches() would run, called here.
+        o << "  return " << leaf->native_symbol << "(context);\n";
       } else {
         o << "  return {FlowReason::Branch," << guest_target << "u,0};\n";
       }
@@ -317,6 +347,9 @@ std::string emit_one_in_function(const Instruction& i,
       if (local_targets.contains(guest_target)) {
         if (is_back_edge(i, block, guest_target)) o << kSafepointPoll;
         o << "goto " << local_label(guest_target) << "; }\n";
+      } else if (const auto* leaf = find_direct_call(guest_target, direct_calls);
+                 leaf && leaf->leaf) {
+        o << "return " << leaf->native_symbol << "(context); }\n";
       } else {
         o << "return {FlowReason::Branch," << guest_target << "u,0}; }\n";
       }
@@ -437,7 +470,19 @@ std::string CppAotBackend::emit_function(
 
   std::ostringstream o;
   std::unordered_set<std::string> declared_symbols;
+  std::unordered_set<std::string> included_headers;
   for (const auto& binding : direct_calls) {
+    if (!binding.header.empty()) {
+      // A runtime routine: declared by its header (a template the compiler
+      // may inline), not forward-declared here.
+      if (!valid_cpp_runtime_symbol(binding.native_symbol) || !valid_include_path(binding.header))
+        throw std::invalid_argument("CppAotBackend: invalid runtime direct-call binding");
+      if (included_headers.insert(binding.header).second)
+        o << "#include \"" << binding.header << "\"\n";
+      continue;
+    }
+    if (binding.leaf)
+      throw std::invalid_argument("CppAotBackend: only runtime routines may be leaf bindings");
     if (!valid_cpp_identifier(binding.native_symbol))
       throw std::invalid_argument("CppAotBackend: invalid direct-call native symbol");
     if (declared_symbols.insert(binding.native_symbol).second)
@@ -605,6 +650,29 @@ std::vector<GuestAddress> CppAotBackend::static_call_targets(
       if (i.op == Op::Call && !i.args.empty()) {
         target = constant_value(block, i.args[0]);
       } else if (i.op == Op::BranchIf && i.imm0 == 1 && i.args.size() >= 2) {
+        target = constant_value(block, i.args[1]);
+      }
+      if (!target) continue;
+      const auto guest_target = static_cast<GuestAddress>(*target);
+      if (!local_targets.contains(guest_target)) targets.push_back(guest_target);
+    }
+  }
+  std::sort(targets.begin(), targets.end());
+  targets.erase(std::unique(targets.begin(), targets.end()), targets.end());
+  return targets;
+}
+
+std::vector<GuestAddress> CppAotBackend::static_tail_branch_targets(
+    const ir::Function& function) {
+  std::unordered_set<GuestAddress> local_targets;
+  for (const auto& block : function.blocks) local_targets.insert(block.guest_address);
+  std::vector<GuestAddress> targets;
+  for (const auto& block : function.blocks) {
+    for (const auto& i : block.instructions) {
+      std::optional<std::uint64_t> target;
+      if (i.op == Op::Branch && !i.args.empty()) {
+        target = constant_value(block, i.args[0]);
+      } else if (i.op == Op::BranchIf && i.imm0 == 0 && i.args.size() >= 2) {
         target = constant_value(block, i.args[1]);
       }
       if (!target) continue;

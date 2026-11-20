@@ -70,7 +70,7 @@ bool generate_project(const DriverOptions& options, AnalysisReport& report, std:
   if (options.progress)
     options.progress("[Xenon Recomp] Codegen: " + std::to_string(codegen_items.size()) + " functions");
 
-  const auto direct_call_symbols = build_direct_call_symbols(codegen_items, alternate_entries_by_owner);
+  const auto direct_call_symbols = build_direct_call_symbols(codegen_items, alternate_entries_by_owner, report);
   if (!report.instruction_hooks.empty() && report.hook_sources.empty()) {
     error = "the hint set declares " + std::to_string(report.instruction_hooks.hooks.size()) +
             " instruction hook(s) but no hook sources implement them";

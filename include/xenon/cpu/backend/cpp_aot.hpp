@@ -16,6 +16,17 @@ namespace xenon::cpu::backend {
 struct DirectCallBinding {
   GuestAddress guest_target{};
   std::string native_symbol{};
+  // Set for a runtime routine (a register save/restore helper, a native
+  // replacement): the header declaring `native_symbol`, a qualified name the
+  // generated code includes instead of forward-declaring it. A header-only
+  // template the compiler can then inline into the call site.
+  std::string header{};
+  // The routine returns to its caller and never calls or branches on (the
+  // register save/restore helpers). A tail branch to it becomes a direct
+  // tail call; to anything else it stays a Branch result the caller follows
+  // in a loop, since guest functions that tail-branch to each other in a
+  // cycle would otherwise recurse without bound.
+  bool leaf{};
 };
 
 // Stable generated symbol used for a dispatchable alternate guest entry into
@@ -54,6 +65,11 @@ class CppAotBackend {
   // direct_calls for. Sorted and unique, so a caller can bind only these
   // instead of declaring every compiled symbol in every translation unit.
   [[nodiscard]] static std::vector<GuestAddress> static_call_targets(
+      const ir::Function& function);
+  // The constant targets of the function's tail branches (b and conditional
+  // bc that leave it): where a leaf binding (DirectCallBinding::leaf) is
+  // called directly. Sorted and unique.
+  [[nodiscard]] static std::vector<GuestAddress> static_tail_branch_targets(
       const ir::Function& function);
 };
 

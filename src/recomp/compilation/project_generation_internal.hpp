@@ -14,6 +14,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "xenon/cpu/backend/cpp_aot.hpp"
 #include "xenon/recomp/compilation_graph.hpp"
 #include "xenon/recomp/driver.hpp"
 
@@ -40,9 +41,14 @@ using AlternateEntriesByOwner = std::map<GuestAddress, std::vector<GuestAddress>
 
 // Sorted, de-duplicated alternate-block entries grouped by canonical owner.
 AlternateEntriesByOwner collect_alternate_entries(const AnalysisReport& report);
-std::unordered_map<GuestAddress, std::string> build_direct_call_symbols(
+// Every address generated code may call (or, for a leaf runtime helper,
+// tail-branch to) directly: compiled functions, their alternate entries, the
+// register save/restore helpers and the native replacements - exactly the
+// non-hook cases lookup_compiled() returns.
+using DirectCallSymbols = std::unordered_map<GuestAddress, cpu::backend::DirectCallBinding>;
+DirectCallSymbols build_direct_call_symbols(
     const std::vector<const DiscoveredFunction*>& codegen_items,
-    const AlternateEntriesByOwner& alternate_entries_by_owner);
+    const AlternateEntriesByOwner& alternate_entries_by_owner, const AnalysisReport& report);
 
 struct EmittedFunctionSources {
   std::size_t worker_count{};
@@ -53,7 +59,7 @@ struct EmittedFunctionSources {
 EmittedFunctionSources emit_function_sources(
     const std::vector<const DiscoveredFunction*>& codegen_items,
     const AlternateEntriesByOwner& alternate_entries_by_owner,
-    const std::unordered_map<GuestAddress, std::string>& direct_call_symbols,
+    const DirectCallSymbols& direct_call_symbols,
     std::span<const std::string> hook_symbols,
     const graph::Store& graph_store, const DriverOptions& options);
 

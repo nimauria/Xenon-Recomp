@@ -25,23 +25,45 @@ AlternateEntriesByOwner collect_alternate_entries(const AnalysisReport& report) 
 // already-deterministic (guest-address-sorted) list, decided up front -
 // never by which worker happens to finish which item first (Part 16's
 // "stable sorted function addresses determine shard membership").
-// Direct-call symbols: exactly the compiled-function and alternate-entry
-// cases registry.cpp's lookup_compiled() returns below (runtime helpers and
-// native replacements keep the registry lookup). The generated registry is
-// a static switch bound as ExecutionContext::compiled_lookup, so calling the
-// symbol directly reaches the same code without a runtime lookup per call.
-std::unordered_map<GuestAddress, std::string> build_direct_call_symbols(
+// Direct-call symbols: the cases registry.cpp's lookup_compiled() returns
+// (generated_registry.cpp), so calling the symbol directly reaches the same
+// code as the lookup without a lookup per call. The register save/restore
+// helpers are header templates the compiler can inline into the call site:
+// AC6 made 5,574 calls into them through the lookup, and its audio mixer
+// spent 3.4% in the restore helper alone.
+DirectCallSymbols build_direct_call_symbols(
     const std::vector<const DiscoveredFunction*>& codegen_items,
-    const AlternateEntriesByOwner& alternate_entries_by_owner) {
-  std::unordered_map<GuestAddress, std::string> direct_call_symbols;
-  for (const auto* function : codegen_items)
-    direct_call_symbols.emplace(function->guest_start, function->name + "_v2");
+    const AlternateEntriesByOwner& alternate_entries_by_owner, const AnalysisReport& report) {
+  DirectCallSymbols direct_call_symbols;
+  const auto bind = [&](GuestAddress address, std::string symbol, std::string header = {},
+                        bool leaf = false) {
+    direct_call_symbols.emplace(
+        address, cpu::backend::DirectCallBinding{address, std::move(symbol), std::move(header), leaf});
+  };
+  for (const auto* function : codegen_items) bind(function->guest_start, function->name + "_v2");
   for (const auto& [owner, entries] : alternate_entries_by_owner) {
     const auto owner_it = std::find_if(codegen_items.begin(), codegen_items.end(),
                                        [&](const auto* function) { return function->guest_start == owner; });
     if (owner_it == codegen_items.end()) continue;
     for (const auto entry : entries)
-      direct_call_symbols.emplace(entry, cpu::backend::alternate_entry_symbol((*owner_it)->name, entry));
+      bind(entry, cpu::backend::alternate_entry_symbol((*owner_it)->name, entry));
+  }
+  if (report.hint_set_v2) {
+    for (const auto& helper : analysis::expand_runtime_helpers(report.hint_set_v2->runtime_helpers)) {
+      // setjmp/longjmp rewind guest frames; they keep the lookup and are
+      // never tail-called.
+      if (helper.kind == analysis::RuntimeHelperKind::SetJmp ||
+          helper.kind == analysis::RuntimeHelperKind::LongJmp)
+        continue;
+      bind(helper.address, "xenon::recomp::runtime_helpers::" + runtime_helper_native_symbol(helper),
+           "xenon/recomp/runtime_helpers.hpp", true);
+    }
+  }
+  for (const auto& function : report.functions) {
+    if (!function.native_replacement) continue;
+    if (const auto* name = native_replacement_function_name(*function.native_replacement))
+      bind(function.guest_start, std::string("xenon::recomp::native_replacements::") + name,
+           "xenon/recomp/native_replacements.hpp");
   }
   return direct_call_symbols;
 }
@@ -49,7 +71,7 @@ std::unordered_map<GuestAddress, std::string> build_direct_call_symbols(
 EmittedFunctionSources emit_function_sources(
     const std::vector<const DiscoveredFunction*>& codegen_items,
     const AlternateEntriesByOwner& alternate_entries_by_owner,
-    const std::unordered_map<GuestAddress, std::string>& direct_call_symbols,
+    const DirectCallSymbols& direct_call_symbols,
     std::span<const std::string> hook_symbols,
     const graph::Store& graph_store, const DriverOptions& options) {
   EmittedFunctionSources emitted;
@@ -78,12 +100,24 @@ EmittedFunctionSources emit_function_sources(
     for (auto entry : alternate_entries) aliases += std::to_string(entry) + ";";
     std::vector<cpu::backend::DirectCallBinding> direct_calls;
     std::string direct_call_key;
-    for (const auto target : cpu::backend::CppAotBackend::static_call_targets(function.ir)) {
+    std::set<GuestAddress> bound;
+    const auto bind = [&](GuestAddress target, bool tail_branch) {
       const auto symbol_it = direct_call_symbols.find(target);
-      if (symbol_it == direct_call_symbols.end()) continue;
-      direct_calls.push_back({target, symbol_it->second});
-      direct_call_key += std::to_string(target) + "=" + symbol_it->second + ";";
-    }
+      if (symbol_it == direct_call_symbols.end()) return;
+      // A tail branch is bound only to a leaf runtime helper (see
+      // DirectCallBinding::leaf); every other one stays a Branch result.
+      if (tail_branch && !symbol_it->second.leaf) return;
+      if (!bound.insert(target).second) return;
+      direct_calls.push_back(symbol_it->second);
+      direct_call_key += std::to_string(target) + "=" + symbol_it->second.native_symbol +
+                         (symbol_it->second.leaf ? "!" : "") + ";";
+    };
+    for (const auto target : cpu::backend::CppAotBackend::static_call_targets(function.ir))
+      bind(target, false);
+    for (const auto target : cpu::backend::CppAotBackend::static_tail_branch_targets(function.ir))
+      bind(target, true);
+    std::sort(direct_calls.begin(), direct_calls.end(),
+              [](const auto& a, const auto& b) { return a.guest_target < b.guest_target; });
     // The routine names bound to this function's hook ordinals.
     std::set<std::uint64_t> hook_ordinals;
     for (const auto& block : function.ir.blocks)
