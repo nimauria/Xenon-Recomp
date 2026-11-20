@@ -67,6 +67,14 @@ class GuestMemoryCoherency {
     }
   }
 
+  // How many collections drained every thread's store buffer
+  // (flush_process_write_buffers(), an interrupt to each core running the
+  // title). A consumer that takes an epoch per draw instead of per sync
+  // point shows up here.
+  [[nodiscard]] std::uint64_t write_buffer_flushes() const noexcept {
+    return write_buffer_flushes_.load(std::memory_order_relaxed);
+  }
+
   [[nodiscard]] std::atomic<std::uint64_t>* page_epochs_data() noexcept {
     return page_epochs_.data();
   }
@@ -139,6 +147,7 @@ class GuestMemoryCoherency {
     if (collected_pages_.empty()) return 0u;
 
     flush_process_write_buffers();
+    write_buffer_flushes_.fetch_add(1u, std::memory_order_relaxed);
     active_writers_.fetch_add(1u, std::memory_order_acq_rel);
     std::uint64_t epoch = 0u;
     // collected_pages_ is ascending: the bits are walked in page order.
@@ -366,6 +375,7 @@ class GuestMemoryCoherency {
       std::vector<std::atomic<std::uint64_t>>(kDirtyWordCount / 64u);
   mutable std::mutex collect_mutex_;
   mutable std::vector<std::uint32_t> collected_pages_;
+  mutable std::atomic<std::uint64_t> write_buffer_flushes_{0};
 };
 
 }  // namespace xenon::memory

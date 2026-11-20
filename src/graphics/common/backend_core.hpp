@@ -1666,9 +1666,13 @@ class BackendCore {
                             draw.primitive_type,
                             options.reset_enabled,
                             options.reset_index};
-    // Taken before the bytes are read: a write racing the copy has a newer
-    // epoch, so the entry is found stale next time.
-    const auto epoch = memory->coherency().current_epoch();
+    // Index data is read as guest memory stood at the latest sync point, as
+    // vertices and textures are. Taking a fresh epoch here collected the CPU's
+    // dirty pages for every draw, and each collection that found any stops
+    // every core running the title (FlushProcessWriteBuffers). The epoch is
+    // taken before the bytes are read, so a write after it, including one
+    // racing the copy, finds the entry stale at the next sync point.
+    const auto epoch = guest_reads.read_epoch(*memory);
     if (cacheable) {
       if (auto hit = index_cache.find(key, source_bytes, memory->coherency(), epoch)) {
         perf::add(perf::Counter::IndexCacheHits, 1u);

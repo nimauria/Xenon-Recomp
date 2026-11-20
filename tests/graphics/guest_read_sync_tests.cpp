@@ -273,6 +273,38 @@ void test_resolve_readback_is_not_a_cpu_change() {
 
 }  // namespace
 
+// Reads between sync points take the sync point's epoch and leave the CPU's
+// dirty pages for the next sync point. Each collection that finds dirty pages
+// drains every thread's store buffer, an interrupt to every core running the
+// title; the index cache took a fresh epoch for every draw, so a frame of
+// ~2,300 draws with the CPU writing between them interrupted every guest
+// thread up to ~2,300 times.
+void test_reads_between_sync_points_do_not_drain_store_buffers() {
+  AddressSpace memory;
+  assert(memory.initialize());
+  GuestReadSync sync;
+  auto& coherency = memory.coherency();
+  // What a native-access store does to its page's bits.
+  const auto native_store = [&](std::uint32_t page) {
+    const auto word = page / 64u;
+    coherency.cpu_dirty_page_bits_data()[word].fetch_or(std::uint64_t{1} << (page % 64u));
+    coherency.cpu_dirty_summary_bits_data()[word / 64u].fetch_or(std::uint64_t{1} << (word % 64u));
+  };
+  native_store(kBase / 4096u);
+  const auto first = sync.sync(memory, kTrackAll);
+  const auto flushes = coherency.write_buffer_flushes();
+  assert(flushes >= 1u);
+  for (int draw = 0; draw < 100; ++draw) {
+    native_store(kBase / 4096u + 1u);
+    assert(sync.read_epoch(memory) == first);
+  }
+  assert(coherency.write_buffer_flushes() == flushes);
+  // The writes are folded in at the next sync point, with one drain.
+  const auto second = sync.sync(memory, kTrackAll);
+  assert(second > first);
+  assert(coherency.write_buffer_flushes() == flushes + 1u);
+}
+
 int main() {
   test_draw_reads_the_texture_as_of_the_sync_point();
   test_write_after_the_sync_point_is_not_visible_yet();
@@ -283,6 +315,7 @@ int main() {
   test_tracking_follows_the_texture_cache();
   test_outside_a_drain_reads_see_current_memory();
   test_resolve_readback_is_not_a_cpu_change();
+  test_reads_between_sync_points_do_not_drain_store_buffers();
   std::cout << "xenon_guest_read_sync_tests: ok\n";
   return 0;
 }
