@@ -13,6 +13,17 @@
 #include <utility>
 
 #include "xenon/cpu/memory_ordering.hpp"
+
+#if defined(_M_X64) || defined(__x86_64__)
+#define XENON_CPU_HOST_SSE2 1
+#include <emmintrin.h>
+// pshufb, for the partial vector loads: generated game code is built for
+// x86-64-v3 (AVX2); other builds keep the byte-copy path.
+#if defined(__AVX__) || defined(__SSSE3__)
+#define XENON_CPU_HOST_SSSE3 1
+#include <tmmintrin.h>
+#endif
+#endif
 #include "xenon/cpu/types.hpp"
 
 // Generated functions are large enough that MSVC declines to inline even a
@@ -374,6 +385,12 @@ class MemoryAccessContext {
   // write watch and dirty-page publication as write128() has them.
   XENON_CPU_FORCEINLINE void read_quadword_part(GuestAddress address,
                                                 std::span<std::byte> destination);
+  // lvlx: the bytes from `address` to the end of its 16-byte block, at the
+  // start of the result, zeros after. lvrx: the bytes of the block before
+  // `address`, at the end of the result, zeros before (all zeros, with no
+  // access, when `address` is aligned).
+  [[nodiscard]] XENON_CPU_FORCEINLINE Vector128 read_vector_left(GuestAddress address);
+  [[nodiscard]] XENON_CPU_FORCEINLINE Vector128 read_vector_right(GuestAddress address);
   XENON_CPU_FORCEINLINE void write_quadword_part(GuestAddress address,
                                                  std::span<const std::byte> source);
   void zero_cache_block(GuestAddress address, std::uint32_t bytes);
@@ -714,6 +731,43 @@ inline void atomic_store_relaxed(std::byte* ptr, T value) noexcept {
   auto& object = *reinterpret_cast<T*>(ptr);
   std::atomic_ref<T> atomic(object);
   atomic.store(value, std::memory_order_relaxed);
+}
+
+// A guest vector load or store (lvx/stvx and the VMX128 forms) as one
+// 16-byte host access. Two 8-byte atomics (the portable form) left the value
+// in two halves that the vector unit then read back through memory as one
+// 16-byte load, which store forwarding cannot satisfy: a stall on every
+// guest vector access, measured as most of AC6's audio mixer loop. On x86-64
+// one unaligned-capable SSE access replaces them; where the address is
+// 16-byte aligned (every lvx/stvx) it is also a single-copy atomic access on
+// processors with AVX, which the generated code requires.
+// Returned as a value (bit_cast), not stored into a caller's Vector128: a
+// default-constructed Vector128 is zero-filled first, and the compiler kept
+// it in a stack slot that every use then reloaded.
+[[nodiscard]] XENON_CPU_FORCEINLINE Vector128 load128_relaxed(std::byte* ptr) noexcept {
+#if defined(XENON_CPU_HOST_SSE2)
+  return std::bit_cast<Vector128>(_mm_loadu_si128(reinterpret_cast<const __m128i*>(ptr)));
+#else
+  const auto lo = atomic_load_relaxed<std::uint64_t>(ptr);
+  const auto hi = atomic_load_relaxed<std::uint64_t>(ptr + 8u);
+  Vector128 out;
+  std::memcpy(out.bytes.data(), &lo, sizeof(lo));
+  std::memcpy(out.bytes.data() + 8u, &hi, sizeof(hi));
+  return out;
+#endif
+}
+
+XENON_CPU_FORCEINLINE void store128_relaxed(std::byte* ptr, const Vector128& value) noexcept {
+#if defined(XENON_CPU_HOST_SSE2)
+  _mm_storeu_si128(reinterpret_cast<__m128i*>(ptr),
+                   _mm_load_si128(reinterpret_cast<const __m128i*>(value.bytes.data())));
+#else
+  std::uint64_t lo{}, hi{};
+  std::memcpy(&lo, value.bytes.data(), sizeof(lo));
+  std::memcpy(&hi, value.bytes.data() + 8u, sizeof(hi));
+  atomic_store_relaxed<std::uint64_t>(ptr, lo);
+  atomic_store_relaxed<std::uint64_t>(ptr + 8u, hi);
+#endif
 }
 
 inline void atomic_copy_from_guest(std::byte* source,
@@ -1484,12 +1538,7 @@ inline Vector128 MemoryAccessContext::read128(GuestAddress address) {
   std::uint32_t physical_page{};
   if (auto* ptr = native_ram<16u, alignof(std::uint64_t)>(address, fast_memory::kRead,
                                                           physical_page)) [[likely]] {
-    Vector128 value{};
-    const auto lo = detail::atomic_load_relaxed<std::uint64_t>(ptr);
-    const auto hi = detail::atomic_load_relaxed<std::uint64_t>(ptr + 8u);
-    std::memcpy(value.bytes.data(), &lo, sizeof(lo));
-    std::memcpy(value.bytes.data() + 8u, &hi, sizeof(hi));
-    return value;
+    return detail::load128_relaxed(ptr);
   }
   return read128_checked(address);
 }
@@ -1499,12 +1548,7 @@ inline Vector128 MemoryAccessContext::read128_checked(GuestAddress address) {
   if (!resolve_fast(address, 16, false, alignof(std::uint64_t), resolved)) {
     return slow_->read128(address);
   }
-  Vector128 value{};
-  const auto lo = detail::atomic_load_relaxed<std::uint64_t>(resolved.ptr);
-  const auto hi = detail::atomic_load_relaxed<std::uint64_t>(resolved.ptr + 8u);
-  std::memcpy(value.bytes.data(), &lo, sizeof(lo));
-  std::memcpy(value.bytes.data() + 8u, &hi, sizeof(hi));
-  return value;
+  return detail::load128_relaxed(resolved.ptr);
 }
 
 inline void MemoryAccessContext::write8(GuestAddress address,
@@ -1552,14 +1596,10 @@ inline void MemoryAccessContext::write128(GuestAddress address,
   std::uint32_t physical_page{};
   if (auto* ptr = native_ram<16u, alignof(std::uint64_t)>(address, fast_memory::kWrite,
                                                           physical_page)) [[likely]] {
-    std::uint64_t lo{}, hi{};
-    std::memcpy(&lo, value.bytes.data(), sizeof(lo));
-    std::memcpy(&hi, value.bytes.data() + 8u, sizeof(hi));
     const auto physical = (physical_page << kNativePageShift) | (address & kNativePageMask);
     if (write_watch_hit(physical, 16u)) [[unlikely]]
       debug_signal_write_watch(address, physical, 16u, value.bytes.data(), 16u);
-    detail::atomic_store_relaxed<std::uint64_t>(ptr, lo);
-    detail::atomic_store_relaxed<std::uint64_t>(ptr + 8u, hi);
+    detail::store128_relaxed(ptr, value);
     native_note_store(physical_page);
     return;
   }
@@ -1573,14 +1613,10 @@ inline void MemoryAccessContext::write128_checked(GuestAddress address,
     slow_->write128(address, value);
     return;
   }
-  std::uint64_t lo{}, hi{};
-  std::memcpy(&lo, value.bytes.data(), sizeof(lo));
-  std::memcpy(&hi, value.bytes.data() + 8u, sizeof(hi));
   if (write_watch_hit(resolved.physical_address, 16u)) [[unlikely]]
     debug_signal_write_watch(address, resolved.physical_address, 16u, value.bytes.data(), 16u);
   const bool reservation_participant = begin_write(resolved.physical_address, 16);
-  detail::atomic_store_relaxed<std::uint64_t>(resolved.ptr, lo);
-  detail::atomic_store_relaxed<std::uint64_t>(resolved.ptr + 8u, hi);
+  detail::store128_relaxed(resolved.ptr, value);
   complete_write(resolved.physical_address, 16, reservation_participant,
                  resolved.ordering_domain);
 }
@@ -1641,6 +1677,50 @@ inline void MemoryAccessContext::read_quadword_part(GuestAddress address,
     }
   }
   read_bytes(address, destination);
+}
+
+// One 16-byte load of the aligned block and one byte shuffle, instead of a
+// byte-at-a-time copy of up to 15 bytes (AC6's audio mixer runs lvlx in its
+// inner loop). The shuffle index for result byte i is i + shift; an index
+// outside 0..15 has its top bit set, which makes pshufb write a zero.
+inline Vector128 MemoryAccessContext::read_vector_left(GuestAddress address) {
+  const auto n = static_cast<unsigned>(address & 15u);
+#if defined(XENON_CPU_HOST_SSSE3)
+  std::uint32_t physical_page{};
+  if (auto* block = native_ram<16u, 16u>(GuestAddress(address & ~GuestAddress{15}),
+                                         fast_memory::kRead, physical_page)) [[likely]] {
+    const __m128i iota = _mm_setr_epi8(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
+    __m128i index = _mm_add_epi8(iota, _mm_set1_epi8(static_cast<char>(n)));
+    index = _mm_or_si128(index, _mm_cmpgt_epi8(index, _mm_set1_epi8(15)));
+    const __m128i bytes = _mm_loadu_si128(reinterpret_cast<const __m128i*>(block));
+    return std::bit_cast<Vector128>(_mm_shuffle_epi8(bytes, index));
+  }
+#endif
+  Vector128 result{};
+  read_quadword_part(address, std::as_writable_bytes(std::span(result.bytes)).first(16u - n));
+  return result;
+}
+
+inline Vector128 MemoryAccessContext::read_vector_right(GuestAddress address) {
+  const auto n = static_cast<unsigned>(address & 15u);
+  if (n == 0u) return Vector128{};
+#if defined(XENON_CPU_HOST_SSSE3)
+  std::uint32_t physical_page{};
+  if (auto* block = native_ram<16u, 16u>(GuestAddress(address & ~GuestAddress{15}),
+                                         fast_memory::kRead, physical_page)) [[likely]] {
+    // Result byte i is block byte i - (16 - n): negative (top bit set) for
+    // the leading zeros.
+    const __m128i iota = _mm_setr_epi8(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
+    const __m128i index =
+        _mm_add_epi8(iota, _mm_set1_epi8(static_cast<char>(static_cast<int>(n) - 16)));
+    const __m128i bytes = _mm_loadu_si128(reinterpret_cast<const __m128i*>(block));
+    return std::bit_cast<Vector128>(_mm_shuffle_epi8(bytes, index));
+  }
+#endif
+  Vector128 result{};
+  read_quadword_part(GuestAddress(address & ~15u),
+                     std::as_writable_bytes(std::span(result.bytes)).subspan(16u - n, n));
+  return result;
 }
 
 inline void MemoryAccessContext::write_quadword_part(GuestAddress address,

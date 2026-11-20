@@ -110,14 +110,24 @@ struct alignas(64) CpuState {
     std::memcpy(&fpr_bits[i], &v, sizeof(v));
   }
 
-  [[nodiscard]] std::uint8_t cr_field(unsigned field) const noexcept;
+  // Inline: generated code tests a CR bit at every conditional branch, and
+  // the definitions in state.cpp made each test a call across modules.
+  [[nodiscard]] std::uint8_t cr_field(unsigned field) const noexcept {
+    const unsigned shift = (7u - (field & 7u)) * 4u;
+    return static_cast<std::uint8_t>((cr >> shift) & 0xFu);
+  }
   void set_cr_field(unsigned field, std::uint8_t value) noexcept {
     const unsigned shift = (7u - (field & 7u)) * 4u;
     cr = (cr & ~(0xFu << shift)) |
          ((static_cast<std::uint32_t>(value) & 0xFu) << shift);
   }
-  [[nodiscard]] bool cr_bit(unsigned bit) const noexcept;
-  void set_cr_bit(unsigned bit, bool value) noexcept;
+  [[nodiscard]] bool cr_bit(unsigned bit) const noexcept {
+    return (cr & (0x80000000u >> (bit & 31u))) != 0;
+  }
+  void set_cr_bit(unsigned bit, bool value) noexcept {
+    const auto mask = 0x80000000u >> (bit & 31u);
+    cr = value ? (cr | mask) : (cr & ~mask);
+  }
 
   [[nodiscard]] bool xer_ca() const noexcept { return (xer & xer_bits::CA) != 0; }
   [[nodiscard]] bool xer_ov() const noexcept { return (xer & xer_bits::OV) != 0; }

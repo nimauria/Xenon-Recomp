@@ -16,6 +16,8 @@
 #include <cstdio>
 #include <cstring>
 #include <iostream>
+#include <limits>
+#include <cmath>
 #include <utility>
 
 #include "xenon/cpu/aot_semantics.hpp"
@@ -184,9 +186,46 @@ void test_partial_quadword_accesses() {
   std::cout << "  [PASS] VMX partial quadword loads and stores, native and checked\n";
 }
 
+// The native fused multiply-add (the FMA instruction where the build has
+// it) rounds once, exactly as std::fma: every result, special values
+// included, is bit-identical.
+void test_native_fma_matches_std_fma() {
+  CpuState state{};
+  const double values[] = {0.0,     -0.0,     1.0,      -1.5,          3.25e-310,
+                           -2e-308, 1e308,    -1e308,   0.1,           1.0 / 3.0,
+                           2.5e10,  -7e-20,   std::numeric_limits<double>::infinity(),
+                           -std::numeric_limits<double>::infinity(),
+                           std::numeric_limits<double>::quiet_NaN()};
+  std::uint64_t seed = 0x9E3779B97F4A7C15ull;
+  const auto random_double = [&] {
+    seed ^= seed << 13;
+    seed ^= seed >> 7;
+    seed ^= seed << 17;
+    double d;
+    std::uint64_t bits = (seed & 0x800FFFFFFFFFFFFFull) | ((0x3C0ull + (seed >> 52) % 0x80ull) << 52);
+    std::memcpy(&d, &bits, sizeof d);
+    return d;
+  };
+  const auto same = [](double x, double y) {
+    std::uint64_t a, b;
+    std::memcpy(&a, &x, 8);
+    std::memcpy(&b, &y, 8);
+    return a == b || (x != x && y != y);  // any NaN matches any NaN
+  };
+  for (const double a : values)
+    for (const double b : values)
+      for (const double c : values) assert(same(aot::fp_fma(state, a, b, c), std::fma(a, b, c)));
+  for (int i = 0; i < 100000; ++i) {
+    const double a = random_double(), b = random_double(), c = random_double();
+    assert(same(aot::fp_fma(state, a, b, c), std::fma(a, b, c)));
+  }
+  std::cout << "  [PASS] native fused multiply-add matches std::fma\n";
+}
+
 }  // namespace
 
 int main() {
+  test_native_fma_matches_std_fma();
   test_inline_semantics_match_execute_vector();
   test_partial_quadword_accesses();
   std::cout << "xenon_cpu_vector_inline: ok\n";

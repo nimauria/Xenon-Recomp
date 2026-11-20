@@ -16,6 +16,9 @@
 #include <xmmintrin.h>
 #endif
 
+#if defined(__AVX2__) || defined(__FMA__)
+#include <immintrin.h>
+#endif
 #include "xenon/cpu/runtime.hpp"
 #include "xenon/cpu/vector_semantic.hpp"
 
@@ -500,7 +503,16 @@ template <typename T>
   return r;
 }
 [[nodiscard]] inline double fp_fma(CpuState& state, double a, double b, double c) noexcept {
-  if (fp_native(state)) return std::fma(a, b, c);
+  if (fp_native(state)) {
+#if defined(__AVX2__) || defined(__FMA__)
+    // The FMA instruction itself: std::fma is a call into the C runtime here,
+    // in AC6's audio mixer and every other title's float-heavy loops. One
+    // rounding either way, so the result is the same.
+    return _mm_cvtsd_f64(_mm_fmadd_sd(_mm_set_sd(a), _mm_set_sd(b), _mm_set_sd(c)));
+#else
+    return std::fma(a, b, c);
+#endif
+  }
   begin_fp_operation(state);
   if (is_signaling_nan(a) || is_signaling_nan(b) || is_signaling_nan(c)) last_fp_invalid_detail |= fpscr_bits::VXSNAN;
   volatile double r = std::fma(fp_operand(a), fp_operand(b), fp_operand(c));
@@ -903,20 +915,12 @@ void vector_store_element(const Vector128& value, MemoryAccessContext& memory,
 inline Vector128 vector_load_left(const Vector128& old, MemoryAccessContext& memory,
                                   GuestAddress ea) {
   (void)old;
-  Vector128 result{};
-  const auto n = static_cast<unsigned>(ea & 15u);
-  memory.read_quadword_part(ea, std::as_writable_bytes(std::span(result.bytes)).first(16u - n));
-  return result;
+  return memory.read_vector_left(ea);
 }
 inline Vector128 vector_load_right(const Vector128& old, MemoryAccessContext& memory,
                                    GuestAddress ea) {
   (void)old;
-  Vector128 result{};
-  const auto n = static_cast<unsigned>(ea & 15u);
-  if (n)
-    memory.read_quadword_part(GuestAddress(ea & ~15u),
-                              std::as_writable_bytes(std::span(result.bytes)).subspan(16u - n, n));
-  return result;
+  return memory.read_vector_right(ea);
 }
 inline void vector_store_left(const Vector128& value, MemoryAccessContext& memory,
                               GuestAddress ea) {

@@ -42,9 +42,14 @@ namespace xenon::cpu::aot {
 [[nodiscard]] inline float vmx_quiet(float value) noexcept {
   return std::bit_cast<float>(std::bit_cast<std::uint32_t>(value) | 0x00400000u);
 }
+// A NaN by its bits: std::isnan under /fp:strict is a call into the C runtime
+// (_dclass), on the hot path of every lane-ordered result.
+[[nodiscard]] inline bool vmx_is_nan(float value) noexcept {
+  return (std::bit_cast<std::uint32_t>(value) & 0x7FFFFFFFu) > 0x7F800000u;
+}
 [[nodiscard]] inline float vmx_nan_order(float result, float x, float y) noexcept {
-  if (std::isnan(x)) return vmx_quiet(x);
-  if (std::isnan(y)) return vmx_quiet(y);
+  if (vmx_is_nan(x)) return vmx_quiet(x);
+  if (vmx_is_nan(y)) return vmx_quiet(y);
   return result;
 }
 
@@ -60,10 +65,11 @@ namespace vector_inline {
 XENON_VECTOR_FORCEINLINE __m128i load(const Vector128& v) noexcept {
   return _mm_load_si128(reinterpret_cast<const __m128i*>(v.bytes.data()));
 }
+// A bit_cast, not a store into a default-constructed Vector128: that
+// zero-filled the value first and kept it in a stack slot (Vector128's bytes
+// are value-initialised), where generated code then reloaded it.
 XENON_VECTOR_FORCEINLINE Vector128 store(__m128i x) noexcept {
-  Vector128 r;
-  _mm_store_si128(reinterpret_cast<__m128i*>(r.bytes.data()), x);
-  return r;
+  return std::bit_cast<Vector128>(x);
 }
 // Big-endian lanes <-> host lanes.
 XENON_VECTOR_FORCEINLINE __m128i swap16(__m128i v) noexcept {
@@ -103,8 +109,17 @@ XENON_VECTOR_FORCEINLINE Vector128 write_vmx(__m128 v, bool non_java) noexcept {
 XENON_VECTOR_FORCEINLINE __m128 select(__m128 otherwise, __m128 chosen, __m128 mask) noexcept {
   return _mm_or_ps(_mm_andnot_ps(mask, otherwise), _mm_and_ps(mask, chosen));
 }
-// vmx_nan_order() on every lane.
+// Whether any lane is a NaN.
+XENON_VECTOR_FORCEINLINE bool any_nan(__m128 v) noexcept {
+  return _mm_movemask_ps(_mm_cmpunord_ps(v, v)) != 0;
+}
+// vmx_nan_order() on every lane. Only lanes whose result is a NaN can need
+// it: an add, subtract or multiply with a NaN operand yields a NaN, so a
+// result with no NaN lane is already exact. One compare and a branch that
+// game code (audio mixing, skinning) never takes, instead of two selects per
+// operation.
 XENON_VECTOR_FORCEINLINE __m128 nan_order(__m128 result, __m128 x, __m128 y) noexcept {
+  if (!any_nan(result)) [[likely]] return result;
   const __m128 quiet = _mm_castsi128_ps(_mm_set1_epi32(0x00400000));
   result = select(result, _mm_or_ps(y, quiet), _mm_cmpunord_ps(y, y));
   return select(result, _mm_or_ps(x, quiet), _mm_cmpunord_ps(x, x));
