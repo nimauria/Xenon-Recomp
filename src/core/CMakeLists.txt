@@ -40,6 +40,7 @@ add_library(xenon_core STATIC
   session/diagnostics/fault_report.cpp
   session/diagnostics/frame_dump.cpp
   session/diagnostics/guest_profile.cpp
+  session/diagnostics/perf_watch.cpp
   session/diagnostics/guest_profiler.cpp
   session/diagnostics/memory_watch.cpp
   session/diagnostics/runtime_probes.cpp
@@ -54,6 +55,10 @@ add_library(xenon_core STATIC
   guest_stack_walk.cpp
   boot_checkpoints.cpp
   export_trace.cpp
+  in_flight_calls.cpp
+  guest_code_map.cpp
+  hitch_monitor.cpp
+  frame_anomaly.cpp
   guest_memory_watch.cpp
 )
 target_include_directories(xenon_core

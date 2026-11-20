@@ -80,7 +80,17 @@ int main() {
   options.min_thread_samples = 1;
   assert(sampler.start(options));
   assert(!sampler.start(options));  // already running
-  std::this_thread::sleep_for(std::chrono::milliseconds(600));
+  std::this_thread::sleep_for(std::chrono::milliseconds(300));
+  // A report while sampling continues (the periodic snapshot a killed run
+  // keeps) already names the busy thread, and sampling goes on after it.
+  {
+    const auto partial = sampler.report();
+    assert(partial.find("\"sampler-busy\"") != std::string::npos);
+    const auto before = sampler.samples();
+    assert(sampler.running());
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    assert(sampler.samples() > before + 20u);
+  }
   sampler.stop();
   assert(!sampler.running());
   assert(sampler.samples() > 50u);

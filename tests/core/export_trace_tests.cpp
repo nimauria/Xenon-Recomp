@@ -1,6 +1,8 @@
 #include <array>
 #include <cassert>
 #include <cstdint>
+#include <atomic>
+#include <latch>
 #include <thread>
 #include <vector>
 
@@ -79,11 +81,105 @@ void test_multithread_safety() {
   }
 }
 
+void test_call_timing_is_kept() {
+  ExportTrace trace(4);
+  trace.set_enabled(true);
+  const std::array<std::uint64_t, 8> args{};
+  trace.record(3, "xboxkrnl.exe", "NtReadFile", 1, 0x82000000u, 0, 0, args, 0, true, true,
+               true, 5'000'000u, 7'250'000u);
+  const auto records = trace.recent_global(4);
+  assert(records.size() == 1u);
+  assert(records[0].start_ns == 5'000'000u && records[0].duration_ns == 7'250'000u);
+}
+
+void test_order_across_threads_and_clear() {
+  ExportTrace trace(8);
+  trace.set_enabled(true);
+  // Each call comes from its own host thread, one after another: the merged
+  // trace keeps the order they happened in.
+  for (std::uint32_t ordinal = 1; ordinal <= 6; ++ordinal) {
+    std::thread([&trace, ordinal] { add(trace, ordinal % 2u, ordinal); }).join();
+  }
+  auto records = trace.recent_global(10);
+  assert(records.size() == 6u);
+  for (std::size_t i = 0; i < records.size(); ++i) {
+    assert(records[i].ordinal == i + 1u);
+    assert(records[i].sequence == i + 1u);
+  }
+  const auto odd = trace.recent_for_thread(1, 2);
+  assert(odd.size() == 2u && odd[0].ordinal == 3u && odd[1].ordinal == 5u);
+
+  trace.clear();
+  assert(trace.recent_global(10).empty());
+  add(trace, 9, 42);
+  records = trace.recent_global(10);
+  assert(records.size() == 1u && records[0].ordinal == 42u &&
+         records[0].sequence == 1u);
+}
+
+void test_reader_never_sees_a_torn_record() {
+  // Small lanes so writers lap their rings while the reader copies them.
+  ExportTrace trace(4);
+  trace.set_enabled(true);
+  std::atomic<bool> stop{false};
+  std::vector<std::thread> workers;
+  for (std::uint32_t thread = 1; thread <= 4; ++thread) {
+    workers.emplace_back([&trace, &stop, thread] {
+      for (std::uint32_t i = 0; !stop.load(std::memory_order_relaxed); ++i) {
+        add(trace, thread, i, std::uint64_t{thread} << 32 | i);
+      }
+    });
+  }
+  for (int pass = 0; pass < 2000; ++pass) {
+    const auto records = trace.recent_global(16);
+    assert(records.size() <= 4u);
+    for (std::size_t i = 0; i < records.size(); ++i) {
+      const auto& record = records[i];
+      assert(record.sequence == i + 1u);
+      assert(record.arguments[0] == record.ordinal);
+      assert(record.call_address == 0x82000000u + record.ordinal);
+      assert(record.result_r3 ==
+             (std::uint64_t{record.thread_id} << 32 | record.ordinal));
+      assert(record.name_view() == "MmTest");
+    }
+  }
+  stop.store(true);
+  for (auto& worker : workers) worker.join();
+}
+
+void test_threads_past_the_lane_limit_share_a_lane() {
+  constexpr std::size_t kThreads = ExportTrace::kMaxLanes + 8u;
+  ExportTrace trace(kThreads);
+  trace.set_enabled(true);
+  // Every thread is alive at once, so each one is a distinct writer.
+  std::latch all_started(static_cast<std::ptrdiff_t>(kThreads));
+  std::vector<std::thread> workers;
+  for (std::uint32_t thread = 0; thread < kThreads; ++thread) {
+    workers.emplace_back([&trace, &all_started, thread] {
+      all_started.arrive_and_wait();
+      add(trace, thread, thread);
+    });
+  }
+  for (auto& worker : workers) worker.join();
+
+  const auto records = trace.recent_global(kThreads * 2u);
+  assert(records.size() == kThreads);
+  std::vector<bool> seen(kThreads, false);
+  for (const auto& record : records) {
+    assert(record.ordinal < kThreads && !seen[record.ordinal]);
+    seen[record.ordinal] = true;
+  }
+}
+
 }  // namespace
 
 int main() {
   test_disabled_and_capture();
   test_bounded_order_and_thread_filter();
   test_multithread_safety();
+  test_call_timing_is_kept();
+  test_order_across_threads_and_clear();
+  test_reader_never_sees_a_torn_record();
+  test_threads_past_the_lane_limit_share_a_lane();
   return 0;
 }

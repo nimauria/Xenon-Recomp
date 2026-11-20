@@ -169,11 +169,12 @@ void XenonSession::report_stop_diagnostics() {
     const auto recent = export_trace_.recent_global(16u);
     std::scoped_lock console_log_lock(console_log_mutex());
     {
-      std::scoped_lock lock(in_flight_exports_mutex_);
+      const auto in_flight = in_flight_exports_.snapshot();
+      std::scoped_lock lock(guest_thread_states_mutex_);
       const auto now = std::chrono::steady_clock::now();
       std::cout << "[XenonSession] Threads currently blocked inside a kernel call: "
-                << in_flight_exports_.size() << std::endl;
-      for (const auto& [thread_id, call] : in_flight_exports_) {
+                << in_flight.size() << std::endl;
+      for (const auto& [thread_id, call] : in_flight) {
         const auto waited_ms =
             std::chrono::duration_cast<std::chrono::milliseconds>(now - call.since).count();
         std::cout << "[XenonSession]   t" << thread_id;
@@ -424,7 +425,7 @@ void XenonSession::report_stop_diagnostics() {
       std::cout << "[XenonSession] Guest threads running outside a kernel call (cia is the last "
                    "recorded control-flow point):" << std::endl;
       for (const auto& [thread_id, guest_state] : guest_thread_states_) {
-        if (in_flight_exports_.contains(thread_id)) continue;
+        if (in_flight.contains(thread_id)) continue;
         std::cout << "[XenonSession]   t" << thread_id;
         if (const auto* kernel_thread =
                 kernel_process_ ? kernel_process_->thread_manager().get_thread_ptr(thread_id)

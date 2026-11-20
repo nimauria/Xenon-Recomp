@@ -116,10 +116,11 @@ void XenonSession::run_audio_stall_probe() {
       return std::string(buf);
     }() + " running " + std::to_string(stalled / 1'000'000) + " ms\n";
     {
-      std::scoped_lock lock(in_flight_exports_mutex_);
+      const auto in_flight = in_flight_exports_.snapshot();
+      std::scoped_lock lock(guest_thread_states_mutex_);
       std::set<std::uint32_t> threads;
       for (const auto& [id, state] : guest_thread_states_) threads.insert(id);
-      for (const auto& [id, call] : in_flight_exports_) threads.insert(id);
+      for (const auto& [id, call] : in_flight) threads.insert(id);
       for (const auto id : threads) {
         char line[512];
         std::string name;
@@ -127,7 +128,7 @@ void XenonSession::run_audio_stall_probe() {
           if (const auto* thread = kernel_process_->thread_manager().get_thread_ptr(id))
             name = thread->name();
         }
-        if (const auto call = in_flight_exports_.find(id); call != in_flight_exports_.end()) {
+        if (const auto call = in_flight.find(id); call != in_flight.end()) {
           const auto& c = call->second;
           std::snprintf(line, sizeof(line),
                         "  t%u %s: in %s(%llX, %llX, %llX, %llX) for %lld ms, lr=%08llX\n", id,

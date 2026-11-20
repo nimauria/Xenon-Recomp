@@ -33,6 +33,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
@@ -87,8 +88,8 @@ class HostSampler {
   [[nodiscard]] bool running() const noexcept;
   [[nodiscard]] std::uint64_t samples() const noexcept;
 
-  // Symbolised per-thread profiles of what was sampled, busiest first. Valid
-  // after stop().
+  // Symbolised per-thread profiles of what was sampled, busiest first: all of
+  // it after stop(), or everything so far while sampling continues.
   [[nodiscard]] std::vector<HostThreadProfile> profiles() const;
   // The text report of profiles().
   [[nodiscard]] std::string report() const;
@@ -103,6 +104,13 @@ class HostSampler {
   std::unique_ptr<State> state_;
 };
 
+// Names code the platform's symbols cannot: generated game code, whose
+// module carries no debug symbols. Consulted before them by symbolize(); an
+// empty result falls through. Replaced by each call; an empty function
+// clears it.
+using CodeSymbolizer = std::function<std::optional<std::string>(std::uintptr_t)>;
+void set_code_symbolizer(CodeSymbolizer symbolizer);
+
 // XENON_HOST_PROFILE: unset/"0" off; "1" samples every millisecond; another
 // number is the interval in microseconds (at least 100).
 [[nodiscard]] std::optional<HostSamplerOptions> host_sampler_options_from_environment();
@@ -112,6 +120,10 @@ class HostSampler {
 // probe directory) when the session stops. Both are no-ops otherwise.
 void start_host_profile_from_environment();
 void stop_host_profile_and_report();
+// Writes host_profile.log as it stands while sampling continues, so a run
+// that crashes or is killed keeps its profile (the guest profiler calls this
+// every 30 s). A no-op when the sampler is not running.
+void write_host_profile_snapshot();
 
 // Names the calling thread for host tools: profiles (host_profile.log),
 // debuggers and crash dumps (SetThreadDescription; pthread_setname_np, which

@@ -1,3 +1,4 @@
+#include <cstdio>
 #include <iostream>
 #include <mutex>
 #include <sstream>
@@ -24,7 +25,7 @@ XenonSession::GuestDispatchOutcome XenonSession::dispatch_guest_thread(
   const auto tracked_thread_id = thread ? thread->thread_id() : 0u;
   const cpu::CpuState* outer_state = nullptr;
   if (tracked_thread_id != 0u) {
-    std::scoped_lock lock(in_flight_exports_mutex_);
+    std::scoped_lock lock(guest_thread_states_mutex_);
     auto& slot = guest_thread_states_[tracked_thread_id];
     outer_state = slot;
     slot = &state;
@@ -35,7 +36,7 @@ XenonSession::GuestDispatchOutcome XenonSession::dispatch_guest_thread(
     const cpu::CpuState* outer_state;
     ~StateRegistration() {
       if (thread_id == 0u) return;
-      std::scoped_lock lock(session->in_flight_exports_mutex_);
+      std::scoped_lock lock(session->guest_thread_states_mutex_);
       if (outer_state) {
         session->guest_thread_states_[thread_id] = outer_state;
       } else {
@@ -355,6 +356,12 @@ bool XenonSession::run_guest_callback(cpu::CpuState& state, cpu::GuestAddress en
   // Callbacks fire tens of times a second; per-dispatch tracing would drown the log.
   const auto outcome = dispatch_guest_thread(state, entry, thread, /*trace_dispatches=*/false);
   const auto duration_ns = watch.end(CallbackWatch::now_ns());
+  {
+    char detail[32];
+    std::snprintf(detail, sizeof(detail), "entry %08X", static_cast<unsigned>(entry));
+    note_timed_event("callback", kind, static_cast<std::uint64_t>(duration_ns),
+                     thread ? thread->thread_id() : 0u, detail);
+  }
   record(logging::events::EventKind::CallbackEnd,
          static_cast<std::uint32_t>(duration_ns / 1'000'000));
   if (outcome.crashed) {

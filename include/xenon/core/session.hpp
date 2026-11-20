@@ -23,8 +23,11 @@
 #include "xenon/core/capability_report.hpp"
 #include "xenon/core/export_registry.hpp"
 #include "xenon/core/export_trace.hpp"
+#include "xenon/core/frame_anomaly.hpp"
 #include "xenon/core/guest_memory_watch.hpp"
 #include "xenon/core/guest_profiler.hpp"
+#include "xenon/core/hitch_monitor.hpp"
+#include "xenon/core/in_flight_calls.hpp"
 #include "xenon/core/guest_thread_context.hpp"
 #include "xenon/core/wake_signal.hpp"
 #include "xenon/cpu/dynamic_fallback.hpp"
@@ -635,6 +638,10 @@ class XenonSession final : public cpu::RuntimeServices {
   // XENON_FRAME_DUMP: writes sampled presented frames as BMPs (gpu_pump.cpp).
   void dump_presented_frame(const gpu::PresentationFrame& frame);
   std::uint64_t dumped_frame_candidates_{};  // GPU pump thread only.
+  // XENON_FRAME_ANOMALY: the previous frame's colours and how many frames
+  // after an anomaly are still saved (GPU pump thread only).
+  FrameColorStats last_frame_stats_{};
+  int anomaly_followups_{};
   // Entry point for gpu_vsync_thread_: at 60 Hz, asks the worker to present
   // and delivers the vsync interrupt, whatever the worker is doing - as on
   // hardware, vertical blank does not wait for the GPU.
@@ -666,6 +673,22 @@ class XenonSession final : public cpu::RuntimeServices {
   // per-second profile when the session stops (diagnostics/guest_profile.cpp).
   void start_guest_profile();
   void stop_guest_profile() noexcept;
+  // Performance watch (diagnostics/perf_watch.cpp), on unless
+  // XENON_HITCH_LOG=0: samples where every guest thread is every 2 ms, and
+  // writes hitches.log (each presented frame well over the recent median,
+  // with what the GPU, every thread and every long kernel call did in it) and
+  // slow_events.log (any kernel call, callback or present over 5 ms that is
+  // not a wait).
+  void start_perf_watch();
+  void stop_perf_watch() noexcept;
+  // From the presenting thread after each present.
+  void note_presented_frame_for_hitches(std::chrono::steady_clock::time_point when);
+  // A kernel call, callback or present that took `duration_ns`; slow ones are
+  // logged with `detail` (thread, arguments).
+  void note_timed_event(const char* category, std::string_view name, std::uint64_t duration_ns,
+                        std::uint32_t thread_id, const std::string& detail);
+  void write_hitch_report(std::uint64_t at_ns, const HitchMonitor::FrameVerdict& verdict,
+                          const std::string& frame_line);
   // Text describing which guest threads were executing (outside a kernel call)
   // when the poll thread noticed a change; racy diagnostic read.
   [[nodiscard]] std::string describe_running_guest_threads() const;
@@ -690,6 +713,18 @@ class XenonSession final : public cpu::RuntimeServices {
   std::thread memory_watch_thread_{};
   std::atomic<bool> memory_watch_poll_running_{false};
   GuestProfiler guest_profiler_{};
+  HitchMonitor hitch_monitor_{};
+  std::thread perf_watch_thread_{};
+  std::atomic<bool> perf_watch_running_{false};
+  std::atomic<bool> perf_watch_enabled_{false};
+  std::chrono::steady_clock::time_point perf_watch_start_{};
+  struct PendingHitch {
+    std::uint64_t at_ns{};
+    HitchMonitor::FrameVerdict verdict{};
+    std::string frame_line;
+  };
+  std::mutex pending_hitches_mutex_{};
+  std::vector<PendingHitch> pending_hitches_{};
   std::thread guest_profile_thread_{};
   std::atomic<bool> guest_profile_running_{false};
   std::string guest_profile_path_{};
@@ -697,21 +732,13 @@ class XenonSession final : public cpu::RuntimeServices {
   kernel::TimeStampBundleClock time_stamp_clock_{};
   // Deep enough that a quiet thread's history survives a chatty polling thread.
   ExportTrace export_trace_{8192};
-  // Kernel calls a guest thread has entered but not yet returned from. The
-  // completed-call trace above cannot show a thread that is blocked forever in
-  // a wait, which is exactly what a stalled title looks like.
-  struct InFlightExport {
-    std::uint32_t ordinal{};
-    // Registry descriptors are immutable once the session is initialized, so the
-    // pointer stays valid for as long as the call is in flight (null = unknown).
-    const ExportDescriptor* descriptor{};
-    std::uint64_t lr{};
-    std::array<std::uint64_t, 4> arguments{};
-    std::chrono::steady_clock::time_point since{};
-  };
-  mutable std::mutex in_flight_exports_mutex_{};
-  std::map<std::uint32_t, InFlightExport> in_flight_exports_{};
-  // Live register files of executing guest threads (guarded by the same mutex).
+  // Kernel calls a guest thread has entered but not yet returned from (no lock
+  // on the call path; see InFlightCalls).
+  using InFlightExport = InFlightCalls::Call;
+  InFlightCalls in_flight_exports_{};
+  // Live register files of executing guest threads, registered once per
+  // dispatch (not per kernel call).
+  mutable std::mutex guest_thread_states_mutex_{};
   std::map<std::uint32_t, const cpu::CpuState*> guest_thread_states_{};
   mutable std::mutex status_mutex_{};
   // Runtime feedback can be emitted from the main guest thread, audio guest

@@ -1,15 +1,20 @@
+#include <algorithm>
 #include <chrono>
+#include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <string_view>
 #include <unordered_map>
 
+#include "xenon/audio/system.hpp"
 #include "xenon/core/session.hpp"
 #include "xenon/gpu/perf_stats.hpp"
+#include "xenon/core/guest_code_map.hpp"
 #include "xenon/kernel/wait_profile.hpp"
 #include "xenon/logging/host_sampler.hpp"
 #include "xenon/logging/probe_log.hpp"
@@ -18,9 +23,40 @@ namespace xenon::core {
 
 void XenonSession::start_guest_profile() {
   stop_guest_profile();
+  start_perf_watch();
   // XENON_HOST_PROFILE: the host threads' own sampling profile, beside the
   // guest one (host_profile.log in the probe directory at stop).
   logging::start_host_profile_from_environment();
+  // Generated game code has no debug symbols: name it by guest function from
+  // the module's own registry, so the host profile says which guest routine
+  // the time went to (and which runtime helper it called).
+  if (logging::host_sampler_options_from_environment() && compiled_registry_binder_ &&
+      memory_ && loaded_xex_) {
+    try {
+      cpu::CpuState probe_state{};
+      cpu::ExecutionContext probe(probe_state, *memory_, *this);
+      compiled_registry_binder_(probe);
+      std::uint32_t begin = ~0u;
+      std::uint32_t end = 0u;
+      for (const auto& range : loaded_xex_->executable_ranges) {
+        begin = (std::min)(begin, static_cast<std::uint32_t>(range.begin));
+        end = (std::max)(end, static_cast<std::uint32_t>(range.end));
+      }
+      if (probe.compiled_lookup && begin < end) {
+        auto map = std::make_shared<const GuestCodeMap>(GuestCodeMap::build(
+            [&probe](std::uint32_t guest) {
+              return reinterpret_cast<std::uintptr_t>(probe.compiled_lookup(
+                  probe.compiled_registry, probe, guest, cpu::CompiledLookupKind::Call));
+            },
+            begin, end));
+        if (!map->empty())
+          logging::set_code_symbolizer(
+              [map](std::uintptr_t address) { return map->describe(address); });
+      }
+    } catch (...) {
+      // Unnamed game code is still profiled.
+    }
+  }
   // Wait attribution (XENON_WAIT_PROFILE=1, or with the host profile): every
   // blocking guest wait by thread, object and releasing signal
   // (wait_profile.log in the probe directory at stop).
@@ -47,7 +83,45 @@ void XenonSession::start_guest_profile() {
     const auto start = std::chrono::steady_clock::now();
     auto next_snapshot = start + std::chrono::seconds(30);
     std::unordered_map<std::uint32_t, std::string> names;
+    // The audio render path's rates every 5 s, in the session log: the game's
+    // mixer must deliver 187.5 frames/s (48 kHz / 256) for the device not to
+    // run dry. Counters are cumulative; the line shows the window's rates.
+    struct AudioWindow {
+      std::uint64_t issued{}, submitted{}, consumed{};
+      std::uint32_t underruns{};
+    } audio_last{};
+    auto audio_window_start = start;
+    auto next_audio_line = start + std::chrono::seconds(5);
     while (guest_profile_running_.load(std::memory_order_relaxed)) {
+      if (const auto now = std::chrono::steady_clock::now(); audio_ && now >= next_audio_line) {
+        AudioWindow total{};
+        std::size_t queued = 0, credits = 0;
+        for (const auto& client : audio_->render_client_stats()) {
+          total.issued += client.callbacks_issued;
+          total.submitted += client.frames_submitted;
+          total.consumed += client.frames_consumed;
+          queued += client.queued_frames;
+          credits += client.callback_credits;
+        }
+        total.underruns = audio_->underrun_count();
+        const double seconds =
+            std::chrono::duration<double>(now - audio_window_start).count();
+        if (seconds > 0.0) {
+          char line[256];
+          std::snprintf(line, sizeof(line),
+                        "[audio-rate] %.1fs: callbacks %.1f/s, frames submitted %.1f/s, consumed "
+                        "%.1f/s (needed 187.5/s), underruns %u, queued %zu, credits %zu",
+                        seconds, double(total.issued - audio_last.issued) / seconds,
+                        double(total.submitted - audio_last.submitted) / seconds,
+                        double(total.consumed - audio_last.consumed) / seconds,
+                        total.underruns - audio_last.underruns, queued, credits);
+          std::scoped_lock console_log_lock(console_log_mutex());
+          std::cerr << line << std::endl;
+        }
+        audio_last = total;
+        audio_window_start = now;
+        next_audio_line = now + std::chrono::seconds(5);
+      }
       // Every 30 s the profiles so far are written as they are at stop, so a
       // run that crashes keeps them (both AC6 crash runs lost theirs). Only
       // this thread touches the guest profiler while it runs; the wait
@@ -71,6 +145,7 @@ void XenonSession::start_guest_profile() {
           }
         };
         replace(guest_profile_path_, [this](std::ostream& out) { guest_profiler_.write(out); });
+        logging::write_host_profile_snapshot();
         if (kernel::wait_profile_enabled()) {
           const auto directory = logging::probe_log_directory();
           replace(directory.empty() ? std::filesystem::path("wait_profile.log")
@@ -85,7 +160,8 @@ void XenonSession::start_guest_profile() {
       {
         // Racy reads of live register files, as in the stop report: a
         // diagnostic sample, never fed back into execution.
-        std::scoped_lock lock(in_flight_exports_mutex_);
+        const auto in_flight = in_flight_exports_.snapshot();
+        std::scoped_lock lock(guest_thread_states_mutex_);
         for (const auto& [thread_id, guest_state] : guest_thread_states_) {
           auto [name, inserted] = names.try_emplace(thread_id);
           if (inserted && kernel_process_) {
@@ -93,7 +169,7 @@ void XenonSession::start_guest_profile() {
               name->second = thread->name();
           }
           std::string blocked;
-          if (const auto it = in_flight_exports_.find(thread_id); it != in_flight_exports_.end()) {
+          if (const auto it = in_flight.find(thread_id); it != in_flight.end()) {
             blocked = it->second.descriptor
                           ? it->second.descriptor->library + '!' + it->second.descriptor->name
                           : "export #" + std::to_string(it->second.ordinal);
@@ -108,7 +184,9 @@ void XenonSession::start_guest_profile() {
 }
 
 void XenonSession::stop_guest_profile() noexcept {
+  stop_perf_watch();
   logging::stop_host_profile_and_report();
+  logging::set_code_symbolizer({});
   if (kernel::wait_profile_enabled()) {
     kernel::set_wait_profile_enabled(false);
     try {

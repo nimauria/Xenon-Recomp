@@ -34,10 +34,11 @@ std::string XenonSession::describe_running_guest_threads() const {
   std::ostringstream out;
   out << "running=[";
   {
-    std::scoped_lock lock(in_flight_exports_mutex_);
+    const auto in_flight = in_flight_exports_.snapshot();
+    std::scoped_lock lock(guest_thread_states_mutex_);
     bool first = true;
     for (const auto& [thread_id, guest_state] : guest_thread_states_) {
-      if (in_flight_exports_.contains(thread_id)) continue;
+      if (in_flight.contains(thread_id)) continue;
       if (!first) out << ' ';
       first = false;
       out << 't' << thread_id << "@0x" << std::hex << std::uppercase << guest_state->cia

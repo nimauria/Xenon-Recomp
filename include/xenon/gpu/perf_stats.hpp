@@ -196,6 +196,9 @@ void note_draw_run(std::uint64_t draws) noexcept;
 
 // A frame reached the screen (called by the presenting thread only).
 void note_presented_frame(std::chrono::steady_clock::time_point when);
+// The frame timeline line of the most recently presented frame (kept whether
+// or not frame_timeline.log is being written); empty before the first.
+[[nodiscard]] std::string last_frame_timeline_line();
 
 // Formats the line for the window since the last flush and resets it;
 // exposed for tests. `seconds` is the window's length.

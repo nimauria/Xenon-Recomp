@@ -135,6 +135,14 @@ if(XENON_BUILD_TESTS)
   # source ownership audit checks this contract for every test main().
   xenon_add_standalone_test(xenon_export_trace_tests
     export_trace_tests.cpp xenon_core)
+  xenon_add_standalone_test(xenon_in_flight_calls_tests
+    in_flight_calls_tests.cpp xenon_core)
+  xenon_add_standalone_test(xenon_guest_code_map_tests
+    guest_code_map_tests.cpp xenon_core)
+  xenon_add_standalone_test(xenon_hitch_monitor_tests
+    hitch_monitor_tests.cpp xenon_core)
+  xenon_add_standalone_test(xenon_frame_anomaly_tests
+    frame_anomaly_tests.cpp xenon_core)
   xenon_add_standalone_test(xenon_guest_memory_watch_tests
     guest_memory_watch_tests.cpp xenon_core)
   xenon_add_standalone_test(xenon_guest_profiler_tests

@@ -7,10 +7,13 @@
 #include <filesystem>
 #include <iostream>
 #include <mutex>
+#include <string>
+#include <string_view>
 #include <thread>
 #include <vector>
 
 #include "core/session/session_internal.hpp"
+#include "xenon/core/frame_anomaly.hpp"
 #include "xenon/core/frame_dump.hpp"
 #include "xenon/gpu/display_vblank.hpp"
 #include "xenon/gpu/perf_stats.hpp"
@@ -165,6 +168,57 @@ void XenonSession::dump_presented_frame(const gpu::PresentationFrame& frame) {
     return parsed ? parsed : 10ull;
   }();
   const auto index = dumped_frame_candidates_++;
+  // XENON_FRAME_ANOMALY=1 (with XENON_FRAME_DUMP): every presented frame is
+  // also read back small and checked against the one before it; a frame that
+  // turns black, white or green, or jumps in brightness, is saved full size
+  // as anomaly_<ms>_<index>_<kind>.bmp with the two frames after it, and
+  // listed in anomalies.log with its GPU timeline line. One readback per
+  // frame: for diagnostic runs, not play.
+  static const bool anomaly_watch = [] {
+    const char* value = std::getenv("XENON_FRAME_ANOMALY");
+    return value && *value && std::string_view(value) != "0";
+  }();
+  if (anomaly_watch) {
+    gpu::PreparedPresentationFrame small{};
+    if (gpu_->capture_scanout(frame, 64u, 36u, small) && small.valid) {
+      const auto stats = frame_color_stats(small.rgba8, small.width, small.height,
+                                           small.row_pitch ? small.row_pitch : small.width * 4u);
+      const auto kind = classify_frame_change(last_frame_stats_, stats);
+      const auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                              std::chrono::steady_clock::now().time_since_epoch())
+                              .count();
+      const auto save = [&](std::string_view label) {
+        gpu::PreparedPresentationFrame image{};
+        if (!gpu_->capture_scanout(frame, 640u, 360u, image)) return;
+        std::error_code error;
+        std::filesystem::create_directories(directory, error);
+        static_cast<void>(write_frame_bmp(
+            directory / ("anomaly_" + std::to_string(now_ms) + "_" + std::to_string(index) + "_" +
+                         std::string(label) + ".bmp"),
+            image));
+      };
+      const auto log_line = [&](std::string_view what) {
+        logging::append_run_log(
+            "anomalies.log",
+            "%lld ms frame %llu %s: luminance %.1f (was %.1f) rgb %.0f/%.0f/%.0f dark %.2f bright "
+            "%.2f green %.2f | %s",
+            static_cast<long long>(now_ms), static_cast<unsigned long long>(index),
+            std::string(what).c_str(), stats.luminance, last_frame_stats_.luminance, stats.mean_r,
+            stats.mean_g, stats.mean_b, stats.dark_fraction, stats.bright_fraction,
+            stats.green_fraction, gpu::perf::last_frame_timeline_line().c_str());
+      };
+      if (!kind.empty()) {
+        log_line(kind);
+        save(kind == "brightness jump" ? std::string_view("jump") : kind);
+        anomaly_followups_ = 2;
+      } else if (anomaly_followups_ > 0) {
+        --anomaly_followups_;
+        log_line("  after");
+        save("after");
+      }
+      last_frame_stats_ = stats;
+    }
+  }
   if (index % every != 0u) return;
   // With probe logs on, the guest bytes behind the dumped frame are hashed
   // the same way full-frame resolves are (frontbuffer_diag.log), so a stale
@@ -528,9 +582,16 @@ void XenonSession::present_front_buffer(
                                                     .count()));
       if (status == gpu::PresentStatus::Success || status == gpu::PresentStatus::Suboptimal) {
         gpu::perf::note_presented_frame(_present_end);
+        note_presented_frame_for_hitches(_present_end);
         last_presented_generation = front_buffer.generation;
         dump_presented_frame(frame);
       }
+      note_timed_event("present", "present front buffer",
+                       static_cast<std::uint64_t>(
+                           std::chrono::duration_cast<std::chrono::nanoseconds>(
+                               _present_end - _present_start)
+                               .count()),
+                       0u, "");
       gpu_presents_.fetch_add(1u, std::memory_order_relaxed);
       const auto status_index = static_cast<std::size_t>(status);
       if (status_index < gpu_present_results_.size())

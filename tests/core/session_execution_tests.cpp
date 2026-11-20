@@ -84,18 +84,20 @@ struct SessionExecutionTestAccess {
                                std::uint32_t count) {
     session.export_trace_.set_enabled(true);
     {
-      std::scoped_lock lock(session.in_flight_exports_mutex_);
+      std::scoped_lock lock(session.guest_thread_states_mutex_);
       session.guest_thread_states_[running_id] = &running;
+    }
+    {
       XenonSession::InFlightExport call{};
+      call.thread_id = waiting_id;
       call.descriptor = &wait;
       call.arguments = {count, objects, 1u, 3u};
       call.since = std::chrono::steady_clock::now();
-      session.in_flight_exports_[waiting_id] = call;
+      const xenon::core::InFlightCalls::Scope in_flight(session.in_flight_exports_, call);
+      session.report_stop_diagnostics();
     }
-    session.report_stop_diagnostics();
-    std::scoped_lock lock(session.in_flight_exports_mutex_);
+    std::scoped_lock lock(session.guest_thread_states_mutex_);
     session.guest_thread_states_.erase(running_id);
-    session.in_flight_exports_.erase(waiting_id);
   }
 
   static xenon::memory::AddressSpace& memory(XenonSession& session) { return *session.memory_; }

@@ -409,7 +409,22 @@ bool HostSampler::running() const noexcept { return state_->running.load(); }
 
 std::uint64_t HostSampler::samples() const noexcept { return state_->total.load(); }
 
+namespace {
+std::mutex g_code_symbolizer_mutex;
+CodeSymbolizer g_code_symbolizer;
+}  // namespace
+
+void set_code_symbolizer(CodeSymbolizer symbolizer) {
+  std::scoped_lock lock(g_code_symbolizer_mutex);
+  g_code_symbolizer = std::move(symbolizer);
+}
+
 std::string HostSampler::symbolize(std::uintptr_t address) {
+  {
+    std::scoped_lock lock(g_code_symbolizer_mutex);
+    if (g_code_symbolizer)
+      if (auto name = g_code_symbolizer(address)) return std::move(*name);
+  }
   char text[512];
 #if defined(XENON_HOST_SAMPLER_WINDOWS)
   static std::mutex dbghelp_mutex;  // DbgHelp is single-threaded
@@ -625,6 +640,34 @@ void start_host_profile_from_environment() {
   if (!g_host_profile->start(*options)) g_host_profile.reset();
 }
 
+namespace {
+// host_profile.log in the probe directory, replaced whole (written beside it,
+// then renamed) so a reader never sees half a report.
+void write_host_profile(const HostSampler& sampler) {
+  try {
+    const auto directory = probe_log_directory();
+    const auto path = directory.empty() ? std::filesystem::path("host_profile.log")
+                                        : std::filesystem::path(directory) / "host_profile.log";
+    auto partial = path;
+    partial += ".partial";
+    {
+      std::ofstream out(partial, std::ios::binary | std::ios::trunc);
+      out << sampler.report();
+      if (!out) return;
+    }
+    std::error_code ec;
+    std::filesystem::rename(partial, path, ec);
+  } catch (...) {
+    // A diagnostic must not take the session down.
+  }
+}
+}  // namespace
+
+void write_host_profile_snapshot() {
+  std::scoped_lock lock(g_host_profile_mutex);
+  if (g_host_profile && g_host_profile->running()) write_host_profile(*g_host_profile);
+}
+
 void stop_host_profile_and_report() {
   std::unique_ptr<HostSampler> sampler;
   {
@@ -633,15 +676,7 @@ void stop_host_profile_and_report() {
   }
   if (!sampler) return;
   sampler->stop();
-  try {
-    const auto directory = probe_log_directory();
-    const auto path = directory.empty() ? std::filesystem::path("host_profile.log")
-                                        : std::filesystem::path(directory) / "host_profile.log";
-    std::ofstream out(path, std::ios::binary | std::ios::trunc);
-    out << sampler->report();
-  } catch (...) {
-    // A diagnostic must not take the session down while it stops.
-  }
+  write_host_profile(*sampler);
 }
 
 }  // namespace xenon::logging

@@ -33,6 +33,9 @@ Clock::time_point g_last_frame{};
 
 Clock::time_point g_window_start{};
 
+std::mutex g_last_line_mutex;
+std::string g_last_line;
+
 std::uint64_t take(Counter counter) noexcept {
   return g_counters[static_cast<std::size_t>(counter)].exchange(0u, std::memory_order_relaxed);
 }
@@ -131,10 +134,17 @@ void note_presented_frame(Clock::time_point when) {
       g_frame_ms.push_back(std::chrono::duration<double, std::milli>(when - g_last_frame).count());
     g_last_frame = when;
   }
-  if (frame_timeline_enabled()) {
-    const auto line = take_frame_timeline_line(when);
-    logging::append_run_log("frame_timeline.log", "%s", line.c_str());
-  }
+  // Every frame's line is kept (a hitch report quotes the slow frame's);
+  // frame_timeline.log gets them all only when the timeline is on.
+  auto line = take_frame_timeline_line(when);
+  if (frame_timeline_enabled()) logging::append_run_log("frame_timeline.log", "%s", line.c_str());
+  std::scoped_lock lock(g_last_line_mutex);
+  g_last_line = std::move(line);
+}
+
+std::string last_frame_timeline_line() {
+  std::scoped_lock lock(g_last_line_mutex);
+  return g_last_line;
 }
 
 std::string take_line(double seconds) {

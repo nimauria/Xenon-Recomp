@@ -1,6 +1,8 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cstdio>
+#include <optional>
 #include <functional>
 #include <iostream>
 #include <map>
@@ -273,12 +275,19 @@ bool XenonSession::dispatch_export(std::string_view module, std::uint32_t ordina
   const auto call_address = context.call_address;
   const auto call_lr = state.lr;
   const auto call_ctr = state.ctr;
-  const bool track_in_flight = export_trace_.enabled() && calling_thread_id != 0u;
+  const bool timed = export_trace_.enabled();
+  const bool track_in_flight = timed && calling_thread_id != 0u;
+  // One clock read at each end serves the in-flight table, the trace and
+  // the slow-call log.
+  const auto call_start =
+      timed ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+  // Left when the call returns, or unwinds (a thread terminating inside it).
+  std::optional<InFlightCalls::Scope> in_flight;
   if (track_in_flight) {
-    std::scoped_lock lock(in_flight_exports_mutex_);
-    in_flight_exports_[calling_thread_id] = InFlightExport{
-        ordinal, descriptor, call_lr, {arguments[0], arguments[1], arguments[2], arguments[3]},
-        std::chrono::steady_clock::now()};
+    in_flight.emplace(in_flight_exports_,
+                      InFlightExport{calling_thread_id, ordinal, descriptor, call_lr,
+                                     {arguments[0], arguments[1], arguments[2], arguments[3]},
+                                     call_start});
   }
   const bool watch_active = memory_watch_.active();
   const auto watch_observer = [&](WatchPhase phase) {
@@ -341,14 +350,41 @@ bool XenonSession::dispatch_export(std::string_view module, std::uint32_t ordina
                              state.gpr[3], activity_start,
                              logging::activity_now_ns() - activity_start);
   if (watch_active) sample_memory_watch(watch_observer(WatchPhase::AfterKernelCall));
-  if (track_in_flight) {
-    std::scoped_lock lock(in_flight_exports_mutex_);
-    in_flight_exports_.erase(calling_thread_id);
+  in_flight.reset();
+  std::uint64_t start_ns = 0;
+  std::uint64_t duration_ns = 0;
+  if (timed) {
+    const auto call_end = std::chrono::steady_clock::now();
+    start_ns = static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(call_start.time_since_epoch())
+            .count());
+    duration_ns = static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(call_end - call_start).count());
+    // A call over 5 ms that is not a wait (a wait's length is the title's
+    // choice) held its thread up: the slow-event log names it. A contended
+    // critical section counts - that is a lock wait the title did not plan.
+    if (duration_ns >= 5'000'000u) {
+      const std::string_view name =
+          descriptor ? std::string_view(descriptor->name) : std::string_view(module);
+      const bool waits = name.find("Wait") != std::string_view::npos ||
+                         name.find("Delay") != std::string_view::npos ||
+                         name.find("Sleep") != std::string_view::npos;
+      if (!waits) {
+        char detail[128];
+        std::snprintf(detail, sizeof(detail), "lr=%08llX r3=%llX r4=%llX r5=%llX",
+                      static_cast<unsigned long long>(call_lr),
+                      static_cast<unsigned long long>(arguments[0]),
+                      static_cast<unsigned long long>(arguments[1]),
+                      static_cast<unsigned long long>(arguments[2]));
+        note_timed_event("kernel", name, duration_ns, calling_thread_id, detail);
+      }
+    }
   }
   export_trace_.record(calling_thread_id, module,
                        descriptor ? std::string_view(descriptor->name) : std::string_view{},
                        ordinal, call_address, call_lr, call_ctr, arguments,
-                       state.gpr[3], descriptor != nullptr, result.handled, result.success);
+                       state.gpr[3], descriptor != nullptr, result.handled, result.success,
+                       start_ns, duration_ns);
 
   if (logging::probe_logs_enabled()) {
     static std::mutex _seen_exports_mutex;
