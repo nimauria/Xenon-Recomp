@@ -24,6 +24,19 @@
 
 namespace xenon::cpu::aot {
 
+// The guest lowered its hardware thread's priority inside a spin-wait
+// (`or 1,1,1` / `or 6,6,6` / `or 31,31,31`): tell the host core the same, so
+// its sibling thread gets the pipeline while this one polls.
+inline void spin_hint() noexcept {
+#if defined(_M_X64) || defined(__x86_64__)
+  _mm_pause();
+#elif defined(_M_ARM64)
+  __yield();
+#elif defined(__aarch64__)
+  __asm__ __volatile__("yield");
+#endif
+}
+
 template <VectorSemantic S>
 [[nodiscard]] inline Vector128 vector_logic(const Vector128& a,
                                             const Vector128& b) noexcept {

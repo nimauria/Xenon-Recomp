@@ -94,6 +94,15 @@ enum class Op : std::uint16_t {
   HostHook,
 };
 
+// Op::Barrier's imm0: which barrier. 1-4 are the PowerPC sync forms; a spin
+// hint is the thread-priority form of `or rN,rN,rN`, a pause for the host
+// core with no memory-ordering effect.
+inline constexpr std::uint64_t kBarrierSync = 1u;
+inline constexpr std::uint64_t kBarrierLightweightSync = 2u;
+inline constexpr std::uint64_t kBarrierEieio = 3u;
+inline constexpr std::uint64_t kBarrierInstructionSync = 4u;
+inline constexpr std::uint64_t kBarrierSpinHint = 5u;
+
 // All current Xenon IR operations use at most four value operands. Keeping
 // operands inline removes the per-node heap allocation from std::vector while
 // retaining range-for/size/index access used by the verifier and optimizer.

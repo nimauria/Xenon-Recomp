@@ -283,6 +283,14 @@ bool Lifter::lift_integer(const DecodedInstruction& i, ir::Builder& b) const {
     }
     b.write_gpr(i.ra(), r);
     if (i.rc()) emit_cr0(b, r);
+    // `or rN,rN,rN` with N = 1, 6 or 31 lowers the hardware thread's
+    // priority (low, medium-low, very low): Xenon spin-wait loops use it to
+    // give their core's other thread the pipeline. Its host equivalent is a
+    // spin-wait hint; without one a guest spin loop runs flat out on its core.
+    if (m == "orx" && !i.rc() && i.rs() == i.ra() && i.rs() == i.rb() &&
+        (i.rs() == 1u || i.rs() == 6u || i.rs() == 31u)) {
+      b.emit(Op::Barrier, Type::Void, {}, ir::kBarrierSpinHint, 0u, &i);
+    }
     return true;
   }
 

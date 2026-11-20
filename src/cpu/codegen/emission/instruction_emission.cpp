@@ -191,6 +191,7 @@ std::string emit_one(const Instruction&i, const std::vector<Type>& value_types){
     case Op::StringLoad:o<<"  aot::string_load(state,memory_access,static_cast<GuestAddress>("<<arg(i,0)<<"),static_cast<std::uint32_t>("<<arg(i,1)<<"),"<<i.imm0<<");\n";break;
     case Op::StringStore:o<<"  aot::string_store(state,memory_access,static_cast<GuestAddress>("<<arg(i,0)<<"),static_cast<std::uint32_t>("<<arg(i,1)<<"),"<<i.imm0<<");\n";break;
     case Op::Barrier:{
+      if(i.imm0==ir::kBarrierSpinHint){o<<"  aot::spin_hint();\n";break;}
       const char* k=i.imm0==1?"Sync":i.imm0==2?"LightweightSync":i.imm0==3?"Eieio":"InstructionSync";
       o<<"  memory_access.barrier(BarrierKind::"<<k<<");\n";
       if(i.imm0==4){

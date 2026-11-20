@@ -216,6 +216,8 @@ int main() {
     add_test(NAME xenon_dynamic_fallback_semantic_tests COMMAND xenon_dynamic_fallback_semantic_tests)
   endif()
 
+  xenon_add_standalone_test(xenon_cpu_spin_hint_tests
+    codegen/spin_hint.cpp xenon_cpu)
   xenon_add_standalone_test(xenon_cpu_v2_memory_integration_tests
     codegen/cpu_v2_memory_integration.cpp xenon_cpu)
   foreach(test_name IN ITEMS control_flow effective_address flags optimizer)
