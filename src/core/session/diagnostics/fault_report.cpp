@@ -97,12 +97,8 @@ std::string describe_guest_memory_fault(const memory::MemoryFault& fault,
       diagnostic << "no-module";
       return;
     }
-    const auto& functions = loaded_xex->image.function_metadata;
-    const auto it = std::find_if(functions.begin(), functions.end(),
-                                 [address](const xbox::XexFunctionMetadata& fn) {
-                                   return address >= fn.begin && address < fn.end;
-                                 });
-    if (it == functions.end()) {
+    const auto* it = xbox::function_metadata_containing(loaded_xex->image, address);
+    if (!it) {
       diagnostic << "none";
       return;
     }
@@ -113,6 +109,10 @@ std::string describe_guest_memory_fault(const memory::MemoryFault& fault,
                << ",begin=0x" << std::hex << it->begin
                << ",end=0x" << it->end
                << ",unwind=0x" << it->unwind_data
+               << ",prolog=" << std::dec << it->prolog_instructions << std::hex
+               << ",handler=" << (it->exception_handler ? "0x" : "none");
+    if (it->exception_handler) diagnostic << it->handler_address;
+    diagnostic << std::hex
                << std::dec << ",valid=" << (it->valid ? "yes" : "no") << '}';
   };
   append_function_metadata("cia", state.cia);
