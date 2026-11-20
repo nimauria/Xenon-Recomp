@@ -32,10 +32,10 @@ namespace xenon::cpu {
 class MemoryPort;
 
 // Opt-in write trap for investigations. XENON_WRITE_TRAP=<hex>[,<hex>...]
-// names up to kMaxWriteTraps guest addresses; every 32-bit guest store to one
-// of them is reported by debug_signal_write_trap() in the probe log
-// signal_write_trap_diag.log (with the host stack on Windows), which also
-// needs XENON_PROBE_LOGS=1. With no trap set, a store pays one relaxed load.
+// names up to kMaxWriteTraps guest addresses; every guest store that changes
+// a byte of one of those 32-bit words is reported by
+// debug_signal_write_trap() in the probe log signal_write_trap_diag.log
+// (with the host stack on Windows), which also needs XENON_PROBE_LOGS=1.
 // It generalises an Ace Combat 6 hook that compared two hard-coded addresses
 // on every store.
 inline constexpr std::size_t kMaxWriteTraps = 4;
@@ -43,19 +43,19 @@ inline constexpr std::size_t kMaxWriteTraps = 4;
 namespace write_trap_detail {
 inline std::atomic<std::uint32_t> trap_count{0};
 inline std::array<std::atomic<GuestAddress>, kMaxWriteTraps> trap_addresses{};
+// The overlap test against every trapped word. Out of line: this header is
+// inlined into every store of every generated function, so each store site
+// carries only the count check and a call (AC6 shard: 0.5% less code than
+// the loop inlined at every store).
+[[nodiscard]] bool store_hits_trap(GuestAddress address, std::uint32_t size) noexcept;
 }  // namespace write_trap_detail
 
 // True when a store of `size` bytes at `address` changes any byte of a
-// trapped 32-bit word. Any width: a trapped word written by a 64-bit or
-// 16-bit store was missed when only 32-bit stores at its address were checked.
+// trapped 32-bit word, whatever its width. With no trap set - every
+// production run - a store pays one relaxed load and a branch.
 [[nodiscard]] inline bool is_write_trapped(GuestAddress address, std::uint32_t size = 4u) noexcept {
-  const auto count = write_trap_detail::trap_count.load(std::memory_order_relaxed);
-  for (std::uint32_t i = 0; i < count; ++i) {
-    const auto trapped = write_trap_detail::trap_addresses[i].load(std::memory_order_relaxed);
-    // [address, address + size) and [trapped, trapped + 4) overlap.
-    if (trapped - address < size || address - trapped < 4u) return true;
-  }
-  return false;
+  if (write_trap_detail::trap_count.load(std::memory_order_relaxed) == 0u) [[likely]] return false;
+  return write_trap_detail::store_hits_trap(address, size);
 }
 
 // Replaces the trapped addresses; at most kMaxWriteTraps are kept.

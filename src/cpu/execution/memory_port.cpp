@@ -43,6 +43,16 @@ void ReservationCommitGate::release() noexcept {
   now_serving_.fetch_add(1u, std::memory_order_release);
 }
 
+bool write_trap_detail::store_hits_trap(GuestAddress address, std::uint32_t size) noexcept {
+  const auto count = trap_count.load(std::memory_order_acquire);
+  for (std::uint32_t i = 0; i < count && i < kMaxWriteTraps; ++i) {
+    const auto trapped = trap_addresses[i].load(std::memory_order_relaxed);
+    // [address, address + size) and [trapped, trapped + 4) overlap.
+    if (trapped - address < size || address - trapped < 4u) return true;
+  }
+  return false;
+}
+
 void set_write_traps(std::span<const GuestAddress> addresses) noexcept {
   const auto count = std::min(addresses.size(), kMaxWriteTraps);
   write_trap_detail::trap_count.store(0, std::memory_order_relaxed);
