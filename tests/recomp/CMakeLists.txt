@@ -28,6 +28,11 @@ if(XENON_BUILD_TESTS)
   xenon_enable_test_asserts(xenon_worker_pool_tests)
   add_test(NAME xenon_worker_pool_tests COMMAND xenon_worker_pool_tests)
 
+  add_executable(xenon_native_compiler_tests native_compiler_tests.cpp)
+  target_link_libraries(xenon_native_compiler_tests PRIVATE xenon_recomp)
+  xenon_enable_test_asserts(xenon_native_compiler_tests)
+  add_test(NAME xenon_native_compiler_tests COMMAND xenon_native_compiler_tests)
+
   # Parallel analysis determinism (Part 4/21): jobs=1 vs jobs=N produce
   # byte-identical deterministic AnalysisReport content on a synthetic
   # multi-function fixture, and discovery waves converge correctly.

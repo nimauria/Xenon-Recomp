@@ -166,7 +166,10 @@ bool write_generated_cmake(const std::filesystem::path& generation_stage, const 
            "set(XENON_ENABLE_INPUT OFF CACHE BOOL \"\" FORCE)\n"
            "set(XENON_DEPENDENCY_MODE SYSTEM CACHE STRING \"\" FORCE)\n"
            "set(XENON_AUTO_BOOTSTRAP_DEPS OFF CACHE BOOL \"\" FORCE)\n"
-           "if(MSVC)\n"
+           // clang-cl accepts /constexpr:steps but ignores it.
+           "if(MSVC AND CMAKE_CXX_COMPILER_ID STREQUAL \"Clang\")\n"
+           "  set(CMAKE_CXX_FLAGS \"${CMAKE_CXX_FLAGS} /clang:-fconstexpr-steps=2147483647\")\n"
+           "elseif(MSVC)\n"
            "  set(CMAKE_CXX_FLAGS \"${CMAKE_CXX_FLAGS} /constexpr:steps2147483647\")\n"
            "endif()\n"
            "set(XENON_RECOMP_ROOT \"\" CACHE PATH \"Path to the Xenon-Recomp source tree\")\n"

@@ -101,11 +101,18 @@ ModuleBuildResult prepare_one_module(const xenon::xbox::XexImage& effective_imag
   }
 
   // --- Phase: Compiling -----------------------------------------------------
-  const auto build_dir = workspace.path / "build";
+  // One build directory per compiler: CMake cannot move an existing build
+  // directory to another compiler.
+  const auto build_dir =
+      workspace.path / (options.game_compiler == std::filesystem::path(XENON_NATIVE_COMPILER)
+                            ? std::string("build")
+                            : "build-" + options.game_compiler.stem().string());
+  std::cout << "xenon-prepare: native module compiler: " << options.game_compiler.string()
+            << " (" << options.game_compiler_reason << ")\n";
   status.report(Phase::Compiling, 55, "Configuring native build");
   const std::vector<std::string> configure_args = {
       XENON_CMAKE_COMMAND, "-S", driver_options.output.string(), "-B", build_dir.string(), "-G", "Ninja",
-      "-DCMAKE_CXX_COMPILER=" + std::string(XENON_NATIVE_COMPILER),
+      "-DCMAKE_CXX_COMPILER=" + options.game_compiler.generic_string(),
       "-DXENON_GRAPH_CACHE=" + (driver_options.graph_cache / "native").string(),
       "-DXENON_RECOMP_ROOT=" + options.recomp_root.string(),
       "-DCMAKE_BUILD_TYPE=" + options.config};

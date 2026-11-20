@@ -87,5 +87,38 @@ class CacheTests(unittest.TestCase):
         self.assertIn(b"[Graph object] hit", outputs[1])
         self.assertEqual(objects[0], objects[1])
 
+    def test_clang_cl_with_option_terminator(self):
+        # CMake ends clang-cl's options with "--" before the source; the
+        # preprocessing run must still see /EP as an option, not a file name.
+        compiler = os.environ.get("XENON_TEST_CLANG_CL") or shutil.which("clang-cl.exe")
+        if not compiler and Path("C:/Program Files/LLVM/bin/clang-cl.exe").is_file():
+            compiler = "C:/Program Files/LLVM/bin/clang-cl.exe"
+        if not compiler:
+            self.skipTest("clang-cl is not installed")
+        src, obj = self.root / "clang_region.cpp", self.root / "clang_region.obj"
+        src.write_text('extern "C" int clang_region() { return 3; }\n')
+        command = [compiler, "/nologo", "/O2", "/Brepro", "/showIncludes", "/Fo" + str(obj), "-c", "--", str(src)]
+        launcher = [sys.executable, str(ROOT / "tools/compilation_cache.py"), "compile", str(self.root / "cache")]
+        first = subprocess.run(launcher + command, capture_output=True)
+        self.assertEqual(first.returncode, 0, first.stderr.decode(errors="replace"))
+        self.assertIn(b"[Graph object] built", first.stderr)
+        obj.unlink()
+        second = subprocess.run(launcher + command, capture_output=True)
+        self.assertEqual(second.returncode, 0, second.stderr.decode(errors="replace"))
+        self.assertIn(b"[Graph object] hit", second.stderr)
+        # clang-cl is identified by its own executable, not every LLVM tool
+        # beside it.
+        identity = cache.compiler_identity(compiler, self.root / "cache")
+        self.assertEqual(list(identity), [str(Path(compiler).resolve())])
+
+    def test_toolchain_hash_memo_follows_file_changes(self):
+        tool = self.root / "tool.exe"
+        tool.write_bytes(b"one")
+        memo_root = self.root / "cache"
+        self.assertEqual(cache.memoized_file_hash(memo_root, tool), cache.file_hash(tool))
+        self.assertEqual(cache.memoized_file_hash(memo_root, tool), cache.file_hash(tool))
+        tool.write_bytes(b"two-two")
+        self.assertEqual(cache.memoized_file_hash(memo_root, tool), cache.file_hash(tool))
+
 if __name__ == "__main__":
     unittest.main()

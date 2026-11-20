@@ -216,7 +216,7 @@ int main(int argc, char** argv) {
       key.adaptive_observation_hash = adaptive_observation_hash;
       key.knowledge_base_hash = knowledge_base_hash;
       key.preparation_identity = xenon::recomp::graph::preparation_identity(
-          options.recomp_root, XENON_CMAKE_COMMAND, XENON_NATIVE_COMPILER);
+          options.recomp_root, XENON_CMAKE_COMMAND, options.game_compiler);
       key.target_arch = default_target_arch();
       key.build_config = options.config;
       status.set_cache_key(key.digest());
@@ -304,7 +304,7 @@ int main(int argc, char** argv) {
       return 5;
     }
     const auto preparation_identity_value = xenon::recomp::graph::preparation_identity(
-        options.recomp_root, XENON_CMAKE_COMMAND, XENON_NATIVE_COMPILER);
+        options.recomp_root, XENON_CMAKE_COMMAND, options.game_compiler);
 
     xenon::recomp::GameCompilationGraph graph;
     graph.modules.reserve(discovered_modules.size());

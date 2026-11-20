@@ -83,13 +83,46 @@ def promote(root: Path, request: dict, payload: Path):
         if stage.exists():
             shutil.rmtree(stage)
 
-def compiler_identity(compiler: str):
+def memoized_file_hash(root: Path | None, path: Path) -> str:
+    """file_hash() of a toolchain file, remembered by path, size and write time.
+
+    Every compile identifies its toolchain; hashing it each time re-read the
+    compiler directory per object (2.8 GB for an LLVM install). A changed
+    file has a new size or write time, so it is hashed again.
+    """
+    if root is None:
+        return file_hash(path)
+    stat = path.stat()
+    key = sha(f"{path}|{stat.st_size}|{stat.st_mtime_ns}".encode())
+    memo = root / "toolchain-hashes" / key
+    try:
+        value = memo.read_text().strip()
+        if len(value) == 64:
+            return value
+    except OSError:
+        pass
+    value = file_hash(path)
+    try:
+        memo.parent.mkdir(parents=True, exist_ok=True)
+        temporary = memo.with_name(memo.name + "." + uuid.uuid4().hex + ".tmp")
+        temporary.write_text(value)
+        os.replace(temporary, memo)
+    except OSError:
+        pass
+    return value
+
+def compiler_identity(compiler: str, root: Path | None = None):
     path = Path(shutil.which(compiler) or compiler).resolve(strict=True)
-    files = {str(path): file_hash(path)}
-    if path.name.lower() in ("cl.exe", "clang-cl.exe"):
+    files = {str(path): memoized_file_hash(root, path)}
+    # cl.exe drives its front and back ends (c1xx.dll, c2.dll, ...) from its
+    # own directory, so they are part of its identity. clang-cl is one
+    # self-contained executable; its directory holds unrelated LLVM tools.
+    if path.name.lower() == "cl.exe":
         for sibling in sorted(path.parent.iterdir()):
             if sibling.suffix.lower() in (".exe", ".dll"):
-                files[str(sibling)] = file_hash(sibling)
+                files[str(sibling)] = memoized_file_hash(root, sibling)
+    elif path.name.lower() == "clang-cl.exe":
+        pass
     else:
         for tool in ("cc1plus", "as"):
             found = subprocess.check_output([str(path), "-print-prog-name=" + tool], text=True).strip()
@@ -137,7 +170,9 @@ def compile_cached(root: Path, argv: list[str]) -> int:
         normalized.append("<source>" if arg == source[0] else arg)
     if output is None:
         return subprocess.call(argv)
-    pp.append("/EP" if msvc else "-E")
+    # Before any "--" (CMake ends clang-cl options with it): after it, clang-cl
+    # takes /EP for a file name.
+    pp.insert(1, "/EP" if msvc else "-E")
     preprocessed = subprocess.run(pp, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     if preprocessed.returncode:
         sys.stdout.buffer.write(preprocessed.stdout); sys.stderr.buffer.write(preprocessed.stderr)
@@ -148,7 +183,7 @@ def compile_cached(root: Path, argv: list[str]) -> int:
     includes = [line for line in lines if line.lstrip().startswith(b"Note: including file:")]
     text = b"".join(line for line in lines if line not in includes) if msvc else preprocessed.stdout
     try:
-        toolchain = compiler_identity(argv[0])
+        toolchain = compiler_identity(argv[0], root)
     except (OSError, subprocess.SubprocessError):
         return subprocess.call(argv)
     request = {"schema": SCHEMA, "stage": "object", "producer": "native-launcher-1",

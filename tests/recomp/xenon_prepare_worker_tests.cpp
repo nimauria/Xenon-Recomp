@@ -26,6 +26,7 @@
 #include "xenon/recomp/analysis_schema_json.hpp"
 #include "xenon/recomp/artifact_cache.hpp"
 #include "xenon/recomp/compilation_graph.hpp"
+#include "xenon/recomp/native_compiler.hpp"
 #include "xenon/xbox/xex_crypto.hpp"
 #include "xenon/xbox/xex_loader.hpp"
 #include "../support/source_snapshot.hpp"
@@ -157,6 +158,19 @@ std::string default_target_arch() {
 #endif
 }
 
+// The compiler xenon-prepare picks for the module with no --compiler, as it
+// resolves it: XENON_GAME_COMPILER, else clang-cl when installed beside an
+// MSVC build, else the native compiler. Part of the cache key.
+std::filesystem::path game_compiler() {
+  const char* request = std::getenv("XENON_GAME_COMPILER");
+  std::string error;
+  const auto choice = xenon::recomp::select_game_compiler(
+      request ? request : "", XENON_NATIVE_COMPILER, xenon::recomp::default_clang_cl_candidates(),
+      error);
+  assert(choice && "the game module compiler must resolve as xenon-prepare resolves it");
+  return choice->compiler;
+}
+
 ArtifactCacheKey expected_key(const std::filesystem::path& source_root,
                              const xbox::XexEffectiveIdentity& identity,
                              const AnalysisHintSetV2& hints) {
@@ -169,7 +183,7 @@ ArtifactCacheKey expected_key(const std::filesystem::path& source_root,
   key.module_compatibility_version = "1";
   key.hint_set_hash = hash_hint_set(hints);
   key.preparation_identity = xenon::recomp::graph::preparation_identity(
-      source_root, XENON_CMAKE_COMMAND, XENON_NATIVE_COMPILER);
+      source_root, XENON_CMAKE_COMMAND, game_compiler());
   key.target_arch = default_target_arch();
   key.build_config = "Release";
   return key;

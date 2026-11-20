@@ -28,6 +28,7 @@
 #include "xenon/recomp/driver.hpp"
 #include "xenon/recomp/game_intake.hpp"
 #include "xenon/recomp/module_hint_provider.hpp"
+#include "xenon/recomp/native_compiler.hpp"
 #include "xenon/recomp/workspace_lock.hpp"
 #include "xenon/xbox/xex_crypto.hpp"
 #include "xenon/xbox/xex_loader.hpp"
@@ -165,6 +166,12 @@ struct Options {
   // xenon::recomp::resolve_native_build_jobs). Not part of the cache key:
   // the parallelism never changes what is built.
   std::optional<std::size_t> jobs;
+  // The native module's compiler (--compiler / XENON_GAME_COMPILER, resolved
+  // by xenon::recomp::select_game_compiler). Part of the cache key through
+  // preparation_identity: another compiler builds a different module.
+  std::string compiler_request;
+  std::filesystem::path game_compiler;
+  std::string game_compiler_reason;
   bool force{false};
   bool query{false};
 };

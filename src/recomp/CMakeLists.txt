@@ -32,6 +32,7 @@ add_library(xenon_recomp STATIC
   driver/analysis_pipeline.cpp
   driver/project_generation.cpp
   driver/driver_support.cpp
+  driver/native_compiler.cpp
   driver/worker_pool.cpp
   # Static analysis.
   analysis/executable_ranges.cpp

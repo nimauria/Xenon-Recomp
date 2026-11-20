@@ -52,6 +52,12 @@ if(MSVC)
   # decoder.cpp builds its opcode dispatch table via a consteval bucket-sort
   # over the full PPC opcode catalog; this legitimately exceeds MSVC's
   # default constexpr evaluation step budget (1,048,576).
-  target_compile_options(xenon_cpu PRIVATE /constexpr:steps100000000)
+  # clang-cl (generated game modules may be built with it) accepts but
+  # ignores /constexpr:steps; its own option sets the budget.
+  if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+    target_compile_options(xenon_cpu PRIVATE /clang:-fconstexpr-steps=100000000)
+  else()
+    target_compile_options(xenon_cpu PRIVATE /constexpr:steps100000000)
+  endif()
 endif()
 add_library(Xenon::CPU ALIAS xenon_cpu)

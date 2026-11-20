@@ -235,7 +235,7 @@ DynamicFallbackExecutor::RunResult DynamicFallbackExecutor::run(
   // sees, and reporting it seeded a function at a loop head (see
   // seed_collection.cpp).
   const auto execute_tail_branch = [&](GuestAddress branch_target, bool indirect) -> bool {
-    const auto* compiled =
+    const auto compiled =
         indirect ? context.lookup_compiled(branch_target, CompiledLookupKind::Branch)
         : context.compiled_lookup
             ? context.compiled_lookup(context.compiled_registry, context, branch_target,
