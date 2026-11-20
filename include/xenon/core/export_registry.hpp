@@ -162,6 +162,14 @@ class ExportRegistry {
   // Clear all registered exports
   void clear();
 
+  // Advances whenever an export is registered, replaced or removed. A caller
+  // that keeps a resolved ExportDescriptor* (an import thunk calls the same
+  // export constantly) re-resolves when this differs from the generation it
+  // resolved at; reading it takes no lock.
+  [[nodiscard]] std::uint64_t generation() const noexcept {
+    return generation_.load(std::memory_order_acquire);
+  }
+
  private:
   [[nodiscard]] static std::string normalize_library(std::string_view library);
   [[nodiscard]] static std::string make_ordinal_key(std::string_view library,
@@ -170,6 +178,7 @@ class ExportRegistry {
                                                  std::string_view name);
 
   mutable std::shared_mutex mutex_{};
+  std::atomic<std::uint64_t> generation_{1};
   std::unordered_map<std::string, ExportDescriptor> ordinal_map_{};
   std::unordered_map<std::string, ExportDescriptor> name_map_{};
   std::unordered_map<std::string, VariableExportDescriptor> variable_ordinal_map_{};

@@ -283,6 +283,39 @@ void test_export_registry_no_cross_library_collision() {
   std::cout << "  [ok] ExportRegistry: identical ordinal/name under different libraries never cross-resolves\n";
 }
 
+// Import thunks keep the descriptor they resolved and re-resolve only when
+// the registry's generation moves: every change that could leave a kept
+// pointer stale (a new export, a replacement, a removal, clear) moves it, and
+// looking exports up does not.
+void test_export_registry_generation_tracks_every_change() {
+  xenon::core::ExportRegistry registry;
+  auto descriptor_for = [](std::uint32_t ordinal) {
+    xenon::core::ExportDescriptor descriptor{};
+    descriptor.library = "xboxkrnl";
+    descriptor.ordinal = ordinal;
+    descriptor.handler = [](xenon::core::ExportCallContext&) { return true; };
+    return descriptor;
+  };
+  auto generation = registry.generation();
+  assert(registry.register_export(descriptor_for(7u)));
+  assert(registry.generation() > generation);
+  generation = registry.generation();
+  (void)registry.resolve("xboxkrnl", 7u);
+  (void)registry.resolve_key(xenon::core::ExportRegistry::ordinal_key("xboxkrnl.exe", 7u));
+  assert(registry.generation() == generation);
+  assert(registry.register_export(descriptor_for(7u)));  // a replacement
+  assert(registry.generation() > generation);
+  generation = registry.generation();
+  assert(registry.unregister_export("xboxkrnl", 7u));
+  assert(registry.generation() > generation);
+  generation = registry.generation();
+  assert(!registry.unregister_export("xboxkrnl", 7u));  // nothing removed
+  assert(registry.generation() == generation);
+  registry.clear();
+  assert(registry.generation() > generation);
+  std::cout << "  [ok] ExportRegistry: the generation moves on every change and only then\n";
+}
+
 void test_export_registry_variable_resolution() {
   xenon::core::ExportRegistry registry;
   xenon::core::VariableExportDescriptor variable{};
@@ -555,6 +588,7 @@ void test_guest_process_creation_rollback() {
 int main() {
   std::cout << "Testing guest import negative paths and identity/rollback guarantees...\n";
   test_export_registry_no_cross_library_collision();
+  test_export_registry_generation_tracks_every_change();
   test_export_registry_variable_resolution();
   test_malformed_import_entry_is_skipped();
   test_unresolved_import_diagnostics();

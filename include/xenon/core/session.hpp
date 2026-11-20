@@ -776,10 +776,18 @@ class XenonSession final : public cpu::RuntimeServices {
   // import scan made every one cost several allocations. Rebuilt by
   // index_import_thunks() whenever loaded_xex_ is set.
   struct ImportThunkBinding {
+    ImportThunkBinding(std::string module_in, std::uint32_t ordinal_in, std::string key_in)
+        : module(std::move(module_in)), ordinal(ordinal_in), export_key(std::move(key_in)) {}
     std::string module;
     std::uint32_t ordinal{};
     std::string export_key;
+    // The export this thunk resolved to, at registry generation
+    // `resolved_generation` (0: not resolved yet): a call reuses it without
+    // the registry's shared lock and string lookup while the generation holds.
+    mutable std::atomic<const ExportDescriptor*> descriptor{nullptr};
+    mutable std::atomic<std::uint64_t> resolved_generation{0};
   };
+  const ExportDescriptor* resolve_import(const ImportThunkBinding& import);
   std::unordered_map<cpu::GuestAddress, ImportThunkBinding> import_thunks_{};
   void index_import_thunks();
   bool dispatch_export(std::string_view module, std::uint32_t ordinal,

@@ -37,8 +37,7 @@ cpu::ExecutionResult XenonSession::call(cpu::GuestAddress target,
   if (const auto thunk = import_thunks_.find(target); thunk != import_thunks_.end()) {
     const auto& import = thunk->second;
     const bool handled =
-        dispatch_export(import.module, import.ordinal,
-                        export_registry_.resolve_key(import.export_key), state, memory);
+        dispatch_export(import.module, import.ordinal, resolve_import(import), state, memory);
     if (handled) {
       // Fallthrough (non-terminal) matches normal call/return semantics:
       // execution continues at the instruction after the `bl`.
@@ -109,11 +108,21 @@ void XenonSession::index_import_thunks() {
   for (const auto& import : loaded_xex_->image.imports) {
     if (!import.callable()) continue;
     // First record wins, as the linear import scan this index replaces did.
-    import_thunks_.try_emplace(
-        import.guest_thunk,
-        ImportThunkBinding{import.module, import.ordinal,
-                           ExportRegistry::ordinal_key(import.module, import.ordinal)});
+    import_thunks_.try_emplace(import.guest_thunk, import.module, import.ordinal,
+                               ExportRegistry::ordinal_key(import.module, import.ordinal));
   }
+}
+
+const ExportDescriptor* XenonSession::resolve_import(const ImportThunkBinding& import) {
+  // Kernel calls are constant (TLS, waits, spin locks, IRQL); resolving each
+  // one took the registry's process-wide shared lock and a string-hash lookup.
+  const auto generation = export_registry_.generation();
+  if (import.resolved_generation.load(std::memory_order_acquire) == generation)
+    return import.descriptor.load(std::memory_order_acquire);
+  const auto* descriptor = export_registry_.resolve_key(import.export_key);
+  import.descriptor.store(descriptor, std::memory_order_release);
+  import.resolved_generation.store(generation, std::memory_order_release);
+  return descriptor;
 }
 
 bool XenonSession::is_recognized_import_thunk(cpu::GuestAddress target) {

@@ -55,6 +55,7 @@ bool ExportRegistry::register_export(ExportDescriptor descriptor) {
     auto name_key = make_name_key(descriptor.library, descriptor.name);
     name_map_[name_key] = descriptor;
   }
+  generation_.fetch_add(1u, std::memory_order_acq_rel);
 
   return true;
 }
@@ -84,6 +85,7 @@ bool ExportRegistry::unregister_export(std::string_view library,
     name_map_.erase(name_key);
   }
 
+  generation_.fetch_add(1u, std::memory_order_acq_rel);
   ordinal_map_.erase(it);
   return true;
 }
@@ -235,6 +237,7 @@ std::vector<VariableExportDescriptor> ExportRegistry::enumerate_variables(
 
 void ExportRegistry::clear() {
   std::unique_lock lock(mutex_);
+  generation_.fetch_add(1u, std::memory_order_acq_rel);
   ordinal_map_.clear();
   name_map_.clear();
   variable_ordinal_map_.clear();
