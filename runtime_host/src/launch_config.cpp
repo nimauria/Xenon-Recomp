@@ -132,6 +132,7 @@ bool LaunchConfig::load_from_file(const std::string& path, LaunchConfig& out,
   out.input_background = root.get_bool("inputBackground", false);
   out.input_module_api_version = static_cast<int>(root.get_number("inputModuleApiVersion", 0));
   out.input_profile_store_path = root.get_string("inputProfileStorePath");
+  out.input_script_path = root.get_string("inputScript");
   out.input_user_sources.clear();
   if (const auto* routes = root.find("inputUserSources")) {
     if (const auto* route_array = routes->as_array()) {

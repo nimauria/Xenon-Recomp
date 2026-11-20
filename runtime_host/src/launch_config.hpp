@@ -82,6 +82,7 @@ struct LaunchConfig {
   bool input_background{false};
   int input_module_api_version{0};
   std::string input_profile_store_path;
+  std::string input_script_path;
   std::vector<InputUserSources> input_user_sources{};
 
   double audio_master_volume{1.0};

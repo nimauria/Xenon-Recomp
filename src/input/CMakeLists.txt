@@ -21,6 +21,7 @@ if(XENON_ENABLE_INPUT)
     module_input_profile.cpp
     xam_facade.cpp
     null_driver.cpp
+    scripted_driver.cpp
     sdl/sdl_driver.cpp
   )
   target_include_directories(xenon_input PUBLIC "${XENON_SOURCE_DIR}/include")

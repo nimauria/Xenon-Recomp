@@ -81,6 +81,10 @@ struct SessionConfig {
   bool input_background{false};
   int input_module_api_version{1};
   std::string input_profile_store_path{};
+  // A scripted controller for player 1 (input/scripted_driver.hpp): the file's
+  // timed presses play from the title's first input poll, with the window in
+  // the background too. Empty: none.
+  std::string input_script_path{};
   // Per-user source selectors. runtime_host indexes this table by the
   // launch-config userIndex (0..kMaxUsers-1), and XenonSession resolves each
   // string against enumerated device identity/persistent key/display name/

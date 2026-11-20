@@ -1,11 +1,16 @@
 #include <algorithm>
 #include <chrono>
 #include <filesystem>
+#include <fstream>
+#include <iostream>
+#include <mutex>
 #include <optional>
+#include <sstream>
 #include <string>
 
 #include "core/session/session_internal.hpp"
 #include "xenon/input/null_driver.hpp"
+#include "xenon/input/scripted_driver.hpp"
 #include "xenon/input/sdl_driver.hpp"
 #if defined(_WIN32)
 #include "xenon/input/xinput_driver.hpp"
@@ -24,6 +29,43 @@ bool XenonSession::init_input() {
 
   bool added_real_driver = false;
   bool explicit_null = false;
+
+  // A requested input script that cannot be read or parsed fails the launch:
+  // a run meant to be driven by it would otherwise sit at the first menu.
+  bool scripted = false;
+  if (!config_.input_script_path.empty()) {
+    std::ifstream file(config_.input_script_path, std::ios::binary);
+    if (!file) {
+      set_error("Input script not found: '" + config_.input_script_path + "'");
+      return false;
+    }
+    std::ostringstream text;
+    text << file.rdbuf();
+    std::string error;
+    auto script = input::parse_input_script(text.str(), error);
+    if (!script) {
+      set_error("Input script '" + config_.input_script_path + "': " + error);
+      return false;
+    }
+    const auto events = script->events.size();
+    const auto length = script->end();
+    auto driver = std::make_unique<input::ScriptedInputDriver>(
+        std::move(*script), input::ScriptedInputDriver::Clock{},
+        [](const input::ScriptedInputEvent& event, std::chrono::milliseconds at) {
+          std::scoped_lock console_log_lock(console_log_mutex());
+          std::cerr << "[input-script] " << at.count() << " ms: line " << event.line << ": "
+                    << event.text << std::endl;
+        });
+    if (!input_->add_driver(std::move(driver))) {
+      set_error("Failed to install the input script's controller");
+      return false;
+    }
+    scripted = true;
+    added_real_driver = true;
+    std::scoped_lock console_log_lock(console_log_mutex());
+    std::cerr << "[input-script] " << config_.input_script_path << ": " << events << " events over "
+              << length.count() << " ms from the title's first input poll" << std::endl;
+  }
 
   // The presentation window's keys and mouse buttons, as a virtual
   // controller. The cursor is not captured, so mouse motion stays off the
@@ -125,8 +167,8 @@ bool XenonSession::init_input() {
   // Apply the launcher's focus policy after setup so a foreground-only
   // session never leaks input while its presentation window is unfocused.
   input_->set_background_input_policy(
-      config_.input_background ? input::BackgroundInputPolicy::Always
-                               : input::BackgroundInputPolicy::ForegroundOnly);
+      config_.input_background || scripted ? input::BackgroundInputPolicy::Always
+                                           : input::BackgroundInputPolicy::ForegroundOnly);
 
   // The launcher exposes one simple global deadzone.  Feed it into the
   // default runtime profile rather than duplicating deadzone math in the
@@ -179,6 +221,20 @@ bool XenonSession::init_input() {
   // assignment rather than failing the entire game launch.
   if (auto preferred = match_device(config_.input_preferred_device)) {
     static_cast<void>(input_->assign_user(0, *preferred));
+  }
+  // The script plays player 1; a connected controller or the keyboard still
+  // merges in (player 1's companion), so someone can step in.
+  if (scripted) {
+    if (auto device = match_device(std::string("script:") +
+                                   std::string(input::ScriptedInputDriver::kPersistentKey))) {
+      if (input_->assign_user(0, *device) != input::Result::Success) {
+        set_error("Failed to give player 1 the input script's controller");
+        return false;
+      }
+    } else {
+      set_error("The input script's controller did not enumerate");
+      return false;
+    }
   }
 
   // Add launcher-defined multi-source routes (controller + keyboard/HOTAS,

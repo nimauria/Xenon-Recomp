@@ -272,6 +272,12 @@ xenon::core::SessionConfig build_session_config(const LaunchConfig& launch) {
   config.input_rumble = launch.input_rumble;
   config.input_background = launch.input_background;
   config.input_profile_store_path = launch.input_profile_store_path;
+  // XENON_INPUT_SCRIPT overrides the launch config's inputScript, so a
+  // recording script can drive any existing launch configuration.
+  config.input_script_path = launch.input_script_path;
+  if (const char* script = std::getenv("XENON_INPUT_SCRIPT"); script && *script) {
+    config.input_script_path = script;
+  }
   for (const auto& route : launch.input_user_sources) {
     if (route.user_index < config.input_user_sources.size()) {
       config.input_user_sources[route.user_index] = route.sources;
