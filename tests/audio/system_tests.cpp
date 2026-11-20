@@ -11,6 +11,7 @@
 #include <fstream>
 #include <iostream>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
 #include <vector>
@@ -224,6 +225,42 @@ int main() {
   assert(mixed[0] > 0.0f && mixed[1] > 0.0f);
 
   assert(audio.unregister_render_client(*client));
+
+  // Steady state: the host consumes each frame while the callback that made
+  // it is still running, so the credit and its notify arrive when the pump is
+  // not waiting. The pump must issue the next callback at once. It used to
+  // wait out a 2 ms timeout after every batch, which held a title needing one
+  // callback per 5.33 ms frame to about 105 a second.
+  {
+    constexpr std::uint32_t kCallbacks = 4000;
+    std::atomic<std::uint32_t> steady_count{0};
+    std::optional<RenderClientHandle> steady_client;
+    std::atomic<bool> steady_ready{false};
+    audio.set_guest_callback_invoker([&](cpu::GuestAddress, cpu::GuestAddress) {
+      while (!steady_ready.load()) std::this_thread::yield();
+      if (steady_count.load() < kCallbacks) {
+        assert(audio.submit_render_frame(*steady_client, frame_address));
+        std::array<float, kRenderFrameSamples * 2> host{};
+        fake->pump(host);
+        steady_count.fetch_add(1);
+      }
+      return true;
+    });
+    const auto start = std::chrono::steady_clock::now();
+    steady_client = audio.register_render_client(0x3000u, 0x1u);
+    assert(steady_client);
+    steady_ready.store(true);
+    while (steady_count.load() < kCallbacks &&
+           std::chrono::steady_clock::now() - start < std::chrono::seconds(10)) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    const auto elapsed = std::chrono::steady_clock::now() - start;
+    assert(steady_count.load() == kCallbacks);
+    // 500 batches of 8: at least 1 s with the old per-batch wait.
+    assert(elapsed < std::chrono::milliseconds(400) &&
+           "callbacks with credits available must not wait for the pump timeout");
+    assert(audio.unregister_render_client(*steady_client));
+  }
   audio.shutdown();
   assert(memory.release(frame_address));
   std::cout << "Audio system tests passed\n";

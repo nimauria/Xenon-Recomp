@@ -426,19 +426,28 @@ void AudioSystem::callback_pump() {
     std::vector<Pending> pending;
     GuestCallbackInvoker invoker;
     {
+      const auto issuable = [](const RenderClient& client) {
+        return client.allocated && !client.retiring && !client.suspended && client.callback &&
+               client.queue.size() < kMaxQueuedRenderFrames && client.callback_credits != 0;
+      };
       std::unique_lock lock(clients_mutex_);
-      callback_cv_.wait_for(lock, std::chrono::milliseconds(2));
+      // Sleep only while there is nothing to issue. A frame the host mixer
+      // consumes returns a credit and notifies; the wait checks the state
+      // first, so a notify that came while the last callback ran is not
+      // lost. An unconditional wait here cost up to its whole timeout after
+      // every callback, which capped a title that needs one callback per
+      // 5.33 ms frame at about 105 a second. The timeout only keeps shutdown
+      // and an invoker installed later responsive.
+      callback_cv_.wait_for(lock, std::chrono::milliseconds(2), [&] {
+        if (!callback_running_.load() || !guest_callback_invoker_) return !callback_running_.load();
+        return std::any_of(clients_.begin(), clients_.end(), issuable);
+      });
       if (!callback_running_.load()) break;
       invoker = guest_callback_invoker_;
       if (invoker) {
         for (std::size_t i = 0; i < clients_.size(); ++i) {
           auto& client = clients_[i];
-          if (!client.allocated || client.retiring || client.suspended ||
-              !client.callback ||
-              client.queue.size() >= kMaxQueuedRenderFrames ||
-              client.callback_credits == 0) {
-            continue;
-          }
+          if (!issuable(client)) continue;
           --client.callback_credits;
           ++client.callback_in_flight;
           ++client.counters.callbacks_issued;
