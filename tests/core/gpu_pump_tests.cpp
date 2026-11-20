@@ -38,6 +38,7 @@
 // of (see the audio callback thread's own shutdown-ordering history).
 
 #include "xenon/core/session.hpp"
+#include "xenon/gpu/front_buffer_swap.hpp"
 #include "xenon/kernel/event.hpp"
 #include "xenon/kernel/time.hpp"
 #include "xenon/kernel/wait.hpp"
@@ -1037,8 +1038,94 @@ void test_vblank_interrupt_waits_for_a_long_present() {
 
 }  // namespace
 
+// A present counter for the swap-in-the-ring test, readable from the
+// interrupt callback (a host function standing in for the title's handler).
+std::atomic<int> g_ring_swap_presents{0};
+std::atomic<int> g_presents_seen_by_next_packet{-1};
+
+class CountingPresentBackend final : public gpu::Backend {
+ public:
+  void begin_submission(memory::AddressSpace&, gpu::Edram&) override {}
+  void consume(const gpu::ir::Command&) override {}
+  void end_submission() override {}
+  bool make_guest_memory_cpu_visible(std::uint32_t, std::uint32_t) override { return true; }
+  bool make_edram_canonical() override { return true; }
+  bool invalidate_edram_native_state() override { return true; }
+  gpu::PresentStatus present(const gpu::PresentationFrame&) override {
+    g_ring_swap_presents.fetch_add(1);
+    return gpu::PresentStatus::Success;
+  }
+  bool resize_presentation(std::uint32_t, std::uint32_t) override { return true; }
+  bool presentation_ready() const noexcept override { return true; }
+};
+
+ExecutionResult present_count_probe_entry(ExecutionContext& context) {
+  if (context.state.gpr[3] == 1u) g_presents_seen_by_next_packet.store(g_ring_swap_presents.load());
+  context.state.gpr[3] = 0;
+  context.state.lr = 0u;
+  return {FlowReason::Return, 0u, 0u};
+}
+
+// Frame pacing (Ace Combat 6 in flight): a frame was presented at the next
+// vblank, as a backend task queued behind every draw the frontend had
+// decoded since - the next frame's - so frames the title paced at 33.3 ms
+// reached the screen 17-44 ms apart. A flip is presented where the command
+// processor executes it, once the work before it is done: the packet after
+// the swap already finds the frame presented, and the vblank that follows
+// does not present it again.
+void test_a_swap_in_the_ring_is_presented_where_it_executes() {
+  g_ring_swap_presents.store(0);
+  g_presents_seen_by_next_packet.store(-1);
+  constexpr GuestAddress kCallbackAddr = 0x5000u;
+  GpuPumpHarness harness(kCallbackAddr, &present_count_probe_entry);
+  xenon::core::SessionExecutionTestAccess::set_backend(
+      harness.session, std::make_unique<CountingPresentBackend>());
+  assert(xenon::core::SessionExecutionTestAccess::create_guest_process(harness.session));
+  auto* memory = harness.session.memory();
+  auto* kernel_process = harness.session.kernel_process();
+  kernel_process->set_gpu_interrupt_callback(kCallbackAddr, 0u);
+
+  // The flip of a tiled 64x64 k_8_8_8_8 front buffer at 0x3000 (VdSwap's
+  // NOP record), then a PM4_INTERRUPT (CPU 2) right behind it.
+  gpu::FrontBufferSwap swap{};
+  swap.base_address = 0x3000u;
+  swap.width = swap.height = 64u;
+  swap.pitch = 256u;
+  swap.format = 6u;
+  swap.has_fetch_constant = true;
+  swap.fetch_constant = {0x80000002u | 2u << 22, 0x3000u | 2u << 6 | 6u, 63u | 63u << 13,
+                         0u, 0u, 0x200u};
+  const auto packet = gpu::encode_front_buffer_swap(swap);
+  std::vector<std::uint32_t> words(packet.begin(), packet.end());
+  words.push_back(0xC0005400u);
+  words.push_back(0x00000004u);
+  constexpr std::uint32_t kRingBase = 0x2000u;
+  constexpr std::uint32_t kRingCapacityDwords = 32u;
+  assert(memory->fill_physical(kRingBase, kRingCapacityDwords * 4u, std::byte{0}));
+  for (std::uint32_t i = 0; i < words.size(); ++i) {
+    const std::array<std::byte, 4> bytes{
+        static_cast<std::byte>(words[i] >> 24), static_cast<std::byte>(words[i] >> 16),
+        static_cast<std::byte>(words[i] >> 8), static_cast<std::byte>(words[i])};
+    assert(memory->write_physical(kRingBase + i * 4u, bytes));
+  }
+  kernel_process->configure_gpu_ring_buffer(kRingBase, kRingCapacityDwords);
+  kernel_process->set_gpu_ring_buffer_write_index(static_cast<std::uint32_t>(words.size()));
+
+  for (int i = 0; i < 400 && g_presents_seen_by_next_packet.load() < 0; ++i)
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  assert(g_presents_seen_by_next_packet.load() == 1 &&
+         "the flip is presented before the packet after it executes");
+  // Several vblanks later the frame has still been presented once.
+  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  const bool shutdown_completed = run_with_timeout(
+      [&] { harness.session.shutdown(); }, std::chrono::milliseconds(5000));
+  assert(shutdown_completed);
+  assert(g_ring_swap_presents.load() == 1);
+}
+
 int main() {
   std::cout << "Testing GPU pump thread (ring drain + vsync present/interrupt)...\n";
+  test_a_swap_in_the_ring_is_presented_where_it_executes();
 
   test_gpu_pump_thread_starts_and_stops_cleanly();
   test_gpu_pump_thread_drains_ring_buffer();

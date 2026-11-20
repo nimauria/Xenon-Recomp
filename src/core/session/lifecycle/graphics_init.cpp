@@ -79,6 +79,15 @@ bool XenonSession::init_gpu() {
       kernel_process_->set_gpu_front_buffer(swap.base_address, swap.width, swap.height,
                                             swap.pitch, swap.format);
     }
+    // The command processor reached the flip with every draw and resolve
+    // before it executed (CommandProcessor: before_guest_visible_effect), so
+    // the frame is complete: present it now, at the next display refresh,
+    // as the flip itself shows it on the console (present_at_swap_).
+    if (present_at_swap_ && gpu_pump_running_.load(std::memory_order_acquire) &&
+        graphics_system_ && gpu_) {
+      const auto front_buffer = kernel_process_->gpu_front_buffer();
+      graphics_system_->run_backend_task([this, front_buffer] { present_front_buffer(front_buffer); });
+    }
   });
 
   // The GPU pump thread's vsync-driven guest interrupt callback executes on

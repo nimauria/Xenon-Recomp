@@ -114,6 +114,10 @@ bool XenonSession::start_gpu_pump_thread() {
   // measurements against the single-threaded pipeline.
   last_presented_generation_ = 0;
   {
+    const char* value = std::getenv("XENON_PRESENT_AT_SWAP");
+    present_at_swap_ = !(value && value[0] == '0' && value[1] == '\0');
+  }
+  {
     const char* value = std::getenv("XENON_GPU_BACKEND_THREAD");
     if (!(value && value[0] == '0' && value[1] == '\0')) graphics_system_->start_backend_thread();
   }
@@ -380,21 +384,42 @@ std::uint32_t XenonSession::run_gpu_pump_thread() {
     if ((reasons & kGpuWakePresent) != 0u) {
       const auto vblank = scanout_requested_.load(std::memory_order_acquire);
       const auto front_buffer = kernel_process_->gpu_front_buffer();
-      graphics_system_->run_backend_task([this, vblank, front_buffer] {
-        // Claim the vblank; one the vsync thread already gave up on (its
-        // interrupt is out and the title may be rendering into the buffer)
-        // is not presented.
+      // Presented already where the flip executed (present_at_swap_): what
+      // the front buffer holds is on its way to the screen, so this vblank
+      // latches at once - no backend round trip behind the next frame's work
+      // before the title gets its interrupt.
+      const bool already_presented =
+          present_at_swap_ &&
+          front_buffer.generation == last_presented_generation_.load(std::memory_order_acquire);
+      if (already_presented) {
         auto claim = scanout_claim_.load(std::memory_order_acquire);
+        bool claimed = true;
         do {
-          if ((claim >> 1u) >= vblank) return;
+          if ((claim >> 1u) >= vblank) {
+            claimed = false;
+            break;
+          }
         } while (!scanout_claim_.compare_exchange_weak(claim, vblank << 1u,
                                                         std::memory_order_acq_rel,
                                                         std::memory_order_acquire));
-        logging::ActivityScope present_activity(present_key,
-                                                {last_presented_generation_, 0, 0, 0});
-        present_front_buffer(front_buffer);
-        scanout_latched_.publish(vblank);
-      });
+        if (claimed) scanout_latched_.publish(vblank);
+      } else {
+        graphics_system_->run_backend_task([this, vblank, front_buffer] {
+          // Claim the vblank; one the vsync thread already gave up on (its
+          // interrupt is out and the title may be rendering into the buffer)
+          // is not presented.
+          auto claim = scanout_claim_.load(std::memory_order_acquire);
+          do {
+            if ((claim >> 1u) >= vblank) return;
+          } while (!scanout_claim_.compare_exchange_weak(claim, vblank << 1u,
+                                                          std::memory_order_acq_rel,
+                                                          std::memory_order_acquire));
+          logging::ActivityScope present_activity(
+              present_key, {last_presented_generation_.load(), 0, 0, 0});
+          present_front_buffer(front_buffer);
+          scanout_latched_.publish(vblank);
+        });
+      }
     }
 
     const auto _tick_phase_start = Clock::now();

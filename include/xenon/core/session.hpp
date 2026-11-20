@@ -652,8 +652,16 @@ class XenonSession final : public cpu::RuntimeServices {
   // vblank (GraphicsSystem::post_backend_task()).
   void present_front_buffer(const kernel::KernelProcess::GpuFrontBufferState& front_buffer);
   // The front buffer generation (VdSwap count) last presented successfully;
-  // GPU backend tasks only.
-  std::uint64_t last_presented_generation_{0};
+  // written by GPU backend tasks, read by the pump's vblank path.
+  std::atomic<std::uint64_t> last_presented_generation_{0};
+  // Present each frame where the command processor executes its flip, as
+  // soon as the work that drew it is done, rather than at the next vblank
+  // behind whatever the backend decoded after it (XENON_PRESENT_AT_SWAP=0
+  // restores presenting at the vblank). A frame waiting behind the next
+  // frame's draws reached the screen 0-27 ms late, so frames the title paced
+  // at 33.3 ms arrived 17-44 ms apart; and the vblank interrupt, held until
+  // the frame was presented, reached the title late with it.
+  bool present_at_swap_{true};
   // Signals the pump loop to stop and joins gpu_pump_thread_ if it was ever
   // started. Safe to call unconditionally (including when the thread was
   // never created, e.g. graphics disabled or start_gpu_pump_thread() never
