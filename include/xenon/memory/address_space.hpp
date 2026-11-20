@@ -275,6 +275,15 @@ class AddressSpace final : public xenon::cpu::MemoryPort {
   bool store_conditional64(xenon::cpu::GuestAddress address, std::uint64_t token,
                            std::uint64_t value) override;
   void cancel_reservation(std::uint64_t token) noexcept override;
+  // Host atomics on guest words (spin locks, interlocked lists). Native
+  // access runs them through the guest's own reservation path - a
+  // compare-and-swap of the reserved value, no process-wide state - so they
+  // cost what a guest lwarx/stwcx. pair costs. Strict access serialises the
+  // attempts, as its shared reservation pool needs.
+  std::uint32_t compare_exchange32_be(xenon::cpu::GuestAddress address, std::uint32_t expected,
+                                      std::uint32_t desired) override;
+  std::uint64_t compare_exchange64_be(xenon::cpu::GuestAddress address, std::uint64_t expected,
+                                      std::uint64_t desired) override;
 
   [[nodiscard]] xenon::cpu::MemoryOrderingDomain ordering_domain(
       xenon::cpu::GuestAddress address) const noexcept override;

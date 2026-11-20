@@ -186,6 +186,69 @@ void test_native_reservations_make_an_atomic_increment() {
   assert(mem.read32_be(kPage) == std::uint32_t{kThreads} * kIncrements);
 }
 
+// Host atomics on guest words (MemoryPort::compare_exchange32/64_be: kernel
+// spin locks, interlocked lists) are coherent with guest lwarx/stwcx. on the
+// same word, in both access modes: host threads swapping and threads running
+// the guest's own reservation loop increment one word without losing any.
+void host_and_guest_atomics_increment_one_word(bool native) {
+  AddressSpace mem;
+  assert(mem.initialize());
+  mem.set_native_access(native);
+  assert(mem.commit_fixed(kPage, 0x2000u, kReadWrite));
+  constexpr int kPerThread = 5000;
+  std::vector<std::thread> threads;
+  for (int t = 0; t < 3; ++t) {
+    threads.emplace_back([&] {  // host side: compare-and-swap through the port
+      for (int i = 0; i < kPerThread; ++i) {
+        for (;;) {
+          const auto seen = mem.read32_be(kPage);
+          if (mem.compare_exchange32_be(kPage, seen, seen + 1u) == seen) break;
+        }
+      }
+    });
+    threads.emplace_back([&] {  // guest side: lwarx / stwcx.
+      auto access = mem.access_context();
+      for (int i = 0; i < kPerThread; ++i) {
+        for (;;) {
+          std::uint32_t value{};
+          const auto token = access.reserve32(kPage, value);
+          if (access.store_conditional32(kPage, token, value + 1u)) break;
+        }
+      }
+    });
+  }
+  for (auto& thread : threads) thread.join();
+  assert(mem.read32_be(kPage) == 6u * kPerThread);
+}
+
+void test_host_atomics_on_guest_words() {
+  host_and_guest_atomics_increment_one_word(true);
+  host_and_guest_atomics_increment_one_word(false);
+
+  AddressSpace mem;
+  init_native(mem);
+  // A failed swap leaves the word and reports what it holds.
+  mem.write32_be(kPage + 8u, 7u);
+  assert(mem.compare_exchange32_be(kPage + 8u, 3u, 9u) == 7u);
+  assert(mem.read32_be(kPage + 8u) == 7u);
+  assert(mem.compare_exchange32_be(kPage + 8u, 7u, 9u) == 7u);
+  assert(mem.read32_be(kPage + 8u) == 9u);
+  // Big-endian guest order, 64-bit.
+  mem.write64_be(kPage + 16u, 0x1122334455667788ull);
+  assert(mem.compare_exchange64_be(kPage + 16u, 0x1122334455667788ull, 0x0102030405060708ull) ==
+         0x1122334455667788ull);
+  assert(mem.read32_be(kPage + 16u) == 0x01020304u);
+  assert(mem.compare_exchange64_be(kPage + 16u, 0u, 1u) == 0x0102030405060708ull);
+  // A guest reservation of the word is lost to a host swap that changes it.
+  auto access = mem.access_context();
+  std::uint32_t value{};
+  const auto token = access.reserve32(kPage + 8u, value);
+  assert(value == 9u);
+  assert(mem.compare_exchange32_be(kPage + 8u, 9u, 10u) == 9u);
+  assert(!access.store_conditional32(kPage + 8u, token, 11u));
+  assert(mem.read32_be(kPage + 8u) == 10u);
+}
+
 // Device writers (GPU readback windows, write_physical) keep the strict
 // bookkeeping in native mode: they publish exact epochs and journal entries.
 // A native view handed to the readback window once crashed AC6's first
@@ -351,6 +414,7 @@ int main() {
   test_native_store_publishes_its_page_when_an_epoch_is_requested();
   test_native_reservation_is_a_compare_and_swap_of_the_reserved_value();
   test_native_reservations_make_an_atomic_increment();
+  test_host_atomics_on_guest_words();
   test_device_writers_keep_exact_history_in_native_mode();
   test_native_inline_accessors_keep_the_checked_semantics();
   test_strict_access_never_takes_the_native_inline_path();

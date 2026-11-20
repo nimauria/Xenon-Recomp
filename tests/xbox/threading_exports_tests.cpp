@@ -80,10 +80,12 @@ struct Fixture {
     static_cast<void>(ok);
   }
 
-  Fixture() {
+  // Strict access unless asked; sessions run native (the production default).
+  explicit Fixture(bool native = false) {
     address_space = std::make_shared<memory::AddressSpace>(memory::GuestTranslationMode::Compact);
     const bool ok = address_space->initialize();
     assert(ok);
+    address_space->set_native_access(native);
     kernel_memory = std::make_shared<kernel::KernelMemory>(address_space);
     process = std::make_unique<kernel::KernelProcess>(kernel_memory);
     const bool a_ok = address_space->allocate(kArena, 0x1000u, memory::kReadWrite, true, arena);
@@ -340,8 +342,8 @@ void test_slist_push_pop_flush() {
 
 // Lock-free correctness under concurrency: every entry pushed by several threads
 // is popped exactly once.
-void test_slist_concurrent() {
-  Fixture f;
+void slist_concurrent(bool native) {
+  Fixture f(native);
   const auto list = f.alloc(8);
   f.address_space->fill_bytes(list, 8, 0);
   constexpr std::uint32_t kPerThread = 300;
@@ -589,7 +591,8 @@ int main() {
        &test_rwlock_readers_wait_for_writer_and_are_released_together},
       {"rwlock_stress", &test_rwlock_stress},
       {"slist_push_pop_flush", &test_slist_push_pop_flush},
-      {"slist_concurrent", &test_slist_concurrent},
+      {"slist_concurrent", [] { slist_concurrent(false); }},
+      {"slist_concurrent_native", [] { slist_concurrent(true); }},
       {"dispatcher_resolution_is_race_free", &test_dispatcher_resolution_is_race_free},
       {"pulse_and_query_event", &test_pulse_and_query_event},
       {"thread_suspension", &test_thread_suspension},

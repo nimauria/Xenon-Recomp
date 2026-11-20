@@ -644,6 +644,39 @@ class MemoryPort {
   // ports that use generation-only reservations may leave this as a no-op.
   virtual void cancel_reservation(std::uint64_t token) noexcept { (void)token; }
 
+  // Atomic compare-and-swap of a naturally aligned big-endian guest word, for
+  // host code that implements a guest-visible atomic (kernel spin locks,
+  // interlocked lists): when the word holds `expected` it becomes `desired`.
+  // Returns the value observed, which equals `expected` exactly when the swap
+  // happened. Coherent with guest lwarx/stwcx. on the same word. This default
+  // is the guest's own sequence - load-reserve, compare, store-conditional,
+  // retried when the conditional store loses its reservation; a memory system
+  // with a cheaper coherent atomic overrides it.
+  virtual std::uint32_t compare_exchange32_be(GuestAddress address, std::uint32_t expected,
+                                              std::uint32_t desired) {
+    for (;;) {
+      std::uint32_t current = 0u;
+      const auto token = reserve32(address, current);
+      if (current != expected) {
+        cancel_reservation(token);
+        return current;
+      }
+      if (store_conditional32(address, token, desired)) return expected;
+    }
+  }
+  virtual std::uint64_t compare_exchange64_be(GuestAddress address, std::uint64_t expected,
+                                              std::uint64_t desired) {
+    for (;;) {
+      std::uint64_t current = 0u;
+      const auto token = reserve64(address, current);
+      if (current != expected) {
+        cancel_reservation(token);
+        return current;
+      }
+      if (store_conditional64(address, token, desired)) return expected;
+    }
+  }
+
   // Ordering-domain query is intentionally cold: barrier instructions need it
   // for validation/tooling, while ordinary loads/stores never call it. Test
   // ports default to normal cached RAM.

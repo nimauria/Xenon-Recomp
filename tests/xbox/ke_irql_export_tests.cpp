@@ -27,8 +27,10 @@ struct Fixture {
   memory::AddressSpace address_space{memory::GuestTranslationMode::Compact};
   core::ExportRegistry registry;
 
-  Fixture() {
+  // Strict access unless asked; sessions run native (the production default).
+  explicit Fixture(bool native = false) {
     assert(address_space.initialize());
+    address_space.set_native_access(native);
     assert(xbox::register_xboxkrnl_ke_irql_exports(registry));
   }
 
@@ -65,10 +67,10 @@ void test_registered_and_basic_return_values() {
             << std::endl;
 }
 
-void test_spin_lock_provides_real_mutual_exclusion() {
-  std::cout << "[TEST] KfAcquireSpinLock provides real mutual exclusion across threads..."
-            << std::endl;
-  Fixture fx;
+void test_spin_lock_provides_real_mutual_exclusion(bool native) {
+  std::cout << "[TEST] KfAcquireSpinLock provides real mutual exclusion across threads ("
+            << (native ? "native" : "strict") << " access)..." << std::endl;
+  Fixture fx(native);
 
   memory::GuestAddress lock_addr{};
   assert(fx.address_space.allocate(4u, 4u, memory::kReadWrite, false, lock_addr));
@@ -244,7 +246,8 @@ int main() {
   std::cout << "\n=== Ke/Kf IRQL and Spin-Lock Export Correctness Tests ===" << std::endl;
 
   test_registered_and_basic_return_values();
-  test_spin_lock_provides_real_mutual_exclusion();
+  test_spin_lock_provides_real_mutual_exclusion(false);
+  test_spin_lock_provides_real_mutual_exclusion(true);
   test_try_acquire_fails_when_held();
   test_lock_state_lives_in_the_guest_word();
   test_spin_wait_aborts_when_session_is_stopping();

@@ -526,24 +526,14 @@ bool interlocked_push_entry_slist(ExportCallContext& context) {
   const auto list = static_cast<cpu::GuestAddress>(context.cpu.gpr[3]);
   const auto entry = static_cast<cpu::GuestAddress>(context.cpu.gpr[4]);
   for (;;) {
-    // Link the entry to the head we are about to displace BEFORE taking the
-    // reservation: a store to guest memory between load-reserve and
-    // store-conditional cancels the reservation when the entry happens to share
-    // a reservation granule with the list header (entries are often allocated
-    // right next to it), which would make the loop spin forever. The header is
-    // then re-read under the reservation and, if it no longer matches the head
-    // the entry was linked to, the attempt is retried.
-    const auto observed = context.memory.read64_be(list);
-    context.memory.write32_be(entry, next_of(observed));  // entry->Next = old head
-    std::uint64_t old_header = 0;
-    const auto token = context.memory.reserve64(list, old_header);
-    if (next_of(old_header) != next_of(observed)) {
-      context.memory.cancel_reservation(token);
-      continue;
-    }
+    // Link the entry to the head it displaces, then swap the header in only
+    // if it is still that head (a compare-and-swap of the whole header, whose
+    // sequence also changes on every push).
+    const auto old_header = context.memory.read64_be(list);
+    context.memory.write32_be(entry, next_of(old_header));  // entry->Next = old head
     const auto new_header = pack(entry, static_cast<std::uint16_t>(depth_of(old_header) + 1u),
                                  static_cast<std::uint16_t>(sequence_of(old_header) + 1u));
-    if (context.memory.store_conditional64(list, token, new_header)) {
+    if (context.memory.compare_exchange64_be(list, old_header, new_header) == old_header) {
       context.cpu.gpr[3] = next_of(old_header);  // the previous first entry
       return true;
     }
@@ -553,18 +543,16 @@ bool interlocked_push_entry_slist(ExportCallContext& context) {
 bool interlocked_pop_entry_slist(ExportCallContext& context) {
   const auto list = static_cast<cpu::GuestAddress>(context.cpu.gpr[3]);
   for (;;) {
-    std::uint64_t old_header = 0;
-    const auto token = context.memory.reserve64(list, old_header);
+    const auto old_header = context.memory.read64_be(list);
     const auto head = next_of(old_header);
     if (head == 0u) {
-      context.memory.cancel_reservation(token);
       context.cpu.gpr[3] = 0u;
       return true;
     }
     const auto next = context.memory.read32_be(head);
     const auto new_header = pack(next, static_cast<std::uint16_t>(depth_of(old_header) - 1u),
                                  sequence_of(old_header));
-    if (context.memory.store_conditional64(list, token, new_header)) {
+    if (context.memory.compare_exchange64_be(list, old_header, new_header) == old_header) {
       context.cpu.gpr[3] = head;
       return true;
     }
@@ -574,9 +562,8 @@ bool interlocked_pop_entry_slist(ExportCallContext& context) {
 bool interlocked_flush_slist(ExportCallContext& context) {
   const auto list = static_cast<cpu::GuestAddress>(context.cpu.gpr[3]);
   for (;;) {
-    std::uint64_t old_header = 0;
-    const auto token = context.memory.reserve64(list, old_header);
-    if (context.memory.store_conditional64(list, token, 0u)) {
+    const auto old_header = context.memory.read64_be(list);
+    if (context.memory.compare_exchange64_be(list, old_header, 0u) == old_header) {
       context.cpu.gpr[3] = next_of(old_header);  // the whole chain, detached
       return true;
     }

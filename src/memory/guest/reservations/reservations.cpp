@@ -307,4 +307,80 @@ std::size_t AddressSpace::reservation_monitor_storage_bytes() const noexcept {
          sizeof(*reservation_commit_gate_) + sizeof(active_reservation_ops_);
 }
 
+namespace {
+
+// The guest's sequence on one access context: load-reserve, compare,
+// store-conditional, retried while the conditional store loses its
+// reservation to another writer.
+template <typename T, typename Reserve, typename Store>
+T compare_exchange_on(xenon::cpu::MemoryAccessContext& access, T expected, T desired,
+                      Reserve reserve, Store store) {
+  for (;;) {
+    T current{};
+    const auto token = reserve(access, current);
+    if (current != expected) {
+      access.cancel_reservation(token);
+      return current;
+    }
+    if (store(access, token, desired)) return expected;
+  }
+}
+
+// Strict access shares a small pool of reservation slots whose commit waits
+// for every in-flight load-reserve; host threads hammering it at once (a
+// contended spin lock) degrade to one success per scheduler tick, so strict
+// host atomics take turns. Native access never comes here.
+std::mutex& strict_host_atomic_mutex() {
+  static std::mutex mutex;
+  return mutex;
+}
+
+}  // namespace
+
+std::uint32_t AddressSpace::compare_exchange32_be(GuestAddress address, std::uint32_t expected,
+                                                  std::uint32_t desired) {
+  if (!native_access_) {
+    for (;;) {
+      std::scoped_lock lock(strict_host_atomic_mutex());
+      std::uint32_t current = 0u;
+      const auto token = reserve32(address, current);
+      if (current != expected) {
+        cancel_reservation(token);
+        return current;
+      }
+      if (store_conditional32(address, token, desired)) return expected;
+    }
+  }
+  auto access = access_context();
+  return compare_exchange_on<std::uint32_t>(
+      access, expected, desired,
+      [address](xenon::cpu::MemoryAccessContext& a, std::uint32_t& v) { return a.reserve32(address, v); },
+      [address](xenon::cpu::MemoryAccessContext& a, std::uint64_t token, std::uint32_t v) {
+        return a.store_conditional32(address, token, v);
+      });
+}
+
+std::uint64_t AddressSpace::compare_exchange64_be(GuestAddress address, std::uint64_t expected,
+                                                  std::uint64_t desired) {
+  if (!native_access_) {
+    for (;;) {
+      std::scoped_lock lock(strict_host_atomic_mutex());
+      std::uint64_t current = 0u;
+      const auto token = reserve64(address, current);
+      if (current != expected) {
+        cancel_reservation(token);
+        return current;
+      }
+      if (store_conditional64(address, token, desired)) return expected;
+    }
+  }
+  auto access = access_context();
+  return compare_exchange_on<std::uint64_t>(
+      access, expected, desired,
+      [address](xenon::cpu::MemoryAccessContext& a, std::uint64_t& v) { return a.reserve64(address, v); },
+      [address](xenon::cpu::MemoryAccessContext& a, std::uint64_t token, std::uint64_t v) {
+        return a.store_conditional64(address, token, v);
+      });
+}
+
 }  // namespace xenon::memory

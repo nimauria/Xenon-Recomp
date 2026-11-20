@@ -23,31 +23,21 @@ using xenon::logging::events::EventKind;
 // in a host-side table keyed by address: a host mutex never sees a guest-side
 // store, and unlocking a mutex from a different thread than the one that locked
 // it is undefined behaviour (a title may legally release a lock another thread
-// took). Acquisition is an atomic compare-and-swap on the guest word through the
-// same reservation protocol as lwarx/stwcx., so it is coherent with any guest
-// code touching the word; the holder's thread id is stored as the owner value.
+// took). Acquisition is an atomic compare-and-swap of the guest word
+// (MemoryPort::compare_exchange32_be), coherent with any guest code touching
+// it with lwarx/stwcx.; the holder's thread id is stored as the owner value.
 std::uint32_t owner_value(const ExportCallContext& context) {
   return context.thread_id != 0u ? context.thread_id : 1u;
 }
 
 bool try_acquire(ExportCallContext& context, cpu::GuestAddress lock_address) {
-  // The reservation monitor is a small shared pool whose commit step waits for all
-  // in-flight load-reserves; several host threads hammering it at once (a contended
-  // lock) degrade to one success per scheduler tick. Serialising just the
-  // reserve+commit attempt - never the time the lock is HELD - keeps each attempt
-  // uncontended. Guest code doing its own lwarx/stwcx. on the word stays coherent
-  // because the attempt still goes through the reservation protocol.
-  static std::mutex attempt_guard;
-  std::scoped_lock attempt_lock(attempt_guard);
-  std::uint32_t current = 0u;
-  const auto token = context.memory.reserve32(lock_address, current);
-  if (current != 0u) {
-    // A load-reserve holds one of the six shared reservation slots until it is
-    // stored to or cancelled; leaking it here would starve every later acquire.
-    context.memory.cancel_reservation(token);
-    return false;
-  }
-  return context.memory.store_conditional32(lock_address, token, owner_value(context));
+  // No process-wide serialisation: every spin lock in the title used to take
+  // one shared mutex and the strict monitor's commit gate per attempt, so
+  // unrelated locks on different threads (AC6's audio mixer and its engine
+  // threads) queued behind each other. The memory system makes the swap as
+  // cheap as the guest's own lwarx/stwcx. pair (strict access still takes
+  // turns inside compare_exchange32_be).
+  return context.memory.compare_exchange32_be(lock_address, 0u, owner_value(context)) == 0u;
 }
 
 void acquire(ExportCallContext& context, cpu::GuestAddress lock_address) {
