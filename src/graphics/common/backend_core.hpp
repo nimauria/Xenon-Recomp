@@ -1927,9 +1927,17 @@ class BackendCore {
     // Intermediate targets only (up to 640x720): whole frames are what
     // XENON_FRAME_DUMP already saves, at 3.7 MB a resolve here.
     if (!width || !height || std::uint64_t(width) * height > 640u * 720u) return;
-    if (!mirror.complete_cpu_visibility(true)) return;
     const auto bytes_per_pixel = format == 32u ? 8u : 4u;
     const auto pitch_aligned = (std::uint32_t(copy.destination_pitch) + 31u) & ~31u;
+    // A GPU resolve stays GPU-owned until something reads it (resolve
+    // readback on request): ask for this destination's bytes, as any guest
+    // read would. Only waiting for copies already queued read every traced
+    // image back as the black of untouched memory.
+    const auto height_aligned = (static_cast<std::uint32_t>(rectangle.bottom) + 31u) & ~31u;
+    const auto range = std::uint64_t(pitch_aligned) * height_aligned * bytes_per_pixel;
+    if (range == 0u || range > 0xFFFFFFFFull ||
+        !make_guest_memory_cpu_visible(copy.destination_base, static_cast<std::uint32_t>(range)))
+      return;
     // Each pixel's value as up to four floats, in the guest's component order.
     std::vector<std::array<float, 4>> pixels(std::size_t(width) * height);
     for (std::uint32_t y = 0; y < height; ++y) {
