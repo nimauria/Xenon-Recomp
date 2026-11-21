@@ -76,7 +76,7 @@ std::string emit_one(const Instruction&i, const std::vector<Type>& value_types){
     case Op::SetXerOV:o<<"  state.set_xer_ov("<<arg(i,0)<<");\n";break;
     case Op::SetXerSO:o<<"  state.set_xer_so("<<arg(i,0)<<");\n";break;
     case Op::SetXerOverflowSticky:o<<"  state.set_xer_overflow("<<arg(i,0)<<");\n";break;
-    case Op::ReadFPSCR:return decl(i,"state.fpscr");
+    case Op::ReadFPSCR:return decl(i,"state.observe_fpscr()");
     case Op::WriteFPSCR:o<<"  state.fpscr=static_cast<std::uint32_t>("<<arg(i,0)<<");\n";break;
     case Op::UpdateCR1FromFPSCR:o<<"  state.update_cr1_from_fpscr();\n";break;
     case Op::MoveFPSCRFieldToCR:o<<"  aot::move_fpscr_field_to_cr(state,"<<i.imm0<<","<<i.imm1<<");\n";break;
@@ -124,8 +124,8 @@ std::string emit_one(const Instruction&i, const std::vector<Type>& value_types){
     case Op::ZeroExtend:return decl(i,"static_cast<"+std::string(ctype(i.type))+">("+arg(i,0)+")");
     case Op::Truncate:return decl(i,"static_cast<"+std::string(ctype(i.type))+">("+arg(i,0)+")");
     case Op::Bitcast:{std::string from=i.type==Type::F32?"std::uint32_t":i.type==Type::F64?"std::uint64_t":i.type==Type::I32?"float":"double";return decl(i,"std::bit_cast<"+std::string(ctype(i.type))+">(static_cast<"+from+">("+arg(i,0)+"))");}
-    case Op::FPromote:return decl(i,"static_cast<double>("+arg(i,0)+")");
-    case Op::FTruncate:return decl(i,"static_cast<float>("+arg(i,0)+")");
+    case Op::FPromote:return decl(i,"aot::fp_promote_f32("+arg(i,0)+")");
+    case Op::FTruncate:return decl(i,"aot::fp_demote_f64("+arg(i,0)+")");
     case Op::CompareEq:return decl(i,"("+arg(i,0)+" == "+arg(i,1)+")"); case Op::CompareNe:return decl(i,"("+arg(i,0)+" != "+arg(i,1)+")");
     case Op::CompareSlt:{auto st=src_type(0);return decl(i,"(static_cast<"+signed_type(st)+">("+arg(i,0)+") < static_cast<"+signed_type(st)+">("+arg(i,1)+"))");}
     case Op::CompareSgt:{auto st=src_type(0);return decl(i,"(static_cast<"+signed_type(st)+">("+arg(i,0)+") > static_cast<"+signed_type(st)+">("+arg(i,1)+"))");}

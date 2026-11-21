@@ -439,7 +439,8 @@ inline void begin_fp_operation(CpuState& state) noexcept {
   saved_host_mxcsr = _mm_getcsr();
   // Clear the six exception flags and replace the rounding control; the
   // host's masks, flush-to-zero and denormals-are-zero settings are kept.
-  _mm_setcsr((saved_host_mxcsr & ~(0x003Fu | 0x6000u)) |
+  // NI (non-IEEE mode) flushes denormal inputs and results to zero.
+  _mm_setcsr((saved_host_mxcsr & ~(0x003Fu | 0x6000u)) | ((state.fpscr & fpscr_bits::NI) ? 0x8040u : 0u) |
              mxcsr_rounding(state.fp_rounding_mode()));
 }
 
@@ -473,16 +474,30 @@ inline void finish_fp_operation() noexcept {
 }
 #endif
 
-// Native floating point is the default. The arithmetic helpers below then
-// run as plain host operations whenever the guest rounds to nearest (the
-// result is the same value strict mode computes), and the status fields of
-// FPSCR - the sticky exception bits, FX/FEX/VX, FR/FI and FPRF - are not
-// updated by arithmetic, as on xenia/rexglue/XenonRecomp. FPSCR's control
-// fields (rounding mode, enables, NI) stay exactly what the guest wrote, and
-// any other rounding mode takes the exact path. XENON_FP_STRICT=1 restores
-// full status tracking for every operation. The flag is read when each module
-// loads, so the runtime and a game module always agree; a test may assign
-// it before running guest code to pin one mode.
+// Exact floating-point status in two tiers.
+//
+// Tier A (the default whenever the guest's FPSCR control bits RN, NI and the
+// five exception enables are all zero - what every title runs with): each
+// helper below is the plain host instruction plus a guard on the result.
+//   * ZX/OX/UX/XX are not tracked per operation. The host's sticky MXCSR flags
+//     accumulate them and CpuState::fp_sync() folds them into FPSCR at every
+//     observation point (mffs, mcrfs, mtfsf, mtfsb*, Rc=1 CR1 updates, the host
+//     boundary, thread/context code). Host and guest agree on these exactly:
+//     both raise them for the same operation under round-to-nearest.
+//   * VX* detail needs to know why a NaN appeared, so a NaN result takes a
+//     cold path (fp_note_nan_result) that classifies it from the operands.
+//   * FPRF costs one store: update_fpscr() remembers the result bits and the
+//     fold classifies them.
+// Tier B (an enabled exception, a non-nearest rounding mode, NI, or
+// XENON_FP_STRICT=1) is the exact per-operation path: the host's exception
+// flags are read around every operation, FPSCR is updated immediately, and
+// NI maps to flush-to-zero/denormals-are-zero. Entering Tier B first folds
+// any pending Tier A status so the two never interleave.
+//
+// XENON_FP_EXACT_STATUS=0 restores the previous behaviour: the default native
+// path never updates FPSCR status (only a non-nearest rounding mode leaves it).
+// The flags are read when each module loads, so the runtime and a game module
+// always agree; a test may assign them before running guest code.
 #if defined(_MSC_VER)
 #pragma warning(push)
 #pragma warning(disable : 4996)  // getenv: read once, never written
@@ -495,8 +510,9 @@ inline bool fp_strict_mode = [] {
 #pragma warning(pop)
 #endif
 
+// Tier A?
 [[nodiscard]] inline bool fp_native(const CpuState& state) noexcept {
-  return !fp_strict_mode && state.fp_rounding_mode() == FpRoundingMode::Nearest;
+  return !fp_strict_mode && (state.fpscr & (fp_legacy_status ? 0x3u : 0xFFu)) == 0;
 }
 
 // The strict path reads the host's exception flags around one operation, so
@@ -510,8 +526,52 @@ template <typename T>
   return held;
 }
 
+enum class FpOpKind : std::uint8_t { AddSub, Mul, Div, Sqrt, Fma, Rsqrt };
+
+// Cold path: an operation returned a NaN. Records VXSNAN when an operand was
+// signalling, nothing when a quiet NaN was merely propagated, and the
+// operation's own VX* bit when the NaN was created from non-NaN operands.
+inline void fp_note_nan_result(CpuState& state, FpOpKind kind, double a, double b = 0.0,
+                               double c = 0.0) noexcept {
+  if (fp_legacy_status) return;
+  const bool has_c = kind == FpOpKind::Fma;
+  if (is_signaling_nan(a) || is_signaling_nan(b) || (has_c && is_signaling_nan(c))) {
+    state.raise_fp_invalid(fpscr_bits::VXSNAN);
+    return;
+  }
+  if (std::isnan(a) || std::isnan(b) || (has_c && std::isnan(c))) return;
+  std::uint32_t detail = fpscr_bits::VXSOFT;
+  switch (kind) {
+    case FpOpKind::AddSub: detail = fpscr_bits::VXISI; break;
+    case FpOpKind::Mul: detail = fpscr_bits::VXIMZ; break;
+    case FpOpKind::Div:
+      if (a == 0.0 && b == 0.0) detail = fpscr_bits::VXZDZ;
+      else if (std::isinf(a) && std::isinf(b)) detail = fpscr_bits::VXIDI;
+      break;
+    case FpOpKind::Sqrt:
+    case FpOpKind::Rsqrt:
+      detail = a < 0.0 ? fpscr_bits::VXSQRT : fpscr_bits::VXSOFT;
+      break;
+    case FpOpKind::Fma:
+      detail = ((a == 0.0 && std::isinf(b)) || (b == 0.0 && std::isinf(a)))
+                   ? fpscr_bits::VXIMZ : fpscr_bits::VXISI;
+      break;
+  }
+  state.raise_fp_invalid(detail);
+}
+
+// Tier A result guard: a NaN is the only way an arithmetic helper creates or
+// forwards invalid-operation status.
+#define XENON_FP_GUARD(STATE, KIND, R, ...)                                   \
+  do { if (R != R) [[unlikely]] fp_note_nan_result(STATE, KIND, __VA_ARGS__); } while (0)
+
 [[nodiscard]] inline double fp_add(CpuState& state, double a, double b) noexcept {
-  if (fp_native(state)) return a + b;
+  if (fp_native(state)) {
+    const double r = a + b;
+    XENON_FP_GUARD(state, FpOpKind::AddSub, r, a, b);
+    return r;
+  }
+  state.fp_sync();
   begin_fp_operation(state);
   if (is_signaling_nan(a) || is_signaling_nan(b)) last_fp_invalid_detail |= fpscr_bits::VXSNAN;
   volatile double r = fp_operand(a) + fp_operand(b);
@@ -520,7 +580,12 @@ template <typename T>
   return r;
 }
 [[nodiscard]] inline double fp_sub(CpuState& state, double a, double b) noexcept {
-  if (fp_native(state)) return a - b;
+  if (fp_native(state)) {
+    const double r = a - b;
+    XENON_FP_GUARD(state, FpOpKind::AddSub, r, a, b);
+    return r;
+  }
+  state.fp_sync();
   begin_fp_operation(state);
   if (is_signaling_nan(a) || is_signaling_nan(b)) last_fp_invalid_detail |= fpscr_bits::VXSNAN;
   volatile double r = fp_operand(a) - fp_operand(b);
@@ -529,7 +594,12 @@ template <typename T>
   return r;
 }
 [[nodiscard]] inline double fp_mul(CpuState& state, double a, double b) noexcept {
-  if (fp_native(state)) return a * b;
+  if (fp_native(state)) {
+    const double r = a * b;
+    XENON_FP_GUARD(state, FpOpKind::Mul, r, a, b);
+    return r;
+  }
+  state.fp_sync();
   begin_fp_operation(state);
   if (is_signaling_nan(a) || is_signaling_nan(b)) last_fp_invalid_detail |= fpscr_bits::VXSNAN;
   volatile double r = fp_operand(a) * fp_operand(b);
@@ -538,7 +608,12 @@ template <typename T>
   return r;
 }
 [[nodiscard]] inline double fp_div(CpuState& state, double a, double b) noexcept {
-  if (fp_native(state)) return a / b;
+  if (fp_native(state)) {
+    const double r = a / b;
+    XENON_FP_GUARD(state, FpOpKind::Div, r, a, b);
+    return r;
+  }
+  state.fp_sync();
   begin_fp_operation(state);
   if (is_signaling_nan(a) || is_signaling_nan(b)) last_fp_invalid_detail |= fpscr_bits::VXSNAN;
   volatile double r = fp_operand(a) / fp_operand(b);
@@ -551,7 +626,12 @@ template <typename T>
   return r;
 }
 [[nodiscard]] inline double fp_sqrt(CpuState& state, double a) noexcept {
-  if (fp_native(state)) return std::sqrt(a);
+  if (fp_native(state)) {
+    const double r = std::sqrt(a);
+    XENON_FP_GUARD(state, FpOpKind::Sqrt, r, a);
+    return r;
+  }
+  state.fp_sync();
   begin_fp_operation(state);
   if (is_signaling_nan(a)) last_fp_invalid_detail |= fpscr_bits::VXSNAN;
   volatile double r = std::sqrt(fp_operand(a));
@@ -565,11 +645,14 @@ template <typename T>
     // The FMA instruction itself: std::fma is a call into the C runtime here,
     // in AC6's audio mixer and every other title's float-heavy loops. One
     // rounding either way, so the result is the same.
-    return _mm_cvtsd_f64(_mm_fmadd_sd(_mm_set_sd(a), _mm_set_sd(b), _mm_set_sd(c)));
+    const double r = _mm_cvtsd_f64(_mm_fmadd_sd(_mm_set_sd(a), _mm_set_sd(b), _mm_set_sd(c)));
 #else
-    return std::fma(a, b, c);
+    const double r = std::fma(a, b, c);
 #endif
+    XENON_FP_GUARD(state, FpOpKind::Fma, r, a, b, c);
+    return r;
   }
+  state.fp_sync();
   begin_fp_operation(state);
   if (is_signaling_nan(a) || is_signaling_nan(b) || is_signaling_nan(c)) last_fp_invalid_detail |= fpscr_bits::VXSNAN;
   volatile double r = std::fma(fp_operand(a), fp_operand(b), fp_operand(c));
@@ -584,7 +667,12 @@ template <typename T>
   return fp_div(state, 1.0, a);
 }
 [[nodiscard]] inline double fp_rsqrt(CpuState& state, double a) noexcept {
-  if (fp_native(state)) return 1.0 / std::sqrt(a);
+  if (fp_native(state)) {
+    const double r = 1.0 / std::sqrt(a);
+    XENON_FP_GUARD(state, FpOpKind::Rsqrt, r, a);
+    return r;
+  }
+  state.fp_sync();
   begin_fp_operation(state);
   if (is_signaling_nan(a)) last_fp_invalid_detail |= fpscr_bits::VXSNAN;
   volatile double root = std::sqrt(fp_operand(a));
@@ -596,7 +684,14 @@ template <typename T>
   return r;
 }
 [[nodiscard]] inline double fp_round_single(CpuState& state, double a) noexcept {
-  if (fp_native(state)) return static_cast<double>(static_cast<float>(a));
+  if (fp_native(state)) {
+    // cvtsd2ss raises the host's OE/UE/PE flags exactly as frsp does.
+    const double r = static_cast<double>(static_cast<float>(a));
+    if (a != a) [[unlikely]] {
+      if (!fp_legacy_status && is_signaling_nan(a)) state.raise_fp_invalid(fpscr_bits::VXSNAN);
+    }
+    return r;
+  }
   // This helper is used both by frsp and as the final rounding step of the
   // single-precision arithmetic instructions. Preserve status captured by a
   // preceding arithmetic helper in the same guest instruction and merge the
@@ -605,6 +700,7 @@ template <typename T>
   const std::uint32_t pending_invalid = last_fp_invalid_detail;
   const bool pending_incremented = last_fp_result_incremented;
 
+  state.fp_sync();
   begin_fp_operation(state);
   if (is_signaling_nan(a)) last_fp_invalid_detail |= fpscr_bits::VXSNAN;
   volatile float f = static_cast<float>(fp_operand(a));
@@ -622,10 +718,69 @@ template <typename T>
 }
 [[nodiscard]] inline double fp_from_i64(CpuState& state, std::uint64_t bits) noexcept {
   if (fp_native(state)) return static_cast<double>(static_cast<std::int64_t>(bits));
+  state.fp_sync();
   begin_fp_operation(state);
   volatile double r = static_cast<double>(static_cast<std::int64_t>(fp_operand(bits)));
   finish_fp_operation();
   return r;
+}
+
+// lfs/stfs conversions are pure integer operations: a single-precision value
+// moving to or from memory raises no floating-point status on the guest, and
+// must not leave host flags that would reach FPSCR. Widening is exact and keeps
+// a NaN's payload and quiet bit; narrowing rounds to nearest-even like frsp's
+// result (denormal and overflowing values included) without touching MXCSR.
+[[nodiscard]] inline std::uint64_t fp_single_to_double_bits(std::uint32_t w) noexcept {
+  const std::uint64_t sign = static_cast<std::uint64_t>(w >> 31) << 63;
+  std::uint32_t exp = (w >> 23) & 0xFFu;
+  std::uint64_t frac = w & 0x7FFFFFu;
+  if (exp == 0xFFu) return sign | 0x7FF0000000000000ull | (frac << 29);
+  if (exp == 0u) {
+    if (frac == 0) return sign;
+    // A single denormal is a normal double: shift the leading one up.
+    const int lead = 31 - std::countl_zero(static_cast<std::uint32_t>(frac));
+    const int shift = 23 - lead;
+    frac = (frac << shift) & 0x7FFFFFu;
+    return sign | (static_cast<std::uint64_t>(1023 - 126 - shift) << 52) | (frac << 29);
+  }
+  return sign | (static_cast<std::uint64_t>(exp + 896u) << 52) | (frac << 29);
+}
+[[nodiscard]] inline std::uint32_t fp_double_to_single_bits(std::uint64_t b) noexcept {
+  const std::uint32_t sign = static_cast<std::uint32_t>(b >> 63) << 31;
+  const std::int32_t exp = static_cast<std::int32_t>((b >> 52) & 0x7FFu);
+  const std::uint64_t frac = b & 0x000FFFFFFFFFFFFFull;
+  if (exp == 0x7FF) {
+    if (frac == 0) return sign | 0x7F800000u;
+    std::uint32_t payload = static_cast<std::uint32_t>(frac >> 29);
+    if (payload == 0) payload = 0x400000u;  // never turn a NaN into infinity
+    return sign | 0x7F800000u | payload;
+  }
+  if (exp == 0) return sign;  // zero, and double denormals far below single range
+  const std::int32_t e = exp - 1023;
+  if (e > 127) return sign | 0x7F800000u;
+  if (e >= -126) {
+    std::uint32_t m = static_cast<std::uint32_t>(frac >> 29);
+    const std::uint64_t low = frac & 0x1FFFFFFFull;
+    if (low > 0x10000000ull || (low == 0x10000000ull && (m & 1u))) ++m;
+    // A carry out of the mantissa bumps the exponent (and may reach infinity).
+    return sign | (static_cast<std::uint32_t>(e + 127) << 23) + m;
+  }
+  if (e >= -150) {
+    const std::uint64_t M = (1ull << 52) | frac;
+    const unsigned shift = static_cast<unsigned>(29 + (-126 - e));
+    std::uint32_t m = static_cast<std::uint32_t>(M >> shift);
+    const std::uint64_t rem = M & ((1ull << shift) - 1u);
+    const std::uint64_t half = 1ull << (shift - 1u);
+    if (rem > half || (rem == half && (m & 1u))) ++m;
+    return sign | m;
+  }
+  return sign;
+}
+[[nodiscard]] inline double fp_promote_f32(float f) noexcept {
+  return std::bit_cast<double>(fp_single_to_double_bits(std::bit_cast<std::uint32_t>(f)));
+}
+[[nodiscard]] inline float fp_demote_f64(double d) noexcept {
+  return std::bit_cast<float>(fp_double_to_single_bits(std::bit_cast<std::uint64_t>(d)));
 }
 
 inline std::uint8_t fprf_for(double v) noexcept {
@@ -641,7 +796,15 @@ inline std::uint8_t fprf_for(double v) noexcept {
 }
 
 inline void update_fpscr(CpuState& state, double result) noexcept {
-  if (!fp_strict_mode) return;
+  if (fp_native(state)) {
+    // Tier A: remember the result; fp_sync() classifies it (FPRF) on observation.
+    if (fp_legacy_status) return;
+    state.fp_last_bits = std::bit_cast<std::uint64_t>(result);
+    state.fp_pending = 1;
+    return;
+  }
+  if (fp_legacy_status && !fp_strict_mode) return;
+  state.fp_pending = 0;
   state.fpscr = (state.fpscr & ~fpscr_bits::FPRF_MASK) |
                 (std::uint32_t(fprf_for(result)&0x1Fu) << 12);
   state.fpscr &= ~(fpscr_bits::FR | fpscr_bits::FI);
@@ -762,7 +925,8 @@ inline bool trap_condition(std::uint32_t to, std::uint64_t a, std::uint64_t b,
 // ordered comparisons (QNaN always; SNaN when invalid exceptions are masked).
 inline void update_fp_compare_status(CpuState& state, double a, double b,
                                      bool ordered) noexcept {
-  if (!fp_strict_mode) return;
+  if (fp_legacy_status && !fp_strict_mode) return;
+  state.fp_pending = 0;  // the compare code replaces FPRF outright
   const auto fpcc = fp_compare_field(a, b);
   state.fpscr = (state.fpscr & ~fpscr_bits::FPRF_MASK) |
                 (std::uint32_t(fpcc & 0xFu) << 12);
@@ -787,7 +951,8 @@ inline void update_fp_compare_status(CpuState& state, double a, double b,
 // manufacturing a classification from the source operand. fctiw likewise has
 // undefined class bits; the sticky/rounding status is the observable contract.
 inline void update_fp_conversion_status(CpuState& state) noexcept {
-  if (!fp_strict_mode) return;
+  if (fp_legacy_status && !fp_strict_mode) return;
+  state.fp_commit_fprf();
   state.fpscr &= ~(fpscr_bits::FR | fpscr_bits::FI);
   if (last_fp_invalid_detail) {
     state.fpscr |= last_fp_invalid_detail | fpscr_bits::FX;
@@ -803,6 +968,7 @@ inline void update_fp_conversion_status(CpuState& state) noexcept {
 }
 
 inline void set_fpscr_bit(CpuState& state, unsigned architectural_bit, bool value) noexcept {
+  state.fp_sync();
   architectural_bit &= 31u;
   const std::uint32_t mask = 0x80000000u >> architectural_bit;
   // FEX and VX are derived summaries, not directly writable via mtfsb.
@@ -812,6 +978,7 @@ inline void set_fpscr_bit(CpuState& state, unsigned architectural_bit, bool valu
 }
 
 inline void write_fpscr_field(CpuState& state, unsigned field, std::uint8_t value) noexcept {
+  state.fp_sync();
   field &= 7u;
   const unsigned shift = (7u - field) * 4u;
   const std::uint32_t mask = 0xFu << shift;
@@ -826,6 +993,7 @@ inline void write_fpscr_field(CpuState& state, unsigned field, std::uint8_t valu
 
 inline void write_fpscr_fields(CpuState& state, std::uint8_t field_mask,
                                std::uint32_t source) noexcept {
+  state.fp_sync();
   for (unsigned field = 0; field < 8; ++field) {
     const bool selected = (field_mask & (0x80u >> field)) != 0;
     if (!selected) continue;
@@ -836,6 +1004,7 @@ inline void write_fpscr_fields(CpuState& state, std::uint8_t field_mask,
 
 inline void move_fpscr_field_to_cr(CpuState& state, unsigned cr_field,
                                    unsigned fpscr_field) noexcept {
+  state.fp_sync();
   fpscr_field &= 7u;
   const unsigned shift = (7u - fpscr_field) * 4u;
   state.set_cr_field(cr_field, std::uint8_t((state.fpscr >> shift) & 0xFu));

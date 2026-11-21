@@ -203,10 +203,15 @@ struct TrialResult {
   result.actual_memory.data() = initial_memory;
   NullRuntimeServices expected_runtime;
   NullRuntimeServices actual_runtime;
+  // Lazy FPSCR status lives partly in the host MXCSR: start both runs clean and
+  // fold each one into its own state before the states are compared.
+  { CpuState discard{}; discard.fp_sync(); }
   result.expected = capture_reference(c.instructions, result.expected_state,
                                       result.expected_memory, expected_runtime);
+  result.expected_state.fp_sync();
   result.actual = capture_candidate(c.candidate, result.actual_state,
                                     result.actual_memory, actual_runtime);
+  result.actual_state.fp_sync();
   result.state_difference = first_state_difference(result.expected_state,
                                                    result.actual_state);
   result.memory_difference = first_memory_difference(result.expected_memory,

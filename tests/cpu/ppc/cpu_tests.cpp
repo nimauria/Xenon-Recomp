@@ -18,14 +18,14 @@
 
 using namespace xenon::cpu;
 
-// Native floating point (the default): every arithmetic helper returns the
-// value strict mode computes, FPSCR status is left alone, the guest's control
+// Native floating point (the default, Tier A): every arithmetic helper returns the
+// value strict mode computes, FPSCR status is folded lazily (fp_lazy_status.cpp), the guest's control
 // fields are kept, and a non-nearest rounding mode still rounds exactly.
 static void test_native_floating_point() {
   aot::fp_strict_mode = false;
   CpuState fp{};
   const std::uint32_t control =
-      fpscr_bits::VE | static_cast<std::uint32_t>(FpRoundingMode::Nearest);
+      static_cast<std::uint32_t>(FpRoundingMode::Nearest);
   fp.fpscr = control;
 
   const double values[] = {1.0, 0x1p-60, -3.5, 1e300, 1e-310, 0.1, 7.0,
@@ -53,10 +53,13 @@ static void test_native_floating_point() {
       aot::update_fpscr(fp, s_add);
     }
   }
-  // Status is untracked and control is preserved.
-  assert(fp.fpscr == control);
+  // The control fields are preserved by status tracking: arithmetic only ever
+  // adds sticky/status bits, which appear on observation.
+  assert((fp.observe_fpscr() & 0xFFu) == control);
   aot::update_fp_compare_status(fp, std::nan(""), 1.0, true);
-  assert(fp.fpscr == control);
+  assert((fp.fpscr & (fpscr_bits::VXVC | fpscr_bits::VX | fpscr_bits::FX)) ==
+         (fpscr_bits::VXVC | fpscr_bits::VX | fpscr_bits::FX));
+  assert((fp.fpscr & 0xFFu) == control);
 
   // Conversions keep their exact results without a rounding-mode switch.
   assert(aot::fp_to_integer_bits(fp, 2.5, 32, false) == 2u);

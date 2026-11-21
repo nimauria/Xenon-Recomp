@@ -38,8 +38,13 @@ cpu::ExecutionResult XenonSession::call(cpu::GuestAddress target,
   // compiled code, so it is resolved before the code cache.
   if (const auto thunk = import_thunks_.find(target); thunk != import_thunks_.end()) {
     const auto& import = thunk->second;
-    const bool handled =
-        dispatch_export(import.module, import.ordinal, resolve_import(import), state, memory);
+    // Host code runs on the guest thread: fold the guest's pending FPSCR status
+    // first and discard whatever host flags the export raises (state.hpp, I2).
+    const bool handled = [&] {
+      const cpu::FpHostBoundary fp_boundary(state);
+      return
+          dispatch_export(import.module, import.ordinal, resolve_import(import), state, memory);
+    }();
     if (handled) {
       // Fallthrough (non-terminal) matches normal call/return semantics:
       // execution continues at the instruction after the `bl`.
@@ -75,7 +80,11 @@ cpu::ExecutionResult XenonSession::call(cpu::GuestAddress target,
   // through the ExportRegistry exactly like a XEX import thunk.
   if (module_registry_) {
     if (const auto thunk = module_registry_->thunk_target(target)) {
-      if (external_call(thunk->library, thunk->ordinal, state, memory)) {
+      const bool external_handled = [&] {
+        const cpu::FpHostBoundary fp_boundary(state);
+        return external_call(thunk->library, thunk->ordinal, state, memory);
+      }();
+      if (external_handled) {
         return {cpu::FlowReason::Fallthrough, state.cia, 0u};
       }
       if (config_.enable_export_diagnostics) {

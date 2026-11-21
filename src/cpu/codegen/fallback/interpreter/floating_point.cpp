@@ -38,7 +38,7 @@ namespace xenon::cpu::fallback {
       const auto ea = effective_address(i, state, access);
       if (single) {
         const auto raw = static_cast<std::uint32_t>(load_scalar(mem, ea, access));
-        store_f64(i.frt(), static_cast<double>(std::bit_cast<float>(raw)));
+        state.fpr_bits[i.frt()] = aot::fp_single_to_double_bits(raw);
       } else {
         state.fpr_bits[i.frt()] = load_scalar(mem, ea, access);
       }
@@ -53,7 +53,7 @@ namespace xenon::cpu::fallback {
                                 m.ends_with("x"), false};
       const auto ea = effective_address(i, state, access);
       if (single) {
-        const auto raw = std::bit_cast<std::uint32_t>(static_cast<float>(f64_at(i.frs())));
+        const auto raw = aot::fp_double_to_single_bits(state.fpr_bits[i.frs()]);
         store_scalar(mem, ea, access, raw);
       } else {
         store_scalar(mem, ea, access, state.fpr_bits[i.frs()]);
@@ -166,7 +166,7 @@ namespace xenon::cpu::fallback {
       return true;
     }
     if (m == "mffsx") {
-      state.fpr_bits[i.frt()] = state.fpscr;
+      state.fpr_bits[i.frt()] = state.observe_fpscr();
       update_cr1_if_rc();
       return true;
     }

@@ -3,6 +3,7 @@
 namespace xenon::cpu {
 
 void CpuState::update_cr1_from_fpscr() noexcept {
+  fp_sync();
   std::uint8_t f = 0;
   if (fpscr & fpscr_bits::FX)  f |= 0b1000;
   if (fpscr & fpscr_bits::FEX) f |= 0b0100;

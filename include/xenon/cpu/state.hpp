@@ -2,7 +2,14 @@
 
 #include <array>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
+
+#if defined(_M_X64) || defined(__x86_64__)
+#include <xmmintrin.h>
+#else
+#include <cfenv>
+#endif
 
 #include "xenon/cpu/types.hpp"
 
@@ -61,6 +68,47 @@ enum class FpRoundingMode : std::uint8_t {
   TowardNegative = 3,
 };
 
+// XENON_FP_EXACT_STATUS=0 restores the previous behaviour in which the default
+// native floating-point path never updates FPSCR status (see aot_semantics.hpp).
+// Read once when the module loads.
+#if defined(_MSC_VER)
+#pragma warning(push)
+#pragma warning(disable : 4996)  // getenv: read once, never written
+#endif
+inline bool fp_legacy_status = [] {
+  const char* value = std::getenv("XENON_FP_EXACT_STATUS");
+  return value && *value == '0';
+}();
+#if defined(_MSC_VER)
+#pragma warning(pop)
+#endif
+
+// FPSCR[FPRF] (C, FL, FG, FE, FU) for a result, classified from its bits so
+// the lazy status path needs no floating-point instruction.
+[[nodiscard]] inline std::uint32_t fprf_class_of_bits(std::uint64_t bits) noexcept {
+  const bool neg = (bits >> 63) != 0;
+  const std::uint32_t exp = static_cast<std::uint32_t>((bits >> 52) & 0x7FFu);
+  const std::uint64_t frac = bits & 0x000FFFFFFFFFFFFFull;
+  if (exp == 0x7FFu) return frac ? 0x11u : (neg ? 0x09u : 0x05u);
+  if (exp == 0u) return frac ? (neg ? 0x18u : 0x14u) : (neg ? 0x12u : 0x02u);
+  return neg ? 0x08u : 0x04u;
+}
+
+// The FPSCR summary bits are derived: VX from the VX* detail bits, FEX from an
+// enabled sticky exception.
+inline void fpscr_recompute_summaries(std::uint32_t& f) noexcept {
+  constexpr std::uint32_t detail = fpscr_bits::VXSNAN | fpscr_bits::VXISI | fpscr_bits::VXIDI |
+      fpscr_bits::VXZDZ | fpscr_bits::VXIMZ | fpscr_bits::VXVC | fpscr_bits::VXSOFT |
+      fpscr_bits::VXSQRT | fpscr_bits::VXCVI;
+  if (f & detail) f |= fpscr_bits::VX; else f &= ~fpscr_bits::VX;
+  const bool enabled = ((f & fpscr_bits::VX) && (f & fpscr_bits::VE)) ||
+                       ((f & fpscr_bits::OX) && (f & fpscr_bits::OE)) ||
+                       ((f & fpscr_bits::UX) && (f & fpscr_bits::UE)) ||
+                       ((f & fpscr_bits::ZX) && (f & fpscr_bits::ZE)) ||
+                       ((f & fpscr_bits::XX) && (f & fpscr_bits::XE));
+  if (enabled) f |= fpscr_bits::FEX; else f &= ~fpscr_bits::FEX;
+}
+
 struct ReservationState {
   bool valid{};
   std::uint8_t width{};  // 4 or 8 bytes for lwarx/ldarx.
@@ -100,6 +148,73 @@ struct alignas(64) CpuState {
   GuestAddress nia{};
 
   ReservationState reservation{};
+
+  // Lazy FPSCR status (the exact, cheap floating-point tier; see
+  // aot_semantics.hpp). While the guest's FPSCR control bits (RN, NI and the
+  // five enables) are all zero, arithmetic runs as plain host instructions and
+  // only leaves two traces:
+  //   * fp_last_bits/fp_pending: the last FPRF-updating result, classified by
+  //     fp_sync(), so FPRF/FR/FI cost one store per operation;
+  //   * the host's MXCSR sticky flags (ZE/OE/UE/PE), which accumulate the
+  //     sticky ZX/OX/UX/XX bits for this thread.
+  // Invariant I1: FPSCR as the guest observes it is fpscr after fp_sync();
+  // every reader and every writer of fpscr goes through fp_sync() first
+  // (observe_fpscr()/write_fpscr()/the aot FPSCR helpers). Invariant I2: the
+  // MXCSR flags of a thread belong to the guest code it runs; host code that
+  // runs on the thread (FpHostBoundary) is bracketed so its own flags never
+  // reach the guest.
+  std::uint64_t fp_last_bits{};
+  std::uint32_t fp_pending{};
+
+  // Classify the pending result into FPRF; FR/FI are not tracked by Tier A
+  // and read as zero.
+  void fp_commit_fprf() noexcept {
+    if (!fp_pending) return;
+    fpscr = (fpscr & ~(fpscr_bits::FPRF_MASK | fpscr_bits::FR | fpscr_bits::FI)) |
+            (fprf_class_of_bits(fp_last_bits) << 12);
+    fp_pending = 0;
+  }
+
+  // Fold the pending status into fpscr (see the invariants above).
+  void fp_sync() noexcept {
+    std::uint32_t bits = 0;
+#if defined(_M_X64) || defined(__x86_64__)
+    const unsigned csr = _mm_getcsr();
+    if (csr & 0x3Cu) {
+      if (csr & 0x04u) bits |= fpscr_bits::ZX;
+      if (csr & 0x08u) bits |= fpscr_bits::OX;
+      if (csr & 0x10u) bits |= fpscr_bits::UX;
+      if (csr & 0x20u) bits |= fpscr_bits::XX;
+    }
+    // IE (invalid) is not taken from the host: its VX* detail is recorded
+    // exactly where the NaN result appears. DE is not an FPSCR bit.
+    if (csr & 0x3Fu) _mm_setcsr(csr & ~0x3Fu);
+#else
+    const int ex = std::fetestexcept(FE_DIVBYZERO | FE_OVERFLOW | FE_UNDERFLOW | FE_INEXACT);
+    if (ex) {
+      if (ex & FE_DIVBYZERO) bits |= fpscr_bits::ZX;
+      if (ex & FE_OVERFLOW) bits |= fpscr_bits::OX;
+      if (ex & FE_UNDERFLOW) bits |= fpscr_bits::UX;
+      if (ex & FE_INEXACT) bits |= fpscr_bits::XX;
+    }
+    std::feclearexcept(FE_ALL_EXCEPT);
+#endif
+    if (bits && !fp_legacy_status) {
+      if (bits & ~fpscr) fpscr |= fpscr_bits::FX;
+      fpscr |= bits;
+    }
+    fp_commit_fprf();
+    fpscr_recompute_summaries(fpscr);
+  }
+  [[nodiscard]] std::uint32_t observe_fpscr() noexcept { fp_sync(); return fpscr; }
+  // A whole-register write replaces whatever was pending.
+  void write_fpscr(std::uint32_t value) noexcept { fp_sync(); fpscr = value; }
+  // A VX* invalid-operation sticky bit, set exactly where it is detected.
+  void raise_fp_invalid(std::uint32_t detail) noexcept {
+    if (detail & ~fpscr) fpscr |= fpscr_bits::FX;
+    fpscr |= detail;
+    fpscr_recompute_summaries(fpscr);
+  }
 
   [[nodiscard]] double fpr(std::size_t i) const noexcept {
     double v{};
@@ -173,6 +288,24 @@ struct alignas(64) CpuState {
     set_cr_field(0, field);
   }
   void update_cr1_from_fpscr() noexcept;
+};
+
+// Brackets host code that runs on a guest thread (kernel imports, runtime
+// services): the guest's pending status is folded before it, and whatever
+// sticky flags the host code raised are discarded after it (invariant I2).
+class FpHostBoundary {
+ public:
+  explicit FpHostBoundary(CpuState& state) noexcept { state.fp_sync(); }
+  FpHostBoundary(const FpHostBoundary&) = delete;
+  FpHostBoundary& operator=(const FpHostBoundary&) = delete;
+  ~FpHostBoundary() {
+#if defined(_M_X64) || defined(__x86_64__)
+    const unsigned csr = _mm_getcsr();
+    if (csr & 0x3Fu) _mm_setcsr(csr & ~0x3Fu);
+#else
+    std::feclearexcept(FE_ALL_EXCEPT);
+#endif
+  }
 };
 
 static_assert(alignof(CpuState) >= 64);
