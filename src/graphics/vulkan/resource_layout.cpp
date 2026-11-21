@@ -136,6 +136,7 @@ bool ResourceLayout::initialize(VkPhysicalDevice physical_device, VkDevice devic
   }
   constants_staging_.fill(std::byte{});
   last_set_ = {};
+  constants_cache_.reset();
   ++binding_generation_;
   return true;
 }
@@ -171,9 +172,15 @@ ResourceLayout::DrawBinding ResourceLayout::prepare_draw(std::uint32_t frame_ind
   if (!device_ || frame_index >= frames_.size() ||
       draw_slot >= CommandQueue::kBatchCommandCount) return result;
   auto& frame = frames_[frame_index];
-  const auto offset = static_cast<std::size_t>(constant_stride_ * draw_slot);
-  std::copy(constants_staging_.begin(), constants_staging_.end(),
-            frame.constants_mapping.begin() + static_cast<std::ptrdiff_t>(offset));
+  // Constants identical to an earlier draw's in this batch (same frame, lower
+  // slot) point at its slot: the copy into the mapped buffer is the cost.
+  const auto constants_slot = constants_cache_.resolve(
+      frame_index, 0u, draw_slot, constants_staging_, [&](std::uint32_t slot) {
+        const auto slot_offset = static_cast<std::size_t>(constant_stride_ * slot);
+        std::copy(constants_staging_.begin(), constants_staging_.end(),
+                  frame.constants_mapping.begin() + static_cast<std::ptrdiff_t>(slot_offset));
+      });
+  const auto offset = static_cast<std::size_t>(constant_stride_ * constants_slot);
   result.constants_offset = static_cast<std::uint32_t>(offset);
   // A set written for an earlier slot of this batch (same frame, lower slot:
   // a new batch on this frame starts again at slot 0) at the current binding
@@ -290,6 +297,7 @@ void ResourceLayout::reset() noexcept {
   guest_memory_buffer_ = VK_NULL_HANDLE;
   guest_memory_size_ = 0;
   last_set_ = {};
+  constants_cache_.reset();
   constants_staging_.fill(std::byte{});
   for (auto& frame : frames_) {
     frame.constants_mapping = {};

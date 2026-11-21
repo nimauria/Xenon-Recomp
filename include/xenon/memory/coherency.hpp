@@ -84,6 +84,13 @@ class GuestMemoryCoherency {
   [[nodiscard]] std::atomic<std::uint64_t>* write_epoch_data() noexcept {
     return &write_epoch_;
   }
+  // The newest epoch any writer has been assigned (a plain read: no collection
+  // of native-access stores, no wait for in-flight writers). No page epoch is
+  // ever newer than this, so a consumer whose last consumed epoch is at or
+  // past it knows no page changed since.
+  [[nodiscard]] std::uint64_t latest_assigned_epoch() const noexcept {
+    return write_epoch_.load(std::memory_order_acquire);
+  }
   [[nodiscard]] std::atomic<std::uint32_t>* active_writers_data() noexcept {
     return &active_writers_;
   }

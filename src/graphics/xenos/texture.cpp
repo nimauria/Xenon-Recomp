@@ -1,5 +1,6 @@
 #include "xenon/gpu/texture.hpp"
 #include "xenon/gpu/depth_format.hpp"
+#include "xenon/gpu/perf_stats.hpp"
 #include "xenon/memory/address_space.hpp"
 
 #include <algorithm>
@@ -777,6 +778,34 @@ ResolveWriteResult write_depth_resolve(
                            source_row_pitch, physical_memory);
 }
 
+std::uint32_t TextureDirtyTracker::bucket_of(std::uint64_t address) noexcept {
+  return static_cast<std::uint32_t>(
+      std::min<std::uint64_t>(address >> kBucketShift, kBucketCount - 1u));
+}
+void TextureDirtyTracker::index(std::uint64_t key, const Entry& entry) {
+  if (buckets_.empty()) buckets_.resize(kBucketCount);
+  for (const auto& range : entry.ranges) {
+    if (range.second <= range.first) continue;
+    for (auto bucket = bucket_of(range.first); bucket <= bucket_of(range.second - 1u); ++bucket) {
+      auto& keys = buckets_[bucket];
+      if (std::find(keys.begin(), keys.end(), key) == keys.end()) keys.push_back(key);
+    }
+  }
+}
+void TextureDirtyTracker::unindex(std::uint64_t key, const Entry& entry) {
+  if (buckets_.empty()) return;
+  for (const auto& range : entry.ranges) {
+    if (range.second <= range.first) continue;
+    for (auto bucket = bucket_of(range.first); bucket <= bucket_of(range.second - 1u); ++bucket) {
+      auto& keys = buckets_[bucket];
+      const auto it = std::find(keys.begin(), keys.end(), key);
+      if (it != keys.end()) {
+        *it = keys.back();
+        keys.pop_back();
+      }
+    }
+  }
+}
 void TextureDirtyTracker::track(std::uint64_t key, const TextureLayout& layout) {
   const std::scoped_lock lock(mutex_);
   Entry entry{};
@@ -784,6 +813,8 @@ void TextureDirtyTracker::track(std::uint64_t key, const TextureLayout& layout) 
     entry.ranges.emplace_back(sub.guest_address,
                               std::uint64_t(sub.guest_address) + sub.guest_size_bytes);
   }
+  if (const auto old = entries_.find(key); old != entries_.end()) unindex(key, old->second);
+  index(key, entry);
   entries_[key] = std::move(entry);
 }
 void TextureDirtyTracker::track_clean(std::uint64_t key,
@@ -797,28 +828,48 @@ void TextureDirtyTracker::track_clean(std::uint64_t key,
     entry.ranges.emplace_back(sub.guest_address,
                               std::uint64_t(sub.guest_address) + sub.guest_size_bytes);
   }
+  if (const auto old = entries_.find(key); old != entries_.end()) unindex(key, old->second);
+  index(key, entry);
   entries_[key] = std::move(entry);
 }
 void TextureDirtyTracker::erase(std::uint64_t key) {
-  const std::scoped_lock lock(mutex_); entries_.erase(key);
+  const std::scoped_lock lock(mutex_);
+  if (const auto it = entries_.find(key); it != entries_.end()) {
+    unindex(key, it->second);
+    entries_.erase(it);
+  }
 }
 void TextureDirtyTracker::clear() {
-  const std::scoped_lock lock(mutex_); entries_.clear();
+  const std::scoped_lock lock(mutex_);
+  entries_.clear();
+  buckets_.clear();
 }
 void TextureDirtyTracker::mark_dirty(std::uint32_t address, std::uint32_t size) noexcept {
   if (!size) return;
   const std::scoped_lock lock(mutex_);
+  ++mark_calls_;
+  perf::add(perf::Counter::TextureMarkCalls, 1u);
+  if (buckets_.empty()) return;
   const auto begin = std::uint64_t(address);
   const auto end = begin + size;
-  for (auto& [key, entry] : entries_) {
-    (void)key;
-    for (const auto& range : entry.ranges) {
-      if (begin < range.second && end > range.first) {
-        entry.dirty = true;
-        break;
+  std::uint64_t touched = 0;
+  for (auto bucket = bucket_of(begin); bucket <= bucket_of(end - 1u); ++bucket) {
+    for (const auto key : buckets_[bucket]) {
+      const auto it = entries_.find(key);
+      if (it == entries_.end()) continue;
+      auto& entry = it->second;
+      for (const auto& range : entry.ranges) {
+        if (begin < range.second && end > range.first) {
+          // Counted once per texture even when it spans several buckets.
+          if (!entry.dirty) ++touched;
+          entry.dirty = true;
+          break;
+        }
       }
     }
   }
+  textures_marked_ += touched;
+  if (touched) perf::add(perf::Counter::TextureMarkTouched, touched);
 }
 bool TextureDirtyTracker::consume_dirty(std::uint64_t key) noexcept {
   const std::scoped_lock lock(mutex_);
@@ -835,7 +886,13 @@ bool TextureDirtyTracker::consume_dirty(
   if (it == entries_.end()) return false;
   auto& entry = it->second;
   bool dirty = entry.dirty;
-  if (!dirty) {
+  // No writer has been assigned an epoch past the texture's last consumed one
+  // (and no page epoch exceeds the newest assigned), so no page can be newer
+  // than it: the walk below would find nothing.
+  if (!dirty && coherency.latest_assigned_epoch() <= entry.clean_epoch) {
+    ++walks_skipped_;
+  } else if (!dirty) {
+    ++walks_;
     for (const auto& range : entry.ranges) {
       if (range.first >= memory::kPhysicalMemorySize) continue;
       const auto width64 = std::min<std::uint64_t>(
@@ -857,6 +914,37 @@ bool TextureDirtyTracker::is_dirty(std::uint64_t key) const noexcept {
   const std::scoped_lock lock(mutex_);
   const auto it = entries_.find(key);
   return it != entries_.end() && it->second.dirty;
+}
+std::uint64_t TextureDirtyTracker::mark_calls() const noexcept {
+  const std::scoped_lock lock(mutex_);
+  return mark_calls_;
+}
+std::uint64_t TextureDirtyTracker::textures_marked() const noexcept {
+  const std::scoped_lock lock(mutex_);
+  return textures_marked_;
+}
+std::uint64_t TextureDirtyTracker::consume_walks_skipped() const noexcept {
+  const std::scoped_lock lock(mutex_);
+  return walks_skipped_;
+}
+std::uint64_t TextureDirtyTracker::consume_walks() const noexcept {
+  const std::scoped_lock lock(mutex_);
+  return walks_;
+}
+std::size_t TextureDirtyTracker::candidates_for(std::uint32_t address, std::uint32_t size) const {
+  const std::scoped_lock lock(mutex_);
+  if (!size || buckets_.empty()) return 0;
+  std::vector<std::uint64_t> seen;
+  const auto begin = std::uint64_t(address);
+  const auto end = begin + size;
+  for (auto bucket = bucket_of(begin); bucket <= bucket_of(end - 1u); ++bucket)
+    for (const auto key : buckets_[bucket])
+      if (std::find(seen.begin(), seen.end(), key) == seen.end()) seen.push_back(key);
+  return seen.size();
+}
+std::size_t TextureDirtyTracker::tracked_count() const {
+  const std::scoped_lock lock(mutex_);
+  return entries_.size();
 }
 
 }  // namespace xenon::gpu

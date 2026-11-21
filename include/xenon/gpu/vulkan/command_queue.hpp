@@ -52,6 +52,11 @@ class CommandQueue {
   // segment of its own. Called only from the before-ordered-work hook.
   [[nodiscard]] bool record_run(std::function<void(VkCommandBuffer)> record, bool parallel);
   void set_before_ordered_work(std::function<void()> hook) { before_ordered_work_ = std::move(hook); }
+  // Work a component staged for the queue and has not recorded yet (the
+  // guest-memory mirror's batched uploads): run after the hook above, before
+  // every ordered command and submission, so staged work keeps its place in
+  // the order. Runs inside the same re-entrancy guard.
+  void set_pending_work_flush(std::function<void()> flush) { pending_work_flush_ = std::move(flush); }
   [[nodiscard]] bool set_recording_threads(unsigned threads);
   [[nodiscard]] unsigned recording_threads() const noexcept {
     return workers_ ? workers_->thread_count() : 0u;
@@ -121,6 +126,7 @@ class CommandQueue {
   VkQueue queue_{VK_NULL_HANDLE};
   std::uint32_t queue_family_{};
   std::function<void()> before_ordered_work_{};
+  std::function<void()> pending_work_flush_{};
   bool in_before_ordered_work_{};
   std::unique_ptr<RecordingWorkers> workers_{};
   std::uint64_t parallel_runs_{};

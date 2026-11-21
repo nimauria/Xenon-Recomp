@@ -52,6 +52,13 @@ class StagingRing {
     return offset;
   }
 
+  // Whether reserve(size) would wrap to the start of the ring (so overwrite
+  // space handed out earlier in the lap): a caller holding reservations it
+  // has not committed yet must commit them before such a reserve.
+  [[nodiscard]] bool would_wrap(std::uint64_t size) const noexcept {
+    return head_ + size > capacity_;
+  }
+
   // Records the queue value that retires a region returned by reserve().
   void commit(std::uint64_t offset, std::uint64_t size, std::uint64_t value) {
     in_flight_.push_back({offset, offset + size, value});

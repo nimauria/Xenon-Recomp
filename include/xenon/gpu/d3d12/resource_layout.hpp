@@ -9,6 +9,7 @@
 #include <d3d12.h>
 #include <wrl/client.h>
 
+#include "xenon/gpu/bind_shadow.hpp"
 #include "xenon/gpu/d3d12/command_queue.hpp"
 #include "xenon/gpu/d3d12/memory.hpp"
 #include "xenon/gpu/resource_ir.hpp"
@@ -67,6 +68,8 @@ class ResourceLayout {
   // capped at 2048 descriptors.
   static constexpr std::uint32_t kResourceRegions = 2048;
   static constexpr std::uint32_t kSamplerRegions = 2048u / kSamplerCount;
+  [[nodiscard]] std::uint64_t constants_uploaded() const noexcept { return constants_cache_.uploads(); }
+  [[nodiscard]] std::uint64_t constants_reused() const noexcept { return constants_cache_.reuses(); }
   [[nodiscard]] std::span<std::byte> constants() noexcept {
     return constants_staging_;
   }
@@ -119,6 +122,8 @@ class ResourceLayout {
   Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> staging_sampler_heap_{};
   std::array<FrameBindings, kFrameCount> frames_{};
   std::array<std::byte, kConstantBufferBytes> constants_staging_{};
+  // Which earlier slot of the batch already holds the staged constants.
+  ConstantsSlotCache constants_cache_{};
   // What each staging texture descriptor and sampler holds, so a draw that
   // binds the same view or sampler state as the last one to use the slot
   // skips recreating it (a driver call each; AC6 binds the same few textures

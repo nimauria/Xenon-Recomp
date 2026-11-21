@@ -423,6 +423,19 @@ class Backend::Impl : public detail::BackendCore<Backend::Impl, BackendApi> {
   // (a pure function of the run) when ordered work or a submission closes it:
   // here into the primary segment when it is short, or on a recording worker
   // into a segment of its own (CommandQueue::record_run()).
+  // Padding-free keys for the per-run state shadows (BindShadow compares bytes).
+  struct RenderTargetKey {
+    UINT color_count{};
+    UINT has_depth{};
+    SIZE_T rtvs[4]{};
+    SIZE_T dsv{};
+  };
+  struct StencilKey {
+    UINT separate{};
+    UINT front{};
+    UINT back{};
+    UINT reserved{};
+  };
   struct PreparedDraw {
     ID3D12PipelineState* pipeline{};
     ID3D12RootSignature* root_signature{};
@@ -452,6 +465,14 @@ class Backend::Impl : public detail::BackendCore<Backend::Impl, BackendApi> {
   std::uint32_t parallel_run_draws{8};
 
   bool record_draw(const DrawRecording& draw, bool& record_failed) {
+    // Uploads the draw's synchronization staged go before it (and after the
+    // draws already prepared, which read the old bytes): one ordered command
+    // for all of them, recorded first so the barrier decision below sees the
+    // mirror's state after the copies.
+    if (!mirror.flush_pending_uploads()) {
+      error = mirror.error();
+      return false;
+    }
     // The guest-memory mirror's barrier, when this draw needs one, is ordered
     // work: it ends the open run and goes before the draw.
     if (mirror.needs_shader_access_barrier(draw.memexport_writable) &&
@@ -556,6 +577,18 @@ class Backend::Impl : public detail::BackendCore<Backend::Impl, BackendApi> {
     D3D12_PRIMITIVE_TOPOLOGY bound_topology = D3D_PRIMITIVE_TOPOLOGY_UNDEFINED;
     Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList8> list8;
     bool list8_queried = false;
+    // What the list already holds (nothing known at the run's start: other
+    // recorded work may have changed any of it). Root arguments are
+    // invalidated by a root-signature change and the tables by a descriptor
+    // heap change.
+    BindCounts counts;
+    BindShadow<std::uint64_t> root_constants, root_resources, root_samplers, root_memory_export;
+    BindShadow<std::array<float, 4>> blend_factor;
+    BindShadow<D3D12_VIEWPORT> viewport;
+    BindShadow<D3D12_RECT> scissor;
+    BindShadow<RenderTargetKey> targets;
+    BindShadow<StencilKey> stencil_ref;
+    BindShadow<D3D12_INDEX_BUFFER_VIEW> index_view;
     for (const auto& draw : run) {
       if (bound_pipeline != draw.pipeline) {
         list->SetPipelineState(draw.pipeline);
@@ -564,31 +597,56 @@ class Backend::Impl : public detail::BackendCore<Backend::Impl, BackendApi> {
       if (bound_root != draw.root_signature) {
         list->SetGraphicsRootSignature(draw.root_signature);
         bound_root = draw.root_signature;
+        root_constants.invalidate();
+        root_resources.invalidate();
+        root_samplers.invalidate();
+        root_memory_export.invalidate();
       }
       if (bound_heaps[0] != draw.resource_heap || bound_heaps[1] != draw.sampler_heap) {
         ID3D12DescriptorHeap* heaps[]{draw.resource_heap, draw.sampler_heap};
         list->SetDescriptorHeaps(2, heaps);
         bound_heaps[0] = draw.resource_heap;
         bound_heaps[1] = draw.sampler_heap;
+        root_resources.invalidate();
+        root_samplers.invalidate();
+        root_memory_export.invalidate();
       }
-      list->SetGraphicsRootConstantBufferView(0, draw.tables.constants);
-      list->SetGraphicsRootDescriptorTable(1, draw.tables.resources);
-      list->SetGraphicsRootDescriptorTable(2, draw.tables.samplers);
-      list->SetGraphicsRootDescriptorTable(3, draw.tables.memory_export);
-      list->OMSetBlendFactor(draw.blend_factor.data());
-      list->RSSetViewports(1, &draw.viewport);
-      list->RSSetScissorRects(1, &draw.scissor);
-      list->OMSetRenderTargets(draw.color_count, draw.color_count ? draw.rtvs.data() : nullptr,
-                               FALSE, draw.has_depth ? &draw.dsv : nullptr);
+      if (root_constants.update(draw.tables.constants, counts))
+        list->SetGraphicsRootConstantBufferView(0, draw.tables.constants);
+      if (root_resources.update(draw.tables.resources.ptr, counts))
+        list->SetGraphicsRootDescriptorTable(1, draw.tables.resources);
+      if (root_samplers.update(draw.tables.samplers.ptr, counts))
+        list->SetGraphicsRootDescriptorTable(2, draw.tables.samplers);
+      if (root_memory_export.update(draw.tables.memory_export.ptr, counts))
+        list->SetGraphicsRootDescriptorTable(3, draw.tables.memory_export);
+      if (blend_factor.update(draw.blend_factor, counts))
+        list->OMSetBlendFactor(draw.blend_factor.data());
+      if (viewport.update(draw.viewport, counts)) list->RSSetViewports(1, &draw.viewport);
+      if (scissor.update(draw.scissor, counts)) list->RSSetScissorRects(1, &draw.scissor);
+      RenderTargetKey target_key{};
+      target_key.color_count = draw.color_count;
+      target_key.has_depth = draw.has_depth ? 1u : 0u;
+      for (UINT i = 0; i < draw.color_count; ++i) target_key.rtvs[i] = draw.rtvs[i].ptr;
+      target_key.dsv = draw.has_depth ? draw.dsv.ptr : 0u;
+      if (targets.update(target_key, counts))
+        list->OMSetRenderTargets(draw.color_count, draw.color_count ? draw.rtvs.data() : nullptr,
+                                 FALSE, draw.has_depth ? &draw.dsv : nullptr);
       if (draw.stencil) {
-        if (draw.separate_back_stencil && !list8_queried) {
-          list8_queried = true;
-          (void)list->QueryInterface(IID_PPV_ARGS(&list8));
+        StencilKey stencil_key{};
+        stencil_key.separate = draw.separate_back_stencil ? 1u : 0u;
+        stencil_key.front = draw.stencil_reference;
+        stencil_key.back = draw.separate_back_stencil ? draw.stencil_back_reference : 0u;
+        if (stencil_ref.update(stencil_key, counts)) {
+          if (draw.separate_back_stencil && !list8_queried) {
+            list8_queried = true;
+            (void)list->QueryInterface(IID_PPV_ARGS(&list8));
+          }
+          if (draw.separate_back_stencil && list8)
+            list8->OMSetFrontAndBackStencilRef(draw.stencil_reference,
+                                               draw.stencil_back_reference);
+          else
+            list->OMSetStencilRef(draw.stencil_reference);
         }
-        if (draw.separate_back_stencil && list8)
-          list8->OMSetFrontAndBackStencilRef(draw.stencil_reference, draw.stencil_back_reference);
-        else
-          list->OMSetStencilRef(draw.stencil_reference);
       }
       if (bound_topology != draw.topology) {
         list->IASetPrimitiveTopology(draw.topology);
@@ -597,7 +655,7 @@ class Backend::Impl : public detail::BackendCore<Backend::Impl, BackendApi> {
       if (draw.statistics)
         list->BeginQuery(statistics_heap.Get(), D3D12_QUERY_TYPE_PIPELINE_STATISTICS, 0);
       if (draw.indexed) {
-        list->IASetIndexBuffer(&draw.index_view);
+        if (index_view.update(draw.index_view, counts)) list->IASetIndexBuffer(&draw.index_view);
         list->DrawIndexedInstanced(draw.element_count, 1, 0, 0, 0);
       } else {
         list->DrawInstanced(draw.element_count, 1, 0, 0);
@@ -608,6 +666,7 @@ class Backend::Impl : public detail::BackendCore<Backend::Impl, BackendApi> {
                                statistics_readback.Get(), 0);
       }
     }
+    counts.flush();
   }
 };
 
@@ -629,7 +688,9 @@ bool Backend::initialize(const ContextConfig& config) {
     return false;
   }
   // Ordered work and submissions close the open draw run first.
-  impl_->queue.set_before_ordered_work([impl = impl_.get()] { impl->close_draw_run(); });
+  impl_->queue.set_before_ordered_work([impl = impl_.get()] {
+    impl->close_draw_run();
+  });
   for (std::uint32_t i = 0; i < CommandQueue::kFrameCount; ++i) {
     if (!impl_->transient_uploads[i].initialize(
             impl_->context.device(), Impl::kTransientUploadBytes,

@@ -3,6 +3,9 @@
 #include <algorithm>
 #include <cstring>
 #include <span>
+#include <vector>
+
+#include "xenon/gpu/perf_stats.hpp"
 
 namespace xenon::gpu::vulkan {
 
@@ -36,6 +39,8 @@ bool GuestMemoryMirror::initialize(VkPhysicalDevice physical_device,
   }
   memory_ = &memory;
   queue_ = &queue;
+  // Staged uploads are recorded ahead of whatever ordered work comes next.
+  queue.set_pending_work_flush([this] { (void)flush_pending_uploads(); });
   coherency_.reset(memory::kPhysicalMemorySize, false);
   upload_ring_.reset(kTransferSize);
   readback_ring_.reset(kReadbackSize);
@@ -55,11 +60,13 @@ bool GuestMemoryMirror::initialize(VkPhysicalDevice physical_device,
 void GuestMemoryMirror::reset() noexcept {
   // The publisher reads readback_ and coherency_; it stops first.
   publisher_.stop();
+  if (queue_) queue_->set_pending_work_flush({});
   memory_ = nullptr;
   queue_ = nullptr;
   readback_.reset();
   upload_.reset();
   mirror_.reset();
+  pending_.clear();
   coherency_.clear();
   upload_ring_.reset(0);
   readback_ring_.reset(0);
@@ -96,61 +103,82 @@ bool GuestMemoryMirror::synchronize_range(
     return queue_->flush() && queue_->wait_for_completion(value);
   };
   for (const auto& range : plan.ranges) {
-      const auto chunk_address = range.address;
-      const auto chunk_size = range.size;
-      const auto offset = upload_ring_.reserve(chunk_size, queue_->completed_value(), wait);
-      if (!offset) {
-        error_ = queue_->error().empty() ? "Vulkan upload ring reservation failed"
-                                         : queue_->error();
-        return false;
-      }
-      coherency_.commit_cpu_upload(chunk_address, chunk_size);
-      if (!memory_->copy_physical_range(
-              chunk_address, upload_bytes.subspan(*offset, chunk_size))) {
-        coherency_.rollback_cpu_upload(chunk_address, chunk_size);
-        error_ = "failed to snapshot Xbox physical memory";
-        return false;
-      }
-      if (!queue_->execute_async([&](VkCommandBuffer command, std::uint32_t,
-                                     std::uint32_t) {
-            // Earlier work in this batch or a previous one may still read or
-            // write the range.
-            VkBufferMemoryBarrier2 before{
-                VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2};
-            before.srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
-            before.srcAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT;
-            before.dstStageMask = VK_PIPELINE_STAGE_2_COPY_BIT;
-            before.dstAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
-            before.buffer = mirror_.buffer();
-            before.offset = chunk_address;
-            before.size = chunk_size;
-            VkDependencyInfo dependency{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
-            dependency.bufferMemoryBarrierCount = 1;
-            dependency.pBufferMemoryBarriers = &before;
-            vkCmdPipelineBarrier2(command, &dependency);
-            VkBufferCopy copy{*offset, chunk_address, chunk_size};
-            vkCmdCopyBuffer(command, upload_.buffer(), mirror_.buffer(), 1,
-                            &copy);
-            VkBufferMemoryBarrier2 after{
-                VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2};
-            after.srcStageMask = VK_PIPELINE_STAGE_2_COPY_BIT;
-            after.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
-            after.dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
-            after.dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT;
-            after.buffer = mirror_.buffer();
-            after.offset = chunk_address;
-            after.size = chunk_size;
-            dependency.pBufferMemoryBarriers = &after;
-            vkCmdPipelineBarrier2(command, &dependency);
-          })) {
-        coherency_.rollback_cpu_upload(chunk_address, chunk_size);
-        error_ = queue_->error();
-        return false;
-      }
-      upload_ring_.commit(*offset, chunk_size, queue_->retirement_value());
-      shader_read_state_ = true;
-      shader_write_state_ = false;
+    const auto chunk_address = range.address;
+    const auto chunk_size = range.size;
+    // Staged-but-unrecorded regions are not in the ring's in-flight list yet,
+    // so a reservation that wraps onto them would overwrite them: record
+    // them (they retire with this batch) before taking the next region.
+    if (!pending_.empty() && upload_ring_.would_wrap(chunk_size) && !flush_pending_uploads())
+      return false;
+    const auto offset = upload_ring_.reserve(chunk_size, queue_->completed_value(), wait);
+    if (!offset) {
+      error_ = queue_->error().empty() ? "Vulkan upload ring reservation failed"
+                                       : queue_->error();
+      return false;
+    }
+    coherency_.commit_cpu_upload(chunk_address, chunk_size);
+    if (!memory_->copy_physical_range(
+            chunk_address, upload_bytes.subspan(*offset, chunk_size))) {
+      coherency_.rollback_cpu_upload(chunk_address, chunk_size);
+      error_ = "failed to snapshot Xbox physical memory";
+      return false;
+    }
+    pending_.push_back({chunk_address, chunk_size, *offset});
   }
+  return true;
+}
+
+bool GuestMemoryMirror::flush_pending_uploads() {
+  if (pending_.empty()) return true;
+  if (!queue_) return false;
+  // Taken before recording: the queue's ordered-work hook may call back here
+  // while the copy is being recorded, and must find nothing pending.
+  auto group = std::move(pending_);
+  pending_.clear();
+  if (!queue_->execute_async([&](VkCommandBuffer command, std::uint32_t, std::uint32_t) {
+        // Earlier work in this batch or a previous one may still read or write
+        // the ranges: one dependency covers them all, then every copy, then
+        // one dependency making them visible to every later read.
+        std::vector<VkBufferMemoryBarrier2> barriers(group.size());
+        std::vector<VkBufferCopy> copies(group.size());
+        for (std::size_t i = 0; i < group.size(); ++i) {
+          auto& before = barriers[i];
+          before = {VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2};
+          before.srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+          before.srcAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT;
+          before.dstStageMask = VK_PIPELINE_STAGE_2_COPY_BIT;
+          before.dstAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+          before.buffer = mirror_.buffer();
+          before.offset = group[i].address;
+          before.size = group[i].size;
+          copies[i] = {group[i].offset, group[i].address, group[i].size};
+        }
+        VkDependencyInfo dependency{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+        dependency.bufferMemoryBarrierCount = static_cast<std::uint32_t>(barriers.size());
+        dependency.pBufferMemoryBarriers = barriers.data();
+        vkCmdPipelineBarrier2(command, &dependency);
+        vkCmdCopyBuffer(command, upload_.buffer(), mirror_.buffer(),
+                        static_cast<std::uint32_t>(copies.size()), copies.data());
+        for (auto& after : barriers) {
+          after.srcStageMask = VK_PIPELINE_STAGE_2_COPY_BIT;
+          after.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+          after.dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+          after.dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT;
+        }
+        vkCmdPipelineBarrier2(command, &dependency);
+      })) {
+    for (const auto& upload : group) coherency_.rollback_cpu_upload(upload.address, upload.size);
+    error_ = queue_->error();
+    return false;
+  }
+  const auto retirement = queue_->retirement_value();
+  for (const auto& upload : group) upload_ring_.commit(upload.offset, upload.size, retirement);
+  shader_read_state_ = true;
+  shader_write_state_ = false;
+  ++upload_batches_;
+  upload_ranges_ += group.size();
+  perf::add(perf::Counter::MirrorBatches, 1u);
+  perf::add(perf::Counter::MirrorRanges, group.size());
   return true;
 }
 
@@ -188,6 +216,7 @@ bool GuestMemoryMirror::queue_cpu_visibility(
     error_ = "Vulkan guest-memory mirror is not initialized";
     return false;
   }
+  if (!flush_pending_uploads()) return false;
   const auto plan = coherency_.plan_readback(memory_->coherency(), address, width,
                                              kTransferSize, usage);
   for (const auto& range : plan.ranges) {

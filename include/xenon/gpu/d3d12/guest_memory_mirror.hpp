@@ -63,6 +63,18 @@ class GuestMemoryMirror {
                                         std::uint32_t width) const {
     return coherency_.device_range_valid(address, width);
   }
+  // Uploads staged by synchronize_range() since the last flush are recorded
+  // together: one transition pair around one copy per range, rather than one
+  // ordered command (which ends the open draw run) per range. Every consumer
+  // of the mirror's contents is ordered work, and the queue's pre-ordered-work
+  // hook (and BackendCore before each draw) calls this first, so copies still
+  // precede the work that reads them and follow the draws that read the old
+  // bytes.
+  [[nodiscard]] bool flush_pending_uploads();
+  [[nodiscard]] bool uploads_pending() const noexcept { return !pending_.empty(); }
+  // Copy batches recorded and dirty ranges they carried (tests, perf).
+  [[nodiscard]] std::uint64_t upload_batches() const noexcept { return upload_batches_; }
+  [[nodiscard]] std::uint64_t upload_ranges() const noexcept { return upload_ranges_; }
   void prepare_shader_access(ID3D12GraphicsCommandList* list, bool writable);
   // Whether prepare_shader_access() would record a barrier now (a state
   // transition, or the UAV barrier between memory-exporting accesses).
@@ -96,6 +108,14 @@ class GuestMemoryMirror {
   // not written into guest memory yet.
   StagingRing readback_ring_{};
   memory::GuestMemoryGpuCoherency coherency_{};
+  struct PendingUpload {
+    std::uint32_t address{};
+    std::uint32_t size{};
+    std::uint64_t offset{};
+  };
+  std::vector<PendingUpload> pending_{};
+  std::uint64_t upload_batches_{};
+  std::uint64_t upload_ranges_{};
   D3D12_RESOURCE_STATES state_{D3D12_RESOURCE_STATE_COPY_DEST};
   std::string error_{};
   // Writes finished readbacks into guest memory on a thread of its own.

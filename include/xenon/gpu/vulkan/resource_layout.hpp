@@ -8,6 +8,7 @@
 
 #include <vulkan/vulkan.h>
 
+#include "xenon/gpu/bind_shadow.hpp"
 #include "xenon/gpu/guest_memory_segments.hpp"
 #include "xenon/gpu/resource_ir.hpp"
 #include "xenon/gpu/vulkan/command_queue.hpp"
@@ -60,6 +61,8 @@ class ResourceLayout {
   // memory binding have not changed since an earlier draw of the same batch
   // reuses that draw's descriptor set instead of writing its own.
   [[nodiscard]] DrawBinding prepare_draw(std::uint32_t frame_index, std::uint32_t draw_slot);
+  [[nodiscard]] std::uint64_t constants_uploaded() const noexcept { return constants_cache_.uploads(); }
+  [[nodiscard]] std::uint64_t constants_reused() const noexcept { return constants_cache_.reuses(); }
   [[nodiscard]] std::uint64_t sets_reused() const noexcept { return sets_reused_; }
   [[nodiscard]] std::uint64_t sets_written() const noexcept { return sets_written_; }
 
@@ -103,6 +106,7 @@ class ResourceLayout {
   std::array<TextureBinding, 32> texture_bindings_{};
   std::array<std::byte, static_cast<std::size_t>(kConstantBufferBytes)>
       constants_staging_{};
+  ConstantsSlotCache constants_cache_{};
   VkBuffer guest_memory_buffer_{VK_NULL_HANDLE};
   VkDeviceSize guest_memory_size_{};
   // Bytes between draw slots' constants (minUniformBufferOffsetAlignment).

@@ -161,13 +161,14 @@ VkCommandBuffer CommandQueue::open_primary() {
 }
 
 void CommandQueue::before_ordered_work() {
-  if (!before_ordered_work_ || in_before_ordered_work_) return;
+  if ((!before_ordered_work_ && !pending_work_flush_) || in_before_ordered_work_) return;
   in_before_ordered_work_ = true;
   struct Clear {
     bool& flag;
     ~Clear() { flag = false; }
   } clear{in_before_ordered_work_};
-  before_ordered_work_();
+  if (before_ordered_work_) before_ordered_work_();
+  if (pending_work_flush_) pending_work_flush_();
 }
 
 bool CommandQueue::reserve_slot(std::uint32_t& frame_index, std::uint32_t& slot) {
@@ -326,8 +327,9 @@ bool CommandQueue::execute_async(const std::function<void(
 bool CommandQueue::submit_current(VkSemaphore wait_semaphore,
                                   VkPipelineStageFlags2 wait_stage,
                                   VkSemaphore signal_semaphore) {
-  if (current_frame_ == UINT32_MAX) return true;
+  // Staged work (see set_pending_work_flush()) may open the batch.
   before_ordered_work();
+  if (current_frame_ == UINT32_MAX) return true;
   // Every run recorded on a worker is finished before the batch is submitted.
   if (workers_) {
     workers_->wait_all();

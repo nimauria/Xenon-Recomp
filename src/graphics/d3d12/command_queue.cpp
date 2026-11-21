@@ -252,13 +252,14 @@ ID3D12GraphicsCommandList* CommandQueue::open_primary() {
 }
 
 void CommandQueue::before_ordered_work() {
-  if (!before_ordered_work_ || in_before_ordered_work_) return;
+  if ((!before_ordered_work_ && !pending_work_flush_) || in_before_ordered_work_) return;
   in_before_ordered_work_ = true;
   struct Clear {
     bool& flag;
     ~Clear() { flag = false; }
   } clear{in_before_ordered_work_};
-  before_ordered_work_();
+  if (before_ordered_work_) before_ordered_work_();
+  if (pending_work_flush_) pending_work_flush_();
 }
 
 bool CommandQueue::execute_async(const std::function<void(
@@ -323,8 +324,9 @@ bool CommandQueue::record_run(std::function<void(ID3D12GraphicsCommandList*)> re
 }
 
 bool CommandQueue::flush() {
-  if (current_frame_ == UINT32_MAX) return true;
+  // Staged work (see set_pending_work_flush()) may open the batch.
   before_ordered_work();
+  if (current_frame_ == UINT32_MAX) return true;
   // Every run recorded on a worker is finished before the batch is submitted.
   if (workers_) {
     workers_->wait_all();

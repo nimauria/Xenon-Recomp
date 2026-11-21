@@ -214,8 +214,16 @@ struct ResolveWriteResult {
     std::uint32_t source_row_pitch,
     memory::AddressSpace& physical_memory);
 
+// Tracks which cached textures guest writes have made stale.
+//
+// Textures are indexed by the 64 KiB buckets of physical memory their
+// subresources cover, so a write (mark_dirty) visits only the textures sharing
+// a bucket with it instead of every texture. consume_dirty() skips the page
+// walk altogether when no write has been assigned an epoch newer than the one
+// the texture was last consumed at.
 class TextureDirtyTracker {
  public:
+  static constexpr std::uint32_t kBucketShift = 16;
   void track(std::uint64_t key, const TextureLayout& layout);
   void track_clean(std::uint64_t key, const TextureLayout& layout,
                    std::uint64_t clean_epoch);
@@ -228,14 +236,35 @@ class TextureDirtyTracker {
       std::uint64_t through_epoch) noexcept;
   [[nodiscard]] bool is_dirty(std::uint64_t key) const noexcept;
 
+  // Statistics (tests, perf): writes passed to mark_dirty(), textures they
+  // overlapped, page walks consume_dirty() skipped or performed.
+  [[nodiscard]] std::uint64_t mark_calls() const noexcept;
+  [[nodiscard]] std::uint64_t textures_marked() const noexcept;
+  [[nodiscard]] std::uint64_t consume_walks_skipped() const noexcept;
+  [[nodiscard]] std::uint64_t consume_walks() const noexcept;
+  // How many textures a write to [address, address + size) would examine (the
+  // ones sharing a bucket with it), whether or not they overlap it exactly.
+  [[nodiscard]] std::size_t candidates_for(std::uint32_t address, std::uint32_t size) const;
+  [[nodiscard]] std::size_t tracked_count() const;
+
  private:
   struct Entry {
     std::vector<std::pair<std::uint64_t, std::uint64_t>> ranges{};
     bool dirty{true};
     std::uint64_t clean_epoch{};
   };
+  static constexpr std::uint32_t kBucketCount =
+      (memory::kPhysicalMemorySize >> kBucketShift) + 1u;
+  [[nodiscard]] static std::uint32_t bucket_of(std::uint64_t address) noexcept;
+  void index(std::uint64_t key, const Entry& entry);
+  void unindex(std::uint64_t key, const Entry& entry);
   std::unordered_map<std::uint64_t, Entry> entries_{};
+  std::vector<std::vector<std::uint64_t>> buckets_{};
   mutable std::mutex mutex_{};
+  std::uint64_t mark_calls_{};
+  std::uint64_t textures_marked_{};
+  std::uint64_t walks_skipped_{};
+  std::uint64_t walks_{};
 };
 
 }  // namespace xenon::gpu

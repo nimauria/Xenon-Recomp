@@ -390,6 +390,16 @@ class Backend::Impl : public detail::BackendCore<Backend::Impl, BackendApi> {
   // record_prepared_run() - rather than one rendering instance per draw,
   // each loading and storing every attachment - into the primary segment, or
   // on a recording worker when the run is long.
+  // Padding-free keys for the per-run state shadows (BindShadow compares bytes).
+  struct SetKey {
+    VkDescriptorSet set{VK_NULL_HANDLE};
+    VkPipelineLayout layout{VK_NULL_HANDLE};
+    std::uint64_t constants_offset{};
+  };
+  struct IndexKey {
+    VkBuffer buffer{VK_NULL_HANDLE};
+    VkDeviceSize offset{};
+  };
   struct PreparedDraw {
     VkPipeline pipeline{VK_NULL_HANDLE};
     VkPipelineLayout layout{VK_NULL_HANDLE};
@@ -420,6 +430,14 @@ class Backend::Impl : public detail::BackendCore<Backend::Impl, BackendApi> {
   std::uint32_t parallel_run_draws{8};
 
   bool record_draw(const DrawRecording& draw, bool& record_failed) {
+    // Uploads the draw's synchronization staged go before it (and after the
+    // draws already prepared, which read the old bytes): one ordered command
+    // for all of them, recorded first so the barrier decisions below see the
+    // mirror's state after the copies.
+    if (!mirror.flush_pending_uploads()) {
+      error = mirror.error();
+      return false;
+    }
     // Attachments not in their attachment layouts, and the guest-memory
     // mirror's barrier, are ordered work before the draw (each ends the open
     // run: no barrier is recorded inside a rendering instance).
@@ -570,31 +588,59 @@ class Backend::Impl : public detail::BackendCore<Backend::Impl, BackendApi> {
     }
     vkCmdBeginRendering(command, &rendering);
     VkPipeline bound_pipeline = VK_NULL_HANDLE;
+    // What this rendering instance already holds (unknown at its start). All
+    // draw pipelines declare the same dynamic state, so values set by command
+    // persist across pipeline binds; the descriptor set persists too (one
+    // pipeline layout).
+    BindCounts counts;
+    BindShadow<SetKey> set_binding;
+    BindShadow<VkViewport> viewport;
+    BindShadow<VkRect2D> scissor;
+    BindShadow<std::array<float, 4>> blend_constants;
+    BindShadow<std::array<std::uint32_t, 6>> stencil_state;
+    BindShadow<IndexKey> index_binding;
     for (const auto& draw : run) {
       if (bound_pipeline != draw.pipeline) {
         vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, draw.pipeline);
         bound_pipeline = draw.pipeline;
       }
-      vkCmdBindDescriptorSets(command, VK_PIPELINE_BIND_POINT_GRAPHICS, draw.layout, 0, 1,
-                              &draw.set, 1, &draw.constants_offset);
-      vkCmdSetViewport(command, 0, 1, &draw.viewport);
-      vkCmdSetScissor(command, 0, 1, &draw.scissor);
-      vkCmdSetBlendConstants(command, draw.blend_constants.data());
+      SetKey set_key{};
+      set_key.set = draw.set;
+      set_key.layout = draw.layout;
+      set_key.constants_offset = draw.constants_offset;
+      if (set_binding.update(set_key, counts))
+        vkCmdBindDescriptorSets(command, VK_PIPELINE_BIND_POINT_GRAPHICS, draw.layout, 0, 1,
+                                &draw.set, 1, &draw.constants_offset);
+      if (viewport.update(draw.viewport, counts)) vkCmdSetViewport(command, 0, 1, &draw.viewport);
+      if (scissor.update(draw.scissor, counts)) vkCmdSetScissor(command, 0, 1, &draw.scissor);
+      if (blend_constants.update(draw.blend_constants, counts))
+        vkCmdSetBlendConstants(command, draw.blend_constants.data());
       if (draw.stencil) {
-        vkCmdSetStencilCompareMask(command, VK_STENCIL_FACE_FRONT_BIT, draw.stencil_front[0]);
-        vkCmdSetStencilWriteMask(command, VK_STENCIL_FACE_FRONT_BIT, draw.stencil_front[1]);
-        vkCmdSetStencilReference(command, VK_STENCIL_FACE_FRONT_BIT, draw.stencil_front[2]);
-        vkCmdSetStencilCompareMask(command, VK_STENCIL_FACE_BACK_BIT, draw.stencil_back[0]);
-        vkCmdSetStencilWriteMask(command, VK_STENCIL_FACE_BACK_BIT, draw.stencil_back[1]);
-        vkCmdSetStencilReference(command, VK_STENCIL_FACE_BACK_BIT, draw.stencil_back[2]);
+        const std::array<std::uint32_t, 6> stencil_key{
+            draw.stencil_front[0], draw.stencil_front[1], draw.stencil_front[2],
+            draw.stencil_back[0],  draw.stencil_back[1],  draw.stencil_back[2]};
+        if (stencil_state.update(stencil_key, counts)) {
+          vkCmdSetStencilCompareMask(command, VK_STENCIL_FACE_FRONT_BIT, draw.stencil_front[0]);
+          vkCmdSetStencilWriteMask(command, VK_STENCIL_FACE_FRONT_BIT, draw.stencil_front[1]);
+          vkCmdSetStencilReference(command, VK_STENCIL_FACE_FRONT_BIT, draw.stencil_front[2]);
+          vkCmdSetStencilCompareMask(command, VK_STENCIL_FACE_BACK_BIT, draw.stencil_back[0]);
+          vkCmdSetStencilWriteMask(command, VK_STENCIL_FACE_BACK_BIT, draw.stencil_back[1]);
+          vkCmdSetStencilReference(command, VK_STENCIL_FACE_BACK_BIT, draw.stencil_back[2]);
+        }
       }
       if (draw.indexed) {
-        vkCmdBindIndexBuffer(command, draw.index_buffer, draw.index_offset, VK_INDEX_TYPE_UINT32);
+        IndexKey index_key{};
+        index_key.buffer = draw.index_buffer;
+        index_key.offset = draw.index_offset;
+        if (index_binding.update(index_key, counts))
+          vkCmdBindIndexBuffer(command, draw.index_buffer, draw.index_offset,
+                               VK_INDEX_TYPE_UINT32);
         vkCmdDrawIndexed(command, draw.element_count, 1, 0, 0, 0);
       } else {
         vkCmdDraw(command, draw.element_count, 1, 0, 0);
       }
     }
+    counts.flush();
     vkCmdEndRendering(command);
   }
 };
@@ -631,7 +677,9 @@ bool Backend::initialize(const ContextConfig& config) {
             std::to_string(impl_->guest_segments.count) + " segments of " +
             std::to_string(impl_->guest_segments.segment_bytes >> 20u) + " MiB");
   // Ordered work and submissions close the open draw run first.
-  impl_->queue.set_before_ordered_work([impl = impl_.get()] { impl->close_draw_run(); });
+  impl_->queue.set_before_ordered_work([impl = impl_.get()] {
+    impl->close_draw_run();
+  });
   // GPU timestamps around every batch, where the queue supports them.
   static_cast<void>(impl_->queue.enable_timestamps(impl_->context.physical_device()));
   impl_->open_pipeline_cache({});

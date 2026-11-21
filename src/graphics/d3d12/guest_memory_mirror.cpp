@@ -5,6 +5,8 @@
 #include <cstring>
 #include <span>
 
+#include "xenon/gpu/perf_stats.hpp"
+
 namespace xenon::gpu::d3d12 {
 
 GuestMemoryMirror::~GuestMemoryMirror() { reset(); }
@@ -27,6 +29,8 @@ bool GuestMemoryMirror::initialize(ID3D12Device* device, CommandQueue& queue,
   }
   memory_ = &memory;
   queue_ = &queue;
+  // Staged uploads are recorded ahead of whatever ordered work comes next.
+  queue.set_pending_work_flush([this] { (void)flush_pending_uploads(); });
   coherency_.reset(memory::kPhysicalMemorySize, false);
   upload_ring_.reset(kTransferSize);
   readback_ring_.reset(kReadbackSize);
@@ -46,11 +50,13 @@ bool GuestMemoryMirror::initialize(ID3D12Device* device, CommandQueue& queue,
 void GuestMemoryMirror::reset() noexcept {
   // The publisher reads readback_ and coherency_; it stops first.
   publisher_.stop();
+  if (queue_) queue_->set_pending_work_flush({});
   memory_ = nullptr;
   queue_ = nullptr;
   readback_.reset();
   upload_.reset();
   mirror_.reset();
+  pending_.clear();
   coherency_.clear();
   upload_ring_.reset(0);
   readback_ring_.reset(0);
@@ -86,55 +92,76 @@ bool GuestMemoryMirror::synchronize_range(
     return queue_->flush() && queue_->wait_for_completion(value);
   };
   for (const auto& range : plan.ranges) {
-      const auto chunk_address = range.address;
-      const auto chunk_size = range.size;
-      const auto offset = upload_ring_.reserve(chunk_size, queue_->completed_value(), wait);
-      if (!offset) {
-        error_ = queue_->error().empty() ? "D3D12 upload ring reservation failed"
-                                         : queue_->error();
-        return false;
-      }
-      // Release ownership before taking the snapshot. A CPU write racing after
-      // this point will re-dirty the exact bytes and therefore cannot be lost.
-      coherency_.commit_cpu_upload(chunk_address, chunk_size);
-      if (!memory_->copy_physical_range(
-              chunk_address, upload_bytes.subspan(*offset, chunk_size))) {
-        coherency_.rollback_cpu_upload(chunk_address, chunk_size);
-        error_ = "failed to snapshot Xbox physical memory";
-        return false;
-      }
-
-      const auto state_before_copy = state_;
-      if (!queue_->execute_async([&](ID3D12GraphicsCommandList* list, std::uint32_t,
-                                     std::uint32_t) {
-            if (state_before_copy != D3D12_RESOURCE_STATE_COPY_DEST) {
-              D3D12_RESOURCE_BARRIER barrier{};
-              barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-              barrier.Transition.pResource = mirror_.resource();
-              barrier.Transition.Subresource =
-                  D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-              barrier.Transition.StateBefore = state_before_copy;
-              barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
-              list->ResourceBarrier(1, &barrier);
-            }
-            list->CopyBufferRegion(mirror_.resource(), chunk_address,
-                                   upload_.resource(), *offset, chunk_size);
-            D3D12_RESOURCE_BARRIER barrier{};
-            barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-            barrier.Transition.pResource = mirror_.resource();
-            barrier.Transition.Subresource =
-                D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-            barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
-            barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_GENERIC_READ;
-            list->ResourceBarrier(1, &barrier);
-          })) {
-        coherency_.rollback_cpu_upload(chunk_address, chunk_size);
-        error_ = queue_->error();
-        return false;
-      }
-      upload_ring_.commit(*offset, chunk_size, queue_->retirement_value());
-      state_ = D3D12_RESOURCE_STATE_GENERIC_READ;
+    const auto chunk_address = range.address;
+    const auto chunk_size = range.size;
+    // Staged-but-unrecorded regions are not in the ring's in-flight list yet,
+    // so a reservation that wraps onto them would overwrite them: record
+    // them (they retire with this batch) before taking the next region.
+    if (!pending_.empty() && upload_ring_.would_wrap(chunk_size) && !flush_pending_uploads())
+      return false;
+    const auto offset = upload_ring_.reserve(chunk_size, queue_->completed_value(), wait);
+    if (!offset) {
+      error_ = queue_->error().empty() ? "D3D12 upload ring reservation failed"
+                                       : queue_->error();
+      return false;
+    }
+    // Release ownership before taking the snapshot. A CPU write racing after
+    // this point will re-dirty the exact bytes and therefore cannot be lost.
+    coherency_.commit_cpu_upload(chunk_address, chunk_size);
+    if (!memory_->copy_physical_range(
+            chunk_address, upload_bytes.subspan(*offset, chunk_size))) {
+      coherency_.rollback_cpu_upload(chunk_address, chunk_size);
+      error_ = "failed to snapshot Xbox physical memory";
+      return false;
+    }
+    pending_.push_back({chunk_address, chunk_size, *offset});
   }
+  return true;
+}
+
+bool GuestMemoryMirror::flush_pending_uploads() {
+  if (pending_.empty()) return true;
+  if (!queue_) return false;
+  // Taken before recording: the queue's ordered-work hook may call back here
+  // while the copy is being recorded, and must find nothing pending.
+  auto group = std::move(pending_);
+  pending_.clear();
+  if (!queue_->execute_async([&](ID3D12GraphicsCommandList* list, std::uint32_t,
+                                 std::uint32_t) {
+        // One transition to COPY_DEST, every range's copy, one transition to
+        // the shader-readable state.
+        const auto before = state_;
+        if (before != D3D12_RESOURCE_STATE_COPY_DEST) {
+          D3D12_RESOURCE_BARRIER barrier{};
+          barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+          barrier.Transition.pResource = mirror_.resource();
+          barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+          barrier.Transition.StateBefore = before;
+          barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
+          list->ResourceBarrier(1, &barrier);
+        }
+        for (const auto& upload : group)
+          list->CopyBufferRegion(mirror_.resource(), upload.address, upload_.resource(),
+                                 upload.offset, upload.size);
+        D3D12_RESOURCE_BARRIER barrier{};
+        barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        barrier.Transition.pResource = mirror_.resource();
+        barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+        barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_GENERIC_READ;
+        list->ResourceBarrier(1, &barrier);
+      })) {
+    for (const auto& upload : group) coherency_.rollback_cpu_upload(upload.address, upload.size);
+    error_ = queue_->error();
+    return false;
+  }
+  const auto retirement = queue_->retirement_value();
+  for (const auto& upload : group) upload_ring_.commit(upload.offset, upload.size, retirement);
+  state_ = D3D12_RESOURCE_STATE_GENERIC_READ;
+  ++upload_batches_;
+  upload_ranges_ += group.size();
+  perf::add(perf::Counter::MirrorBatches, 1u);
+  perf::add(perf::Counter::MirrorRanges, group.size());
   return true;
 }
 
@@ -172,6 +199,7 @@ bool GuestMemoryMirror::queue_cpu_visibility(
     error_ = "D3D12 guest-memory mirror is not initialized";
     return false;
   }
+  if (!flush_pending_uploads()) return false;
   const auto plan = coherency_.plan_readback(memory_->coherency(), address, width,
                                              kTransferSize, usage);
   for (const auto& range : plan.ranges) {

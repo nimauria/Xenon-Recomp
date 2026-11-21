@@ -536,6 +536,42 @@ int main() {
   assert(vulkan_mirror.device_range_valid(0x2000u, 4u));
   assert(!vulkan_mirror.device_range_valid(0x3000u, 4u));
   assert(vulkan_mirror.synchronize());
+  // The dirty ranges one draw needs are recorded as one copy batch (one barrier
+  // pair, one ordered command), not one per range; staged work is recorded
+  // before the next submission even without an explicit flush.
+  {
+    constexpr std::uint32_t kBase = 0x400000u, kStride = 0x10000u, kRanges = 5u;
+    for (std::uint32_t i = 0; i < kRanges; ++i) {
+      const std::array<std::byte, 4> pattern{std::byte(0xA0u + i), std::byte(1), std::byte(2),
+                                              std::byte(3)};
+      assert(vulkan_guest_memory.write_physical(kBase + i * kStride, pattern));
+    }
+    assert(vulkan_mirror.flush_pending_uploads());
+    const auto batches_before = vulkan_mirror.upload_batches();
+    const auto ranges_before = vulkan_mirror.upload_ranges();
+    for (std::uint32_t i = 0; i < kRanges; ++i)
+      assert(vulkan_mirror.synchronize_range(kBase + i * kStride, 4u));
+    assert(vulkan_mirror.uploads_pending());
+    assert(vulkan_mirror.upload_batches() == batches_before);
+    assert(vulkan_mirror.flush_pending_uploads());
+    assert(!vulkan_mirror.uploads_pending());
+    assert(vulkan_mirror.upload_batches() == batches_before + 1u);
+    assert(vulkan_mirror.upload_ranges() == ranges_before + kRanges);
+    for (std::uint32_t i = 0; i < kRanges; ++i)
+      assert(vulkan_mirror.device_range_valid(kBase + i * kStride, 4u));
+    // A submission flushes what is staged.
+    for (std::uint32_t i = 0; i < kRanges; ++i) {
+      const std::array<std::byte, 4> pattern{std::byte(0xB0u + i), std::byte(1), std::byte(2),
+                                              std::byte(3)};
+      assert(vulkan_guest_memory.write_physical(kBase + i * kStride, pattern));
+      assert(vulkan_mirror.synchronize_range(kBase + i * kStride, 4u));
+    }
+    assert(vulkan_mirror.uploads_pending());
+    assert(vulkan_queue.wait_idle());
+    assert(!vulkan_mirror.uploads_pending());
+    assert(vulkan_mirror.upload_batches() == batches_before + 2u);
+    assert(vulkan_mirror.upload_ranges() == ranges_before + 2u * kRanges);
+  }
   xenon::gpu::vulkan::ResourceLayout vulkan_resources;
   assert(vulkan_resources.initialize(vulkan_context.physical_device(),
                                      vulkan_context.device()));
@@ -643,23 +679,35 @@ int main() {
   // that draw's descriptor set with its own constants offset.
   {
     const auto written_before = vulkan_resources.sets_written();
+    const auto uploaded_before = vulkan_resources.constants_uploaded();
+    const auto reused_before = vulkan_resources.constants_reused();
     const auto first = vulkan_resources.prepare_draw(1, 0);
     const auto second = vulkan_resources.prepare_draw(1, 1);
     assert(first.set != VK_NULL_HANDLE && second.set == first.set);
-    assert(second.constants_offset > first.constants_offset);
+    // Identical constants share the earlier draw's slot: one upload.
+    assert(second.constants_offset == first.constants_offset);
+    // A change gets a slot of its own; the earlier draws keep theirs.
+    vulkan_resources.constants()[0] = std::byte{0x5A};
+    const auto changed = vulkan_resources.prepare_draw(1, 2);
+    assert(changed.constants_offset > first.constants_offset);
+    assert(vulkan_resources.prepare_draw(1, 3).constants_offset == changed.constants_offset);
+    assert(vulkan_resources.constants_uploaded() == uploaded_before + 2u);
+    assert(vulkan_resources.constants_reused() == reused_before + 2u);
     assert(vulkan_resources.bind_texture(0, xenon::gpu::TextureDimension::TwoDOrStacked,
                                          vulkan_texture.view(), vulkan_sampler));
-    const auto third = vulkan_resources.prepare_draw(1, 2);
+    const auto third = vulkan_resources.prepare_draw(1, 4);
     assert(third.set == first.set);
     assert(vulkan_resources.bind_texture(1, xenon::gpu::TextureDimension::TwoDOrStacked,
                                          vulkan_texture.view(), vulkan_sampler));
-    const auto fourth = vulkan_resources.prepare_draw(1, 3);
+    const auto fourth = vulkan_resources.prepare_draw(1, 5);
     assert(fourth.set != VK_NULL_HANDLE && fourth.set != first.set);
-    assert(vulkan_resources.prepare_draw(1, 4).set == fourth.set);
+    assert(vulkan_resources.prepare_draw(1, 6).set == fourth.set);
     // A new batch on frame 1 starts again at slot 0 and writes its own set.
     const auto restarted = vulkan_resources.prepare_draw(1, 0);
     assert(restarted.set == first.set && restarted.constants_offset == first.constants_offset);
-    assert(vulkan_resources.prepare_draw(2, 5).set != fourth.set);
+    assert(vulkan_resources.prepare_draw(2, 7).set != fourth.set);
+    // Sets: the first draw, the texture 0 and texture 1 rebindings, and
+    // frame 2's own; the draws that changed only constants wrote none.
     assert(vulkan_resources.sets_written() == written_before + 4u);
   }
   xenon::gpu::EdramSurfaceLayout vulkan_surface{
@@ -1105,6 +1153,42 @@ int main() {
     assert(mirror.device_range_valid(0x2000u, 4u));
     assert(!mirror.device_range_valid(0x3000u, 4u));
     assert(mirror.synchronize());
+    // The dirty ranges one draw needs are recorded as one copy batch (one barrier
+    // pair, one ordered command), not one per range; staged work is recorded
+    // before the next submission even without an explicit flush.
+    {
+      constexpr std::uint32_t kBase = 0x400000u, kStride = 0x10000u, kRanges = 5u;
+      for (std::uint32_t i = 0; i < kRanges; ++i) {
+        const std::array<std::byte, 4> pattern{std::byte(0xA0u + i), std::byte(1), std::byte(2),
+                                                std::byte(3)};
+        assert(guest_memory.write_physical(kBase + i * kStride, pattern));
+      }
+      assert(mirror.flush_pending_uploads());
+      const auto batches_before = mirror.upload_batches();
+      const auto ranges_before = mirror.upload_ranges();
+      for (std::uint32_t i = 0; i < kRanges; ++i)
+        assert(mirror.synchronize_range(kBase + i * kStride, 4u));
+      assert(mirror.uploads_pending());
+      assert(mirror.upload_batches() == batches_before);
+      assert(mirror.flush_pending_uploads());
+      assert(!mirror.uploads_pending());
+      assert(mirror.upload_batches() == batches_before + 1u);
+      assert(mirror.upload_ranges() == ranges_before + kRanges);
+      for (std::uint32_t i = 0; i < kRanges; ++i)
+        assert(mirror.device_range_valid(kBase + i * kStride, 4u));
+      // A submission flushes what is staged.
+      for (std::uint32_t i = 0; i < kRanges; ++i) {
+        const std::array<std::byte, 4> pattern{std::byte(0xB0u + i), std::byte(1), std::byte(2),
+                                                std::byte(3)};
+        assert(guest_memory.write_physical(kBase + i * kStride, pattern));
+        assert(mirror.synchronize_range(kBase + i * kStride, 4u));
+      }
+      assert(mirror.uploads_pending());
+      assert(queue.wait_idle());
+      assert(!mirror.uploads_pending());
+      assert(mirror.upload_batches() == batches_before + 2u);
+      assert(mirror.upload_ranges() == ranges_before + 2u * kRanges);
+    }
     xenon::gpu::d3d12::ResourceLayout resources;
     assert(resources.initialize(context.device()));
     assert(resources.ready());
@@ -1143,13 +1227,16 @@ int main() {
       constexpr std::uint64_t kBatch = 100, kNextBatch = 101, kOtherFrameBatch = 102;
       const auto copied_before = resources.tables_copied();
       const auto reused_before = resources.tables_reused();
+      const auto constants_uploaded_before = resources.constants_uploaded();
+      const auto constants_reused_before = resources.constants_reused();
       const auto first = resources.prepare_draw(1, 0, kBatch);
       const auto second = resources.prepare_draw(1, 1, kBatch);
       assert(first.valid && second.valid && !first.exhausted);
       assert(first.resources.ptr && first.samplers.ptr && first.constants);
       assert(second.resources.ptr == first.resources.ptr);
       assert(second.samplers.ptr == first.samplers.ptr);
-      assert(second.constants != first.constants);
+      // Identical constants share the earlier draw's slot (one upload).
+      assert(second.constants == first.constants);
       // Binding the same view and sampler again changes nothing.
       assert(resources.bind_texture(0, xenon::gpu::TextureDimension::TwoDOrStacked,
                                     texture.resource(), texture.format(), 1,
@@ -1161,7 +1248,11 @@ int main() {
       assert(resources.bind_texture(1, xenon::gpu::TextureDimension::TwoDOrStacked,
                                     texture.resource(), texture.format(), 1,
                                     texture_descriptor));
+      assert(third.constants == first.constants);
+      // A constant change gets a slot of its own; draws before it keep theirs.
+      resources.constants()[0] = std::byte{0x5A};
       const auto fourth = resources.prepare_draw(1, 3, kBatch);
+      assert(fourth.constants != first.constants);
       const auto resource_stride = std::uint64_t(xenon::gpu::d3d12::ResourceLayout::kResourceCount) *
                                    context.device()->GetDescriptorHandleIncrementSize(
                                        D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
@@ -1172,6 +1263,9 @@ int main() {
       assert(fourth.constants == first.constants + 3u * xenon::gpu::kShaderConstantBufferBytes);
       const auto fifth = resources.prepare_draw(1, 4, kBatch);
       assert(fifth.resources.ptr == fourth.resources.ptr);
+      assert(fifth.constants == fourth.constants);
+      assert(resources.constants_uploaded() == constants_uploaded_before + 2u);
+      assert(resources.constants_reused() == constants_reused_before + 3u);
       // A new batch on frame 1 copies its tables again, from the first region.
       const auto restarted = resources.prepare_draw(1, 0, kNextBatch);
       assert(restarted.resources.ptr == first.resources.ptr);

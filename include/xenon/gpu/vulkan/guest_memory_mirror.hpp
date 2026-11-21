@@ -55,6 +55,16 @@ class GuestMemoryMirror {
                                         std::uint32_t width) const {
     return coherency_.device_range_valid(address, width);
   }
+  // Uploads staged by synchronize_range() since the last flush are recorded
+  // together: one barrier pair around one copy per range, rather than one
+  // ordered command (which ends the open draw run) per range. The queue's
+  // pre-ordered-work hook (and BackendCore before each draw) calls this first,
+  // so copies still precede the work that reads them and follow the draws that
+  // read the old bytes.
+  [[nodiscard]] bool flush_pending_uploads();
+  [[nodiscard]] bool uploads_pending() const noexcept { return !pending_.empty(); }
+  [[nodiscard]] std::uint64_t upload_batches() const noexcept { return upload_batches_; }
+  [[nodiscard]] std::uint64_t upload_ranges() const noexcept { return upload_ranges_; }
   void prepare_shader_access(VkCommandBuffer command, bool writable);
   // Whether prepare_shader_access() would record a barrier now: earlier
   // shader writes are pending, or this access writes after reads.
@@ -93,6 +103,14 @@ class GuestMemoryMirror {
   // not written into guest memory yet.
   StagingRing readback_ring_{};
   memory::GuestMemoryGpuCoherency coherency_{};
+  struct PendingUpload {
+    std::uint32_t address{};
+    std::uint32_t size{};
+    std::uint64_t offset{};
+  };
+  std::vector<PendingUpload> pending_{};
+  std::uint64_t upload_batches_{};
+  std::uint64_t upload_ranges_{};
   bool shader_read_state_{};
   bool shader_write_state_{};
   std::string error_{};

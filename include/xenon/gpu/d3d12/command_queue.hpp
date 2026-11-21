@@ -71,6 +71,11 @@ class CommandQueue {
   // The backend's "close the open draw run" step, run before any ordered work
   // and before a batch is submitted.
   void set_before_ordered_work(std::function<void()> hook) { before_ordered_work_ = std::move(hook); }
+  // Work a component staged for the queue and has not recorded yet (the
+  // guest-memory mirror's batched uploads): run after the hook above, before
+  // every ordered command and submission, so staged work keeps its place in
+  // the order. Runs inside the same re-entrancy guard.
+  void set_pending_work_flush(std::function<void()> flush) { pending_work_flush_ = std::move(flush); }
   // Recording worker threads (RecordingWorkers::default_thread_count() by
   // default; 0 records every run inline). Submits pending work first.
   [[nodiscard]] bool set_recording_threads(unsigned threads);
@@ -154,6 +159,7 @@ class CommandQueue {
   std::uint64_t next_fence_value_{1};
   std::uint64_t last_submitted_value_{};
   std::function<void()> before_ordered_work_{};
+  std::function<void()> pending_work_flush_{};
   bool in_before_ordered_work_{};
   std::unique_ptr<RecordingWorkers> workers_{};
   std::uint64_t parallel_runs_{};
