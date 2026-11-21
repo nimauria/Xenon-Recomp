@@ -27,8 +27,10 @@
 // tests/recomp/recomp_driver_tests.cpp.
 
 #include <cassert>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <random>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -161,7 +163,12 @@ struct Fixture {
 
 Fixture make_fixture(const std::string& name, const std::vector<std::byte>& xex_bytes) {
   Fixture fixture;
-  fixture.root = std::filesystem::temp_directory_path() / ("xenon_registry_numeric_format_" + name);
+  // A per-run suffix: two build trees (or two ctest runs) running this test
+  // at once must not delete and overwrite each other's generated project.
+  static const std::string run_suffix = std::to_string(std::random_device{}()) + "_" +
+      std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
+  fixture.root = std::filesystem::temp_directory_path() /
+                 ("xenon_registry_numeric_format_" + name + "_" + run_suffix);
   std::filesystem::remove_all(fixture.root);
   std::filesystem::create_directories(fixture.root);
   fixture.input = fixture.root / "fixture.xex";
