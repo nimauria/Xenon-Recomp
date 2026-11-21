@@ -24,6 +24,15 @@
 
 namespace xenon::cpu::aot {
 
+// Generated functions with promoted registers (CppAotBackend) write them
+// back to CpuState on every exit - returns and exceptions unwinding through
+// the function alike - by running `flush` here.
+template <typename Flush>
+struct FlushOnExit {
+  Flush& flush;
+  ~FlushOnExit() { flush(); }
+};
+
 // The guest lowered its hardware thread's priority inside a spin-wait
 // (`or 1,1,1` / `or 6,6,6` / `or 31,31,31`): tell the host core the same, so
 // its sibling thread gets the pipeline while this one polls.

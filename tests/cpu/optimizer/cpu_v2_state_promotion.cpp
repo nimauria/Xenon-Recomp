@@ -31,10 +31,21 @@ void test_long_gpr_chain() {
   assert(count_op(block, Op::ReadGpr) == 1);
   assert(count_op(block, Op::WriteGpr) == 1);
 
-  const auto generated = backend::CppAotBackend{}.emit_function(compiled.function, "promotion_chain");
-  std::size_t gpr3 = 0;
-  for (std::size_t pos = 0; (pos = generated.find("state.gpr[3]", pos)) != std::string::npos; pos += 12) ++gpr3;
-  assert(gpr3 == 2); // one initial load, one architectural materialization.
+  const auto count = [](const std::string& text, const std::string& what) {
+    std::size_t n = 0;
+    for (std::size_t pos = 0; (pos = text.find(what, pos)) != std::string::npos; pos += what.size()) ++n;
+    return n;
+  };
+  // Registers in CpuState: the optimizer leaves one load and one
+  // architectural materialization of r3 for the whole chain.
+  const auto generated =
+      backend::CppAotBackend(false).emit_function(compiled.function, "promotion_chain");
+  assert(count(generated, "state.gpr[3]") == 2);
+  // Promoted to a local: the chain reads and writes the local once each, and
+  // CpuState is touched only at entry, by the write-back and by the reload.
+  const auto promoted = backend::CppAotBackend(true).emit_function(compiled.function, "promotion_chain");
+  assert(count(promoted, "state.gpr[3]") == 3);
+  assert(count(promoted, "= g3;") == 1 && count(promoted, "  g3 = ") == 1);
 }
 
 void test_fault_boundary_materializes() {

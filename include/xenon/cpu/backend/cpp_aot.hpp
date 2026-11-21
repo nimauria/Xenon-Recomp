@@ -40,6 +40,17 @@ struct DirectCallBinding {
 // instruction selection and register allocation.
 class CppAotBackend {
  public:
+  // Register promotion (whole-function path): the guest GPRs, FPRs and
+  // vector registers a function uses live in C++ locals for the whole
+  // function, written back to CpuState before anything else can look at it
+  // (calls, hooks, traps, system calls, a taken safepoint) and reloaded
+  // after, and written back on every exit, exceptions included. Guest
+  // stores go through a byte pointer that may alias anything, so with the
+  // registers in CpuState the host compiler had to reload every one after
+  // every store. Off, every access goes to CpuState as before.
+  explicit CppAotBackend(bool promote_registers = true) noexcept
+      : promote_registers_(promote_registers) {}
+
   [[nodiscard]] std::string emit_function(const ir::Block& block,
                                           std::string_view function_name) const;
   [[nodiscard]] std::string emit_translation_unit(const ir::Block& block,
@@ -71,6 +82,11 @@ class CppAotBackend {
   // called directly. Sorted and unique.
   [[nodiscard]] static std::vector<GuestAddress> static_tail_branch_targets(
       const ir::Function& function);
+
+  [[nodiscard]] bool promotes_registers() const noexcept { return promote_registers_; }
+
+ private:
+  bool promote_registers_{true};
 };
 
 }  // namespace xenon::cpu::backend

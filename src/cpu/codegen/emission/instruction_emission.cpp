@@ -50,12 +50,12 @@ std::string emit_one(const Instruction&i, const std::vector<Type>& value_types){
       if(i.type==Type::F64)return decl(i,"std::bit_cast<double>(std::uint64_t("+u64(i.imm0)+"))");
       return decl(i,"static_cast<"+std::string(ctype(i.type))+">("+u64(i.imm0)+")");
     }
-    case Op::ReadGpr:return decl(i,"state.gpr["+std::to_string(i.imm0&31)+"]");
-    case Op::WriteGpr:o<<"  state.gpr["<<(i.imm0&31)<<"] = "<<arg(i,0)<<";\n";break;
-    case Op::ReadFprBits:return decl(i,"state.fpr_bits["+std::to_string(i.imm0&31)+"]");
-    case Op::WriteFprBits:o<<"  state.fpr_bits["<<(i.imm0&31)<<"] = "<<arg(i,0)<<";\n";break;
-    case Op::ReadVector:return decl(i,"state.vr["+std::to_string(i.imm0&127)+"]");
-    case Op::WriteVector:o<<"  state.vr["<<(i.imm0&127)<<"] = "<<arg(i,0)<<";\n";break;
+    case Op::ReadGpr:return decl(i,gpr_ref(static_cast<unsigned>(i.imm0)));
+    case Op::WriteGpr:o<<"  "<<gpr_ref(static_cast<unsigned>(i.imm0))<<" = "<<arg(i,0)<<";\n";break;
+    case Op::ReadFprBits:return decl(i,fpr_ref(static_cast<unsigned>(i.imm0)));
+    case Op::WriteFprBits:o<<"  "<<fpr_ref(static_cast<unsigned>(i.imm0))<<" = "<<arg(i,0)<<";\n";break;
+    case Op::ReadVector:return decl(i,vr_ref(static_cast<unsigned>(i.imm0)));
+    case Op::WriteVector:o<<"  "<<vr_ref(static_cast<unsigned>(i.imm0))<<" = "<<arg(i,0)<<";\n";break;
     case Op::ReadCR:return decl(i,"state.cr");
     case Op::WriteCR:o<<"  state.cr = "<<arg(i,0)<<";\n";break;
     case Op::ReadCRBit:return decl(i,"state.cr_bit("+std::to_string(i.imm0)+")");
@@ -188,8 +188,8 @@ std::string emit_one(const Instruction&i, const std::vector<Type>& value_types){
       o<<decl(i,tmp)<<"  state.reservation.clear();\n";
       break;
     }
-    case Op::StringLoad:o<<"  aot::string_load(state,memory_access,static_cast<GuestAddress>("<<arg(i,0)<<"),static_cast<std::uint32_t>("<<arg(i,1)<<"),"<<i.imm0<<");\n";break;
-    case Op::StringStore:o<<"  aot::string_store(state,memory_access,static_cast<GuestAddress>("<<arg(i,0)<<"),static_cast<std::uint32_t>("<<arg(i,1)<<"),"<<i.imm0<<");\n";break;
+    case Op::StringLoad:o<<"  "<<flush_registers()<<"aot::string_load(state,memory_access,static_cast<GuestAddress>("<<arg(i,0)<<"),static_cast<std::uint32_t>("<<arg(i,1)<<"),"<<i.imm0<<"); "<<reload_registers()<<"\n";break;
+    case Op::StringStore:o<<"  "<<flush_registers()<<"aot::string_store(state,memory_access,static_cast<GuestAddress>("<<arg(i,0)<<"),static_cast<std::uint32_t>("<<arg(i,1)<<"),"<<i.imm0<<"); "<<reload_registers()<<"\n";break;
     case Op::Barrier:{
       if(i.imm0==ir::kBarrierSpinHint){o<<"  aot::spin_hint();\n";break;}
       const char* k=i.imm0==1?"Sync":i.imm0==2?"LightweightSync":i.imm0==3?"Eieio":"InstructionSync";
@@ -224,23 +224,23 @@ std::string emit_one(const Instruction&i, const std::vector<Type>& value_types){
     // undetected defect: the two-import fixture that first proved the
     // import-thunk bridge never happened to exercise a local-to-local call.
     case Op::Call:{
-      o<<"  { const auto call_target=static_cast<GuestAddress>("<<arg(i,0)<<"); "
+      o<<"  { const auto call_target=static_cast<GuestAddress>("<<arg(i,0)<<"); "<<flush_registers()
        <<"if(auto* native=context.lookup_compiled(call_target,CompiledLookupKind::Call)) { "
-       <<"auto rr=native(context); if(rr.terminal()) return rr; } else { "
+       <<"auto rr=native(context); "<<reload_registers()<<"if(rr.terminal()) return rr; } else { "
        <<"auto fallback=context.try_dynamic_fallback(call_target,CompiledLookupKind::Call); "
        <<"auto rr=fallback.handled ? fallback.result : runtime.call(call_target,state,memory); "
-       <<"if(rr.terminal()) return rr; } }\n";
+       <<reload_registers()<<"if(rr.terminal()) return rr; } }\n";
       break;
     }
     case Op::BranchIf:{
       o<<"  if("<<arg(i,0)<<") { ";
       if(i.imm0){
         o<<"const auto call_target=static_cast<GuestAddress>("<<arg(i,1)<<"); "
-         <<"ExecutionResult rr{}; "
+         <<"ExecutionResult rr{}; "<<flush_registers()
          <<"if(auto* native=context.lookup_compiled(call_target,CompiledLookupKind::Call)) rr=native(context); "
          <<"else { auto fallback=context.try_dynamic_fallback(call_target,CompiledLookupKind::Call); "
          <<"rr=fallback.handled ? fallback.result : runtime.call(call_target,state,memory); } "
-         <<"if(rr.terminal()) return rr;";
+         <<reload_registers()<<"if(rr.terminal()) return rr;";
       }else{
         o<<"const auto branch_target=static_cast<GuestAddress>("<<arg(i,1)<<"); state.nia=branch_target; return {FlowReason::Branch,branch_target,0};";
       }
@@ -252,37 +252,37 @@ std::string emit_one(const Instruction&i, const std::vector<Type>& value_types){
       if(i.imm0){
         const auto expected=static_cast<GuestAddress>(i.guest_address+4u);
         o<<"const auto raw_target=static_cast<GuestAddress>("<<arg(i,1)<<"); "
-         <<"const auto guest_target=static_cast<GuestAddress>(raw_target & ~3u); "
+         <<"const auto guest_target=static_cast<GuestAddress>(raw_target & ~3u); "<<flush_registers()
          <<"if(auto* native=context.lookup_compiled(guest_target,CompiledLookupKind::Call)) { "
-         <<"auto rr=context.follow_tail_branches(native(context)); if(rr.reason != FlowReason::Return || rr.next_address != "
+         <<"auto rr=context.follow_tail_branches(native(context)); "<<reload_registers()<<"if(rr.reason != FlowReason::Return || rr.next_address != "
          <<expected<<"u) return rr; } else { auto fallback=context.try_dynamic_fallback(guest_target,CompiledLookupKind::Call); "
          <<"auto rr=context.follow_tail_branches(fallback.handled ? fallback.result : runtime.call(raw_target,state,memory)); "
-         <<"if(rr.reason==FlowReason::Return) { if(rr.next_address != "<<expected<<"u) return rr; } "
+         <<reload_registers()<<"if(rr.reason==FlowReason::Return) { if(rr.next_address != "<<expected<<"u) return rr; } "
          <<"else if(rr.reason!=FlowReason::Fallthrough) return rr; }";
       }else if(i.imm1==1){
         o<<"const auto return_target=static_cast<GuestAddress>("<<arg(i,1)<<" & ~3ull); state.nia=return_target; return {FlowReason::Return,return_target,0};";
       }else{
-        o<<"const auto guest_target=static_cast<GuestAddress>("<<arg(i,1)<<" & ~3ull); "
+        o<<"const auto guest_target=static_cast<GuestAddress>("<<arg(i,1)<<" & ~3ull); "<<flush_registers()
          <<"if(auto* native=context.lookup_compiled(guest_target,CompiledLookupKind::Branch)) "
-         <<"return native(context); auto fallback=context.try_dynamic_fallback(guest_target,CompiledLookupKind::Branch); "
-         <<"if(fallback.handled) return fallback.result; state.nia=guest_target; return {FlowReason::Branch,guest_target,0};";
+         <<"{ auto xr=native(context); "<<reload_registers()<<"return xr; } auto fallback=context.try_dynamic_fallback(guest_target,CompiledLookupKind::Branch); "
+         <<reload_registers()<<"if(fallback.handled) return fallback.result; state.nia=guest_target; return {FlowReason::Branch,guest_target,0};";
       }
       o<<" }\n";break;
     }
     case Op::CallIndirect:{
       o<<"  { const auto raw_target=static_cast<GuestAddress>("<<arg(i,0)<<"); "
-       <<"const auto guest_target=static_cast<GuestAddress>(raw_target & ~3u); "
+       <<"const auto guest_target=static_cast<GuestAddress>(raw_target & ~3u); "<<flush_registers()
        <<"if(auto* native=context.lookup_compiled(guest_target,CompiledLookupKind::Call)) { "
-       <<"auto rr=context.follow_tail_branches(native(context)); if(rr.reason != FlowReason::Return || rr.next_address != "
+       <<"auto rr=context.follow_tail_branches(native(context)); "<<reload_registers()<<"if(rr.reason != FlowReason::Return || rr.next_address != "
        <<"static_cast<GuestAddress>(state.lr & ~3ull)) return rr; } else { "
        <<"auto fallback=context.try_dynamic_fallback(guest_target,CompiledLookupKind::Call); "
        <<"auto rr=context.follow_tail_branches(fallback.handled ? fallback.result : runtime.call(raw_target,state,memory)); "
-       <<"if(rr.reason==FlowReason::Return) { if(rr.next_address != static_cast<GuestAddress>(state.lr & ~3ull)) return rr; } "
+       <<reload_registers()<<"if(rr.reason==FlowReason::Return) { if(rr.next_address != static_cast<GuestAddress>(state.lr & ~3ull)) return rr; } "
        <<"else if(rr.reason!=FlowReason::Fallthrough) return rr; } }\n";break;
     }
     case Op::Return:o<<"  { const auto return_target=static_cast<GuestAddress>(state.lr & ~3ull); state.nia=return_target; return {FlowReason::Return,return_target,0}; }\n";break;
-    case Op::Syscall:o<<"  return runtime.syscall("<<i.imm0<<",state,memory);\n";break;
-    case Op::Trap:{const std::uint32_t w=i.guest_word;const auto m=guest_mnemonic(i);const bool word=m=="tw"||m=="twi";const bool imm=m=="tdi"||m=="twi";unsigned ra=(w>>16)&31u;unsigned rb=(w>>11)&31u;std::int64_t simm=static_cast<std::int16_t>(w&0xFFFFu);o<<"  if(aot::trap_condition("<<i.imm0<<",state.gpr["<<ra<<"],"<<(imm?("std::uint64_t(std::int64_t("+std::to_string(simm)+"))"):("state.gpr["+std::to_string(rb)+"]"))<<","<<(word?"true":"false")<<")) return runtime.trap("<<i.imm0<<",state,memory);\n";break;}
+    case Op::Syscall:o<<"  { "<<flush_registers()<<"auto xr=runtime.syscall("<<i.imm0<<",state,memory); "<<reload_registers()<<"return xr; }\n";break;
+    case Op::Trap:{const std::uint32_t w=i.guest_word;const auto m=guest_mnemonic(i);const bool word=m=="tw"||m=="twi";const bool imm=m=="tdi"||m=="twi";unsigned ra=(w>>16)&31u;unsigned rb=(w>>11)&31u;std::int64_t simm=static_cast<std::int16_t>(w&0xFFFFu);o<<"  if(aot::trap_condition("<<i.imm0<<","<<gpr_ref(ra)<<","<<(imm?("std::uint64_t(std::int64_t("+std::to_string(simm)+"))"):gpr_ref(rb))<<","<<(word?"true":"false")<<")) { "<<flush_registers()<<"auto xr=runtime.trap("<<i.imm0<<",state,memory); "<<reload_registers()<<"return xr; }\n";break;}
     default:
       if (i.op == Op::VSelect)
         return decl(i, "aot::vector_select(" + arg(i,0) + "," + arg(i,1) + "," + arg(i,2) + ")");

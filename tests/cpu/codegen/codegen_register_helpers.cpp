@@ -48,9 +48,13 @@ int main(int argc, char** argv) {
   const auto source = backend::CppAotBackend{}.emit_function(result.function, "helper_frame", bindings);
   const bool direct_save =
       source.find("xenon::recomp::runtime_helpers::save_gpr_lr_v2<28>(context)") != std::string::npos;
+  // A direct tail call: the helper is called here (its result returned,
+  // after any promoted registers are reloaded from what it restored), and
+  // the tail branch is not handed back to the caller as a Branch result.
   const bool direct_restore =
-      source.find("return xenon::recomp::runtime_helpers::restore_gpr_lr_v2<28>(context);") !=
-      std::string::npos;
+      source.find("xenon::recomp::runtime_helpers::restore_gpr_lr_v2<28>(context);") !=
+          std::string::npos &&
+      source.find("FlowReason::Branch," + std::to_string(kRestore) + "u") == std::string::npos;
   const bool any_lookup = source.find("lookup_compiled") != std::string::npos;
 
   // A tail branch to a routine that is not a leaf runtime helper stays a

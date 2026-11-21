@@ -221,6 +221,13 @@ struct ExecutionContext {
   // Appended last so modules built against the earlier layout still work.
   const std::atomic<bool>* safepoint_flag{};
 
+  // Whether the thread has been asked to stop: code holding guest registers
+  // in locals checks this, writes them back, then calls
+  // runtime.enter_safepoint(state) itself.
+  [[nodiscard]] bool safepoint_requested() const noexcept {
+    return safepoint_flag && safepoint_flag->load(std::memory_order_relaxed);
+  }
+
   // A loop back-edge: hand the thread to the runtime if it must stop.
   void poll_safepoint() {
     if (safepoint_flag && safepoint_flag->load(std::memory_order_relaxed)) [[unlikely]]

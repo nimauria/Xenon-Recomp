@@ -165,6 +165,7 @@ void emit_call_result_check(std::ostringstream& o, std::string_view rr,
                             std::string_view indent = "  ") {
   o << indent << "if(" << rr << ".reason==FlowReason::Branch) " << rr
     << "=context.follow_tail_branches(" << rr << ");\n";
+  if (t_promotion.active) o << indent << reload_registers() << "\n";
   emit_longjump_dispatch(o, rr, indent);
   o << indent << "if(" << rr << ".reason==FlowReason::Return) { if("
     << rr << ".next_address!=" << expected_return << "u) return " << rr
@@ -181,7 +182,13 @@ bool is_back_edge(const Instruction& i, const ir::Block& block, GuestAddress tar
                                           block.guest_address);
 }
 
-constexpr std::string_view kSafepointPoll = "context.poll_safepoint(); ";
+constexpr std::string_view kPlainSafepointPoll = "context.poll_safepoint(); ";
+constexpr std::string_view kPromotedSafepointPoll =
+    "if(context.safepoint_requested()) [[unlikely]] { xenon_flush(); "
+    "runtime.enter_safepoint(state); xenon_reload(); } ";
+std::string_view safepoint_poll() {
+  return t_promotion.active ? kPromotedSafepointPoll : kPlainSafepointPoll;
+}
 
 // MSVC's global optimizer is far worse than linear in a function's size: an
 // AC6 shard holding one 12,000-line dispatch function took over 15 minutes at
@@ -215,7 +222,7 @@ void emit_hook_action(std::ostringstream& o, std::uint64_t action,
       if (!target) throw std::invalid_argument("CppAotBackend: host hook jump has no target");
       o << "state.nia=" << *target << "u; ";
       if (local_targets.contains(*target)) {
-        if (is_back_edge(i, block, *target)) o << kSafepointPoll;
+        if (is_back_edge(i, block, *target)) o << safepoint_poll();
         o << "goto " << local_label(*target) << ";";
       } else {
         o << "return {FlowReason::Branch," << *target << "u,0};";
@@ -249,14 +256,15 @@ std::string emit_host_hook(const Instruction& i, const ir::Block& block,
 
   std::ostringstream o;
   if (on_true == 0u && on_false == 0u) {
-    o << "  " << symbol << "(context);\n";
+    o << "  " << flush_registers() << symbol << "(context); " << reload_registers() << "\n";
     return o.str();
   }
-  o << "  if(" << symbol << "(context)) { ";
+  o << "  { " << flush_registers() << "const bool xenon_hooked=" << symbol << "(context); "
+    << reload_registers() << "if(xenon_hooked) { ";
   emit_hook_action(o, on_true, true_target, i, block, local_targets);
   o << " } else { ";
   emit_hook_action(o, on_false, false_target, i, block, local_targets);
-  o << " }\n";
+  o << " } }\n";
   return o.str();
 }
 
@@ -275,12 +283,13 @@ std::string emit_one_in_function(const Instruction& i,
       const auto guest_target = static_cast<GuestAddress>(*target);
       o << "  state.nia=" << guest_target << "u;\n";
       if (local_targets.contains(guest_target)) {
-        if (is_back_edge(i, block, guest_target)) o << "  " << kSafepointPoll << "\n";
+        if (is_back_edge(i, block, guest_target)) o << "  " << safepoint_poll() << "\n";
         o << "  goto " << local_label(guest_target) << ";\n";
       } else if (const auto* leaf = find_direct_call(guest_target, direct_calls);
                  leaf && leaf->leaf) {
         // What the caller's follow_tail_branches() would run, called here.
-        o << "  return " << leaf->native_symbol << "(context);\n";
+        o << "  { " << flush_registers() << "auto xr=" << leaf->native_symbol << "(context); "
+          << reload_registers() << "return xr; }\n";
       } else {
         o << "  return {FlowReason::Branch," << guest_target << "u,0};\n";
       }
@@ -294,18 +303,18 @@ std::string emit_one_in_function(const Instruction& i,
       const auto guest_target = static_cast<GuestAddress>(*target);
       const auto expected_return = static_cast<GuestAddress>(i.guest_address + 4u);
       if (local_targets.contains(guest_target)) {
-        o << "  { auto rr=" << local_dispatch_symbol << "(context," << guest_target << "u);\n";
+        o << "  { " << flush_registers() << "auto rr=" << local_dispatch_symbol << "(context," << guest_target << "u);\n";
         emit_call_result_check(o, "rr", expected_return, "    ");
         o << "  }\n";
         return o.str();
       }
       if (const auto* binding = find_direct_call(guest_target, direct_calls)) {
-        o << "  { auto rr=" << binding->native_symbol << "(context);\n";
+        o << "  { " << flush_registers() << "auto rr=" << binding->native_symbol << "(context);\n";
         emit_call_result_check(o, "rr", expected_return, "    ");
         o << "  }\n";
         return o.str();
       }
-      o << "  { ExecutionResult rr{}; if(auto* native=context.lookup_compiled("
+      o << "  { ExecutionResult rr{}; " << flush_registers() << "if(auto* native=context.lookup_compiled("
         << guest_target << "u,CompiledLookupKind::Call)) rr=native(context); "
         << "else { auto fallback=context.try_dynamic_fallback(" << guest_target
         << "u,CompiledLookupKind::Call); rr=fallback.handled ? fallback.result : runtime.call("
@@ -322,6 +331,7 @@ std::string emit_one_in_function(const Instruction& i,
       const auto guest_target = static_cast<GuestAddress>(*target);
       const auto expected_return = static_cast<GuestAddress>(i.guest_address + 4u);
       o << "  if(" << arg(i,0) << ") {\n";
+      if (t_promotion.active) o << "    " << flush_registers() << "\n";
       if (local_targets.contains(guest_target)) {
         o << "    auto rr=" << local_dispatch_symbol << "(context," << guest_target << "u);\n";
       } else if (const auto* binding = find_direct_call(guest_target, direct_calls)) {
@@ -345,11 +355,12 @@ std::string emit_one_in_function(const Instruction& i,
       const auto guest_target = static_cast<GuestAddress>(*target);
       o << "  if(" << arg(i,0) << ") { state.nia=" << guest_target << "u; ";
       if (local_targets.contains(guest_target)) {
-        if (is_back_edge(i, block, guest_target)) o << kSafepointPoll;
+        if (is_back_edge(i, block, guest_target)) o << safepoint_poll();
         o << "goto " << local_label(guest_target) << "; }\n";
       } else if (const auto* leaf = find_direct_call(guest_target, direct_calls);
                  leaf && leaf->leaf) {
-        o << "return " << leaf->native_symbol << "(context); }\n";
+        o << "{ " << flush_registers() << "auto xr=" << leaf->native_symbol << "(context); "
+          << reload_registers() << "return xr; } }\n";
       } else {
         o << "return {FlowReason::Branch," << guest_target << "u,0}; }\n";
       }
@@ -366,6 +377,7 @@ std::string emit_one_in_function(const Instruction& i,
     const auto indent = condition.empty() ? std::string("  ") : std::string("    ");
     o << indent << "const auto raw_target=static_cast<GuestAddress>(" << target_arg << ");\n";
     o << indent << "const auto guest_target=static_cast<GuestAddress>(raw_target & ~3u);\n";
+    if (t_promotion.active) o << indent << flush_registers() << "\n";
     o << indent << "ExecutionResult rr{}; bool handled_local=false; if("
       << is_local_symbol(local_dispatch_symbol) << "(guest_target)) { rr="
       << local_dispatch_symbol << "(context,guest_target); handled_local=true; }\n";
@@ -379,7 +391,7 @@ std::string emit_one_in_function(const Instruction& i,
     o << "  if(" << arg(i,0) << ") { const auto guest_target=static_cast<GuestAddress>("
       << arg(i,1) << " & ~3ull); if(" << is_local_symbol(local_dispatch_symbol)
       << "(guest_target)) { " << kLocalBranchTarget << "=guest_target; goto "
-      << kLocalBranchLabel << "; } if(auto* native=context.lookup_compiled(guest_target,CompiledLookupKind::Branch)) return native(context); auto fallback=context.try_dynamic_fallback(guest_target,CompiledLookupKind::Branch); if(fallback.handled) return fallback.result; state.nia=guest_target; return {FlowReason::Branch,guest_target,0}; }\n";
+      << kLocalBranchLabel << "; } " << flush_registers() << "if(auto* native=context.lookup_compiled(guest_target,CompiledLookupKind::Branch)) { auto xr=native(context); " << reload_registers() << "return xr; } auto fallback=context.try_dynamic_fallback(guest_target,CompiledLookupKind::Branch); " << reload_registers() << "if(fallback.handled) return fallback.result; state.nia=guest_target; return {FlowReason::Branch,guest_target,0}; }\n";
     return o.str();
   }
 
@@ -455,6 +467,30 @@ std::string CppAotBackend::emit_function(
     std::span<const GuestAddress> alternate_entries,
     std::span<const std::string> hook_symbols) const {
   if (function.blocks.empty()) throw std::runtime_error("CppAotBackend: empty function");
+
+  // Register promotion for this function's emission (see the constructor);
+  // the single-block path never promotes.
+  struct PromotionScope {
+    explicit PromotionScope(bool on) noexcept { t_promotion.active = on; }
+    ~PromotionScope() { t_promotion = {}; }
+  } promotion_scope(promote_registers_);
+  std::array<bool, 32> used_gpr{};
+  std::array<bool, 32> used_fpr{};
+  std::array<bool, 128> used_vr{};
+  for (const auto& block : function.blocks) {
+    for (const auto& i : block.instructions) {
+      switch (i.op) {
+        case Op::ReadGpr: case Op::WriteGpr: used_gpr[i.imm0 & 31u] = true; break;
+        case Op::ReadFprBits: case Op::WriteFprBits: used_fpr[i.imm0 & 31u] = true; break;
+        case Op::ReadVector: case Op::WriteVector: used_vr[i.imm0 & 127u] = true; break;
+        case Op::Trap:  // its condition reads rA and rB directly
+          used_gpr[(i.guest_word >> 16) & 31u] = true;
+          used_gpr[(i.guest_word >> 11) & 31u] = true;
+          break;
+        default: break;
+      }
+    }
+  }
 
   std::unordered_set<GuestAddress> local_targets;
   for (const auto& block : function.blocks) local_targets.insert(block.guest_address);
@@ -592,6 +628,33 @@ std::string CppAotBackend::emit_function(
   o << "  auto& memory = context.memory;\n";
   o << "  auto& runtime = context.runtime;\n";
   o << "  auto& memory_access = context.memory_access;\n";
+  if (promote_registers_) {
+    // The registers this function uses, held in locals from entry; written
+    // back by xenon_flush() before anything else reads CpuState and on every
+    // exit (FlushOnExit), reloaded by xenon_reload() after.
+    std::ostringstream flush, reload;
+    for (unsigned n = 0; n < 32u; ++n) {
+      if (!used_gpr[n]) continue;
+      o << "  [[maybe_unused]] std::uint64_t g" << n << "=state.gpr[" << n << "];\n";
+      flush << "state.gpr[" << n << "]=g" << n << "; ";
+      reload << "g" << n << "=state.gpr[" << n << "]; ";
+    }
+    for (unsigned n = 0; n < 32u; ++n) {
+      if (!used_fpr[n]) continue;
+      o << "  [[maybe_unused]] std::uint64_t fp" << n << "=state.fpr_bits[" << n << "];\n";
+      flush << "state.fpr_bits[" << n << "]=fp" << n << "; ";
+      reload << "fp" << n << "=state.fpr_bits[" << n << "]; ";
+    }
+    for (unsigned n = 0; n < 128u; ++n) {
+      if (!used_vr[n]) continue;
+      o << "  [[maybe_unused]] Vector128 vr" << n << "=state.vr[" << n << "];\n";
+      flush << "state.vr[" << n << "]=vr" << n << "; ";
+      reload << "vr" << n << "=state.vr[" << n << "]; ";
+    }
+    o << "  [[maybe_unused]] auto xenon_flush=[&]() noexcept { " << flush.str() << "};\n";
+    o << "  [[maybe_unused]] auto xenon_reload=[&]() noexcept { " << reload.str() << "};\n";
+    o << "  const aot::FlushOnExit<decltype(xenon_flush)> xenon_flush_on_exit{xenon_flush};\n";
+  }
   if (uses_longjump) o << "  ExecutionResult " << kLongJumpResult << "{};\n";
   if (uses_local_branch) o << "  GuestAddress " << kLocalBranchTarget << "{};\n";
   o << "  switch(entry) {\n";
@@ -610,7 +673,7 @@ std::string CppAotBackend::emit_function(
   }
   if (uses_local_branch) {
     // An indirect local branch may go backwards (a jump table inside a loop).
-    o << kLocalBranchLabel << ":\n  " << kSafepointPoll << "\n  switch("
+    o << kLocalBranchLabel << ":\n  " << safepoint_poll() << "\n  switch("
       << kLocalBranchTarget << ") {\n";
     for (const auto target : sorted_targets) {
       o << "    case " << target << "u: state.nia=" << target << "u; goto "

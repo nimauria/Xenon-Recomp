@@ -1,6 +1,8 @@
 #include <algorithm>
 #include <set>
+#include <cstdlib>
 #include <span>
+#include <string_view>
 
 #include "recomp/compilation/project_generation_internal.hpp"
 #include "xenon/cpu/backend/cpp_aot.hpp"
@@ -84,12 +86,25 @@ EmittedFunctionSources emit_function_sources(
   function_sources.resize(codegen_items.size());
   source_nodes.resize(codegen_items.size());
   source_hits.resize(codegen_items.size());
+  // Guest registers in C++ locals (CppAotBackend's register promotion);
+  // XENON_CODEGEN_PROMOTE_REGS=0 turns it off, to bisect a suspected
+  // promotion fault. Part of every source's cache key.
+  const bool promote_registers = [] {
+#if defined(_MSC_VER)
+#pragma warning(push)
+#pragma warning(disable : 4996)  // read once, before the workers start
+#endif
+    const char* value = std::getenv("XENON_CODEGEN_PROMOTE_REGS");
+#if defined(_MSC_VER)
+#pragma warning(pop)
+#endif
+    return !(value && std::string_view(value) == "0");
+  }();
   pool.parallel_for(codegen_items.size(), [&](std::size_t i) {
-    // cpu::backend::CppAotBackend is stateless (no members, every method
-    // const - see include/xenon/cpu/backend/cpp_aot.hpp), so a fresh
-    // instance per call is both correct and cheap; sharing one instance
-    // across workers would be equally safe but this avoids any doubt.
-    cpu::backend::CppAotBackend backend;
+    // cpu::backend::CppAotBackend holds only its options and every method is
+    // const (see include/xenon/cpu/backend/cpp_aot.hpp), so a fresh instance
+    // per call is both correct and cheap.
+    cpu::backend::CppAotBackend backend(promote_registers);
     const auto& function = *codegen_items[i];
     const auto aliases_it = alternate_entries_by_owner.find(function.guest_start);
     const std::span<const GuestAddress> alternate_entries =
@@ -133,6 +148,7 @@ EmittedFunctionSources emit_function_sources(
         {{"ir", graph::digest(graph::serialize_ir(function.ir))},
          {"symbol", function.name}, {"aliases", aliases},
          {"direct_calls", direct_call_key},
+         {"promote_registers", promote_registers ? "1" : "0"},
          {"producer_build", graph::producer_identity("source")},
          {"cpu_semantics", options.graph_versions.semantics}}, {}};
     // Absent without hooks, so hook-free functions keep their keys.
