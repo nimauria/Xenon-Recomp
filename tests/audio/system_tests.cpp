@@ -202,6 +202,11 @@ int main() {
   fake->pump(silence);
   assert(audio.render_driver_tic() == 320);
   assert(audio.underrun_count() == underruns + 1);
+  // The device callback only counts; nothing was logged from it.
+  assert(!std::filesystem::exists(audio_log_directory / "audio.log"));
+  // The count is reported from another thread (callback_pump) through this.
+  assert(audio.report_underruns() == 1u);
+  assert(audio.report_underruns() == 0u);
   {
     std::ifstream audio_log(audio_log_directory / "audio.log");
     std::string line;

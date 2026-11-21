@@ -113,6 +113,10 @@ class AudioSystem final {
   [[nodiscard]] std::uint32_t underrun_count() const noexcept {
     return underrun_count_.load();
   }
+  // Logs the underruns counted since the last report (one line, with the
+  // total). The device callback only counts them; callback_pump() calls this
+  // at most once a second. Returns how many were reported.
+  std::uint32_t report_underruns();
   // Loudest sample in any frame the title submitted, before downmix: tells a
   // silent title mix apart from a loss in Xenon's output path.
   [[nodiscard]] float submitted_peak() const noexcept {
@@ -212,6 +216,7 @@ class AudioSystem final {
   std::thread callback_thread_{};
   GuestCallbackInvoker guest_callback_invoker_{};
   std::atomic<std::uint32_t> underrun_count_{0};
+  std::atomic<std::uint32_t> reported_underruns_{0};
   std::atomic<std::uint64_t> rejected_unregistered_{0};
   std::atomic<std::uint32_t> submitted_peak_bits_{0};
   std::atomic<std::uint64_t> traced_frames_{0};  // Frames seen by the probe trace.

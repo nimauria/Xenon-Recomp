@@ -392,11 +392,10 @@ void AudioSystem::render(std::span<float> interleaved_stereo) {
   }
 
   if (had_active_render_client && !had_render_driver_audio) {
-    underrun_count_.fetch_add(1);
-    // Audible as a gap or crackle; repeats collapse in the log.
-    logging::Logger::instance().record(
-        logging::Level::Warning, "audio",
-        "underrun: a render client was active but had no frame ready for the output");
+    // Audible as a gap or crackle. Counted only: this runs on the device
+    // callback thread, which must not take the logger's lock; callback_pump()
+    // reports the count from its own thread.
+    underrun_count_.fetch_add(1, std::memory_order_relaxed);
   }
 
   // Generic voices and the Xbox render-driver path share the same native
@@ -416,14 +415,37 @@ void AudioSystem::render(std::span<float> interleaved_stereo) {
   render_tic_samples_.fetch_add(output_frames, std::memory_order_relaxed);
 }
 
+std::uint32_t AudioSystem::report_underruns() {
+  const auto total = underrun_count_.load(std::memory_order_relaxed);
+  const auto reported = reported_underruns_.exchange(total, std::memory_order_relaxed);
+  if (total == reported) return 0;
+  logging::Logger::instance().record(
+      logging::Level::Warning, "audio",
+      "underrun: a render client was active but had no frame ready for the output (" +
+          std::to_string(total - reported) + " output block(s) since the last report, " +
+          std::to_string(total) + " total)");
+  return total - reported;
+}
+
 void AudioSystem::callback_pump() {
+  struct Pending {
+    std::size_t index{};
+    cpu::GuestAddress callback{};
+    cpu::GuestAddress wrapper{};
+  };
+  std::vector<Pending> pending;  // reused by every pass
+  auto last_underrun_report = std::chrono::steady_clock::now();
   while (callback_running_.load()) {
-    struct Pending {
-      std::size_t index{};
-      cpu::GuestAddress callback{};
-      cpu::GuestAddress wrapper{};
-    };
-    std::vector<Pending> pending;
+    pending.clear();
+    {
+      // Underruns are counted on the device thread; say so here, at most once
+      // a second.
+      const auto now = std::chrono::steady_clock::now();
+      if (now - last_underrun_report >= std::chrono::seconds(1)) {
+        report_underruns();
+        last_underrun_report = now;
+      }
+    }
     GuestCallbackInvoker invoker;
     {
       const auto issuable = [](const RenderClient& client) {
