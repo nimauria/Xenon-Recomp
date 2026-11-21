@@ -505,9 +505,50 @@ class ResourceStateTracker {
   [[nodiscard]] bool write_constant_buffer(std::span<std::byte> destination) const noexcept;
   [[nodiscard]] std::uint64_t generation() const noexcept { return generation_; }
 
+  // The constant buffer is tracked in 256-byte blocks, 38 of them. A register
+  // write marks the block(s) its packed bytes live in with the write's
+  // generation; a consumer remembers the generation it last synchronised to
+  // (ConstantSync) and so learns which blocks changed since without anything
+  // being consumed from the tracker (several consumers, and draws that stage
+  // but never reach the GPU, are all safe).
+  static constexpr std::size_t kConstantBlockBytes = 256;
+  static constexpr std::size_t kConstantBlockCount =
+      (kShaderConstantBufferBytes + kConstantBlockBytes - 1) / kConstantBlockBytes;
+  static constexpr std::size_t kDrawStateFirstBlock = kDrawStateOffset / kConstantBlockBytes;
+  static_assert(kConstantBlockCount <= 64, "block masks are 64 bits");
+  using ConstantBlockMask = std::uint64_t;
+  struct ConstantSync {
+    std::uint64_t generation{};
+    std::uint64_t resets{};
+    bool valid{};
+    void invalidate() noexcept { valid = false; }
+  };
+  // The blocks written since `sync` (every block when it is not valid). The
+  // draw-state tail (blocks holding kDrawStateOffset on) is always included:
+  // it is derived from many registers and patched per draw by the backend.
+  [[nodiscard]] ConstantBlockMask constant_blocks_changed(const ConstantSync& sync) const noexcept;
+  // Brings `staging` (the buffer `sync` describes: it must hold exactly what
+  // the previous call left, or `sync` must be invalid) up to date with the
+  // registers, rewriting only the changed blocks, and advances `sync`. The
+  // result is the mask of blocks that changed; false when `staging` is too
+  // small. Equivalent to write_constant_buffer() into a buffer holding the
+  // result of the previous call.
+  [[nodiscard]] bool update_constant_buffer(std::span<std::byte> staging, ConstantSync& sync,
+                                            ConstantBlockMask& changed) const noexcept;
+
  private:
+  // write_constant_buffer()'s sections: bools, loops and fetch constants
+  // (bytes 8192..kDrawStateOffset), and the draw state tail.
+  [[nodiscard]] ConstantBlockMask register_blocks_changed(const ConstantSync& sync) const noexcept;
+  void pack_misc_constants(std::byte* destination) const noexcept;
+  void pack_draw_state(std::byte* destination) const noexcept;
   std::array<std::uint32_t, RegisterFile::kRegisterCount> registers_{};
   std::uint64_t generation_{};
+  // The generation of the last write to each 256-byte block of the constant
+  // buffer (apply()).
+  std::array<std::uint64_t, kConstantBlockCount> constant_block_generation_{};
+  // reset() count: a consumer synchronised before a reset must refill.
+  std::uint64_t resets_{};
   // snapshot()'s decoded state and what was written since it was decoded:
   // the target/raster/copy registers, and each texture slot (six fetch
   // constant dwords) and vertex fetch (two) by bit.

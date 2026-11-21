@@ -73,8 +73,17 @@ class ResourceLayout {
   [[nodiscard]] VkPipelineLayout pipeline_layout() const noexcept {
     return pipeline_layout_;
   }
+  // The staging buffer for a caller that writes it itself (tests): the next
+  // draw compares and refills everything.
   [[nodiscard]] std::span<std::byte> constants() noexcept {
+    constants_cache_.mark_all_changed();
     return constants_staging_;
+  }
+  // The staging buffer brought up to date with `state`'s registers, rewriting
+  // only the 256-byte blocks that changed since the last draw. Empty on
+  // failure.
+  [[nodiscard]] std::span<std::byte> stage_constants(const ResourceStateTracker& state) noexcept {
+    return constants_cache_.stage(state, constants_staging_);
   }
   [[nodiscard]] const std::string& error() const noexcept { return error_; }
   // How guest memory is bound, from the device's storage-buffer range

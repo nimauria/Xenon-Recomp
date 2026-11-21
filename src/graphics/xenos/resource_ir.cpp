@@ -1,5 +1,6 @@
 #include "xenon/gpu/resource_ir.hpp"
 
+#include "xenon/gpu/perf_stats.hpp"
 #include "xenon/gpu/texture.hpp"
 #include "xenon/memory/types.hpp"
 
@@ -565,6 +566,8 @@ ResolveRectangle decode_resolve_rectangle(
 void ResourceStateTracker::reset() noexcept {
   registers_.fill(0);
   generation_ = 0;
+  constant_block_generation_.fill(0);
+  ++resets_;
   targets_dirty_ = true;
   textures_dirty_ = ~0u;
   vertex_buffers_dirty_.fill(~0u);
@@ -574,6 +577,21 @@ void ResourceStateTracker::apply(const ir::RegisterWrite& write) noexcept {
   if (write.index >= registers_.size()) return;
   registers_[write.index] = write.value;
   ++generation_;
+  // The constant buffer block the write's packed bytes live in (see
+  // write_constant_buffer(): float4[512], uint4[8] bools, uint4[32] loops,
+  // uint4[32] fetch constants, then the draw state, which is always rewritten).
+  if (write.index >= 0x4000u && write.index < 0x4800u) {
+    constant_block_generation_[((write.index - 0x4000u) * 4u) / kConstantBlockBytes] = generation_;
+  } else if (write.index >= 0x4900u && write.index < 0x4908u) {
+    constant_block_generation_[(8192u + (write.index - 0x4900u) * 4u) / kConstantBlockBytes] =
+        generation_;
+  } else if (write.index >= 0x4908u && write.index < 0x4928u) {
+    constant_block_generation_[(8320u + (write.index - 0x4908u) * 16u) / kConstantBlockBytes] =
+        generation_;
+  } else if (write.index >= kFetchConstantBase && write.index < kFetchConstantBase + kFetchConstantDwords) {
+    if (const auto slot = (write.index - kFetchConstantBase) / 6u; slot < 32u)
+      constant_block_generation_[(8832u + slot * 16u) / kConstantBlockBytes] = generation_;
+  }
   // What the write changes of snapshot(): a fetch constant dword its texture
   // slot (six dwords each) and vertex fetch (two); the float constants
   // (0x4000-0x47FF) nothing; anything else the target/raster/copy state.
@@ -1062,19 +1080,14 @@ MemExportPlan ResourceStateTracker::plan_memexport(
   return plan;
 }
 
-bool ResourceStateTracker::write_constant_buffer(
-    std::span<std::byte> destination) const noexcept {
-  constexpr std::size_t kSize = kShaderConstantBufferBytes;
-  if (destination.size() < kSize) return false;
-  std::fill_n(destination.begin(), kSize, std::byte{});
-  // float4[512]
-  std::memcpy(destination.data(), registers_.data() + 0x4000, 8192);
+void ResourceStateTracker::pack_misc_constants(std::byte* destination) const noexcept {
+  std::memset(destination + 8192, 0, kDrawStateOffset - 8192);
   // uint4[8], with the eight architectural boolean words packed into the
   // first two vectors exactly as xenon_bool indexes them.
-  std::memcpy(destination.data() + 8192, registers_.data() + 0x4900, 32);
+  std::memcpy(destination + 8192, registers_.data() + 0x4900, 32);
   // uint4[32] loop constants. Each architectural scalar occupies .x.
   for (std::size_t i = 0; i < 32; ++i) {
-    std::memcpy(destination.data() + 8320 + i * 16,
+    std::memcpy(destination + 8320 + i * 16,
                 registers_.data() + 0x4908 + i, sizeof(std::uint32_t));
   }
   // Each 6-dword fetch-constant slot holds either one texture fetch constant
@@ -1099,8 +1112,11 @@ bool ResourceStateTracker::write_constant_buffer(
         (static_cast<std::uint32_t>(exp_adjust) & 0xFFFFu) |
             (static_cast<std::uint32_t>(lod_bias) << 16u),
         pack_vertex(1u), pack_vertex(2u)};
-    std::memcpy(destination.data() + 8832 + i * 16, packed.data(), sizeof(packed));
+    std::memcpy(destination + 8832 + i * 16, packed.data(), sizeof(packed));
   }
+}
+
+void ResourceStateTracker::pack_draw_state(std::byte* destination) const noexcept {
   // The rest of the stable constant ABI is per-draw native translation state
   // (XenonDrawState). Keep this generic rather than specializing shaders for
   // alpha reference or alpha-to-mask offsets.
@@ -1171,8 +1187,69 @@ bool ResourceStateTracker::write_constant_buffer(
   draw_state[45] = std::bit_cast<std::uint32_t>(float(bits(point_size, 0, 16)) * (2.0f / 16.0f));
   draw_state[46] = std::bit_cast<std::uint32_t>(float(bits(point_limits, 0, 16)) * (2.0f / 16.0f));
   draw_state[47] = std::bit_cast<std::uint32_t>(float(bits(point_limits, 16, 16)) * (2.0f / 16.0f));
-  std::memcpy(destination.data() + kDrawStateOffset, draw_state.data(),
+  std::memcpy(destination + kDrawStateOffset, draw_state.data(),
               draw_state.size() * sizeof(std::uint32_t));
+}
+
+bool ResourceStateTracker::write_constant_buffer(
+    std::span<std::byte> destination) const noexcept {
+  constexpr std::size_t kSize = kShaderConstantBufferBytes;
+  if (destination.size() < kSize) return false;
+  std::fill_n(destination.begin(), kSize, std::byte{});
+  // float4[512]
+  std::memcpy(destination.data(), registers_.data() + 0x4000, 8192);
+  pack_misc_constants(destination.data());
+  pack_draw_state(destination.data());
+  return true;
+}
+
+ResourceStateTracker::ConstantBlockMask ResourceStateTracker::constant_blocks_changed(
+    const ConstantSync& sync) const noexcept {
+  constexpr ConstantBlockMask kAll = (ConstantBlockMask{1} << kConstantBlockCount) - 1u;
+  // The draw state tail: from the block holding kDrawStateOffset to the end.
+  constexpr ConstantBlockMask kTail = kAll & ~((ConstantBlockMask{1} << (kDrawStateOffset / kConstantBlockBytes)) - 1u);
+  if (!sync.valid || sync.resets != resets_) return kAll;
+  return kTail | register_blocks_changed(sync);
+}
+
+ResourceStateTracker::ConstantBlockMask ResourceStateTracker::register_blocks_changed(
+    const ConstantSync& sync) const noexcept {
+  ConstantBlockMask mask = 0;
+  for (std::size_t block = 0; block < kConstantBlockCount; ++block)
+    if (constant_block_generation_[block] > sync.generation) mask |= ConstantBlockMask{1} << block;
+  return mask;
+}
+
+bool ResourceStateTracker::update_constant_buffer(std::span<std::byte> staging, ConstantSync& sync,
+                                                  ConstantBlockMask& changed) const noexcept {
+  if (staging.size() < kShaderConstantBufferBytes) return false;
+  changed = constant_blocks_changed(sync);
+  const bool refill = !sync.valid || sync.resets != resets_;
+  const auto written = refill ? ~ConstantBlockMask{0} : register_blocks_changed(sync);
+  constexpr std::size_t kFloatBlocks = 8192 / kConstantBlockBytes;
+  constexpr std::size_t kMiscFirst = 8192 / kConstantBlockBytes;
+  std::uint64_t filled = 0;
+  // float4[512]: copied block by block, only the changed ones.
+  for (std::size_t block = 0; block < kFloatBlocks; ++block) {
+    if (!(written & (ConstantBlockMask{1} << block))) continue;
+    std::memcpy(staging.data() + block * kConstantBlockBytes,
+                registers_.data() + 0x4000 + block * (kConstantBlockBytes / 4u), kConstantBlockBytes);
+    ++filled;
+  }
+  // Bools, loops and fetch constants (blocks 32 to the one before the draw
+  // state's first, plus the shared one): small, rebuilt when any of them moved.
+  constexpr ConstantBlockMask kMiscBlocks =
+      ((ConstantBlockMask{1} << ((kDrawStateOffset - 1u) / kConstantBlockBytes + 1u)) - 1u) &
+      ~((ConstantBlockMask{1} << kMiscFirst) - 1u);
+  if (written & kMiscBlocks) {
+    pack_misc_constants(staging.data());
+    ++filled;
+  }
+  pack_draw_state(staging.data());
+  perf::add(perf::Counter::ConstantBlocksFilled, filled);
+  sync.generation = generation_;
+  sync.resets = resets_;
+  sync.valid = true;
   return true;
 }
 

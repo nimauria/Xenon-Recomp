@@ -83,6 +83,7 @@ class Backend::Impl : public detail::BackendCore<Backend::Impl, BackendApi> {
     // Native draws may still be using render targets, textures, descriptor
     // snapshots and upload arenas owned by this Impl. Drain them before member
     // destruction starts.
+    drain_pipeline_builds();  // builds read the pipeline layout and the device
     (void)queue.wait_idle();
     close_pipeline_cache();
   }
@@ -401,6 +402,8 @@ class Backend::Impl : public detail::BackendCore<Backend::Impl, BackendApi> {
     VkDeviceSize offset{};
   };
   struct PreparedDraw {
+    // The draw's pipeline, waited for when its run is recorded (close_draw_run).
+    const PipelineSlot* pipeline_slot{};
     VkPipeline pipeline{VK_NULL_HANDLE};
     VkPipelineLayout layout{VK_NULL_HANDLE};
     VkDescriptorSet set{VK_NULL_HANDLE};
@@ -477,7 +480,7 @@ class Backend::Impl : public detail::BackendCore<Backend::Impl, BackendApi> {
       record_failed = true;
       return true;
     }
-    prepared.pipeline = draw.pipeline.pipeline();
+    prepared.pipeline_slot = &draw.pipeline;
     prepared.layout = resources.pipeline_layout();
     prepared.set = binding.set;
     prepared.constants_offset = binding.constants_offset;
@@ -527,6 +530,16 @@ class Backend::Impl : public detail::BackendCore<Backend::Impl, BackendApi> {
     if (open_run.empty()) return;
     auto run = std::move(open_run);
     open_run.clear();
+    // The latest point a draw needs its pipeline: its run is about to be handed
+    // to command recording. Builds queued while the run's draws were prepared
+    // have been running since; a failed one drops its draw and reports.
+    std::erase_if(run, [&](PreparedDraw& draw) {
+      const auto* pipeline = await_pipeline(*draw.pipeline_slot);
+      if (!pipeline) return true;
+      draw.pipeline = pipeline->pipeline();
+      return false;
+    });
+    if (run.empty()) return;
     const bool parallel = run.size() >= parallel_run_draws;
     if (!queue.record_run(
             [run = std::move(run)](VkCommandBuffer command) { record_prepared_run(command, run); },

@@ -170,7 +170,9 @@ std::string take_line(double seconds) {
                 "64-255:%llu 256+:%llu | queue max %llu mean %.1f | barriers interrupt %llu (%.0f "
                 "ms) swap %llu (%.0f ms) wait %llu (%.0f ms) write %llu (%.0f ms) | dedup constants "
                 "up %llu reuse %llu binds set %llu skip %llu texmark %llu (%llu touched) "
-                "imload hit %llu miss %llu mirror batches %llu ranges %llu\n",
+                "imload hit %llu miss %llu mirror batches %llu ranges %llu constfill skip %llu "
+                "blocks %llu texconsume journal %llu walk %llu | pipelines queued %llu failed "
+                "%llu wait %.0f ms (%llu)\n",
                 static_cast<double>(frames.size()) * per, percentile(frames, 0.5),
                 percentile(frames, 0.95), percentile(frames, 0.99), frames.empty() ? 0.0 : frames.back(),
                 static_cast<double>(take(Counter::Swaps)) * per, ms(take(Counter::RingNs)),
@@ -249,7 +251,15 @@ std::string take_line(double seconds) {
                 static_cast<unsigned long long>(take(Counter::ImLoadHits)),
                 static_cast<unsigned long long>(take(Counter::ImLoadMisses)),
                 static_cast<unsigned long long>(take(Counter::MirrorBatches)),
-                static_cast<unsigned long long>(take(Counter::MirrorRanges)));
+                static_cast<unsigned long long>(take(Counter::MirrorRanges)),
+                static_cast<unsigned long long>(take(Counter::ConstantFillsSkipped)),
+                static_cast<unsigned long long>(take(Counter::ConstantBlocksFilled)),
+                static_cast<unsigned long long>(take(Counter::TextureConsumeJournal)),
+                static_cast<unsigned long long>(take(Counter::TextureConsumeWalks)),
+                static_cast<unsigned long long>(take(Counter::PipelinesQueued)),
+                static_cast<unsigned long long>(take(Counter::PipelineFailures)),
+                ms(take(Counter::PipelineWaitNs)),
+                static_cast<unsigned long long>(take(Counter::PipelineWaits)));
   return line;
 }
 

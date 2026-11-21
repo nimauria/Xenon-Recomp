@@ -242,6 +242,8 @@ class TextureDirtyTracker {
   [[nodiscard]] std::uint64_t textures_marked() const noexcept;
   [[nodiscard]] std::uint64_t consume_walks_skipped() const noexcept;
   [[nodiscard]] std::uint64_t consume_walks() const noexcept;
+  // Consumes answered from the coherency write journal instead of a page walk.
+  [[nodiscard]] std::uint64_t consume_journal_checks() const noexcept;
   // How many textures a write to [address, address + size) would examine (the
   // ones sharing a bucket with it), whether or not they overlap it exactly.
   [[nodiscard]] std::size_t candidates_for(std::uint32_t address, std::uint32_t size) const;
@@ -265,6 +267,7 @@ class TextureDirtyTracker {
   std::uint64_t textures_marked_{};
   std::uint64_t walks_skipped_{};
   std::uint64_t walks_{};
+  std::uint64_t journal_checks_{};
 };
 
 }  // namespace xenon::gpu

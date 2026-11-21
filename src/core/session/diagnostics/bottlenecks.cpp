@@ -29,6 +29,7 @@ void XenonSession::write_bottleneck_report() {
   add("shader compile on draw path", Counter::ShaderCompileNs, Counter::ShaderCompiles);
   add("pipeline creation", Counter::PipelineCreateNs, Counter::PipelineCreates);
   add("draw waited for shader", Counter::ShaderWaitNs, Counter::ShaderWaits);
+  add("draw waited for pipeline", Counter::PipelineWaitNs, Counter::PipelineWaits);
   add("readback wait", Counter::ReadbackWaitNs, Counter::ReadbackWaits);
   add("guest writes held off by readback", Counter::ReadbackWindowNs);
   add("frontend waiting for backend", Counter::BackendWaitNs, Counter::BackendWaits);

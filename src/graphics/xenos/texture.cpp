@@ -892,7 +892,25 @@ bool TextureDirtyTracker::consume_dirty(
   if (!dirty && coherency.latest_assigned_epoch() <= entry.clean_epoch) {
     ++walks_skipped_;
   } else if (!dirty) {
+    // Something was written since: ask the write journal first (one pass over
+    // the new epochs) unless the texture is smaller than the interval is long,
+    // in which case its few pages are cheaper to look at directly.
+    std::uint64_t pages = 0;
+    for (const auto& range : entry.ranges)
+      if (range.second > range.first)
+        pages += (range.second - 1u) / memory::kBasePageSize - range.first / memory::kBasePageSize + 1u;
+    const auto span = coherency.latest_assigned_epoch() - entry.clean_epoch;
+    memory::GuestMemoryCoherency::JournalProbe probe = memory::GuestMemoryCoherency::JournalProbe::Unknown;
+    if (span <= pages) {
+      probe = coherency.probe_ranges_since(entry.ranges, entry.clean_epoch);
+    }
+    if (probe != memory::GuestMemoryCoherency::JournalProbe::Unknown) {
+      ++journal_checks_;
+      perf::add(perf::Counter::TextureConsumeJournal, 1u);
+      dirty = probe == memory::GuestMemoryCoherency::JournalProbe::Dirty;
+    } else {
     ++walks_;
+    perf::add(perf::Counter::TextureConsumeWalks, 1u);
     for (const auto& range : entry.ranges) {
       if (range.first >= memory::kPhysicalMemorySize) continue;
       const auto width64 = std::min<std::uint64_t>(
@@ -904,6 +922,7 @@ bool TextureDirtyTracker::consume_dirty(
         dirty = true;
         break;
       }
+    }
     }
   }
   entry.dirty = false;
@@ -926,6 +945,10 @@ std::uint64_t TextureDirtyTracker::textures_marked() const noexcept {
 std::uint64_t TextureDirtyTracker::consume_walks_skipped() const noexcept {
   const std::scoped_lock lock(mutex_);
   return walks_skipped_;
+}
+std::uint64_t TextureDirtyTracker::consume_journal_checks() const noexcept {
+  const std::scoped_lock lock(mutex_);
+  return journal_checks_;
 }
 std::uint64_t TextureDirtyTracker::consume_walks() const noexcept {
   const std::scoped_lock lock(mutex_);

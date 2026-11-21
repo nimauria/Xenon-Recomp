@@ -16,6 +16,7 @@ ShaderCompileQueue::~ShaderCompileQueue() {
     std::scoped_lock lock(mutex_);
     stopping_ = true;
     queue_.clear();
+    urgent_.clear();
   }
   work_ready_.notify_all();
   for (auto& worker : workers_) worker.join();
@@ -81,14 +82,37 @@ bool ShaderCompileQueue::prefetched(std::uint64_t key) const {
   return prepared_.contains(key);
 }
 
+void ShaderCompileQueue::submit(std::uint64_t id, std::function<void()> task, bool urgent) {
+  {
+    std::scoped_lock lock(mutex_);
+    if (stopping_) return;
+    Job job{};
+    job.key = id;
+    job.task = std::move(task);
+    (urgent ? urgent_ : queue_).push_back(std::move(job));
+  }
+  work_ready_.notify_one();
+}
+
+bool ShaderCompileQueue::promote(std::uint64_t id) {
+  std::scoped_lock lock(mutex_);
+  for (auto it = queue_.begin(); it != queue_.end(); ++it) {
+    if (!it->task || it->key != id) continue;
+    urgent_.push_back(std::move(*it));
+    queue_.erase(it);
+    return true;
+  }
+  return false;
+}
+
 std::size_t ShaderCompileQueue::pending() const {
   std::scoped_lock lock(mutex_);
-  return queue_.size() + running_;
+  return queue_.size() + urgent_.size() + running_;
 }
 
 void ShaderCompileQueue::clear() {
   std::unique_lock lock(mutex_);
-  work_done_.wait(lock, [&] { return queue_.empty() && running_ == 0; });
+  work_done_.wait(lock, [&] { return queue_.empty() && urgent_.empty() && running_ == 0; });
   results_.clear();
   prepared_.clear();
 }
@@ -98,12 +122,25 @@ void ShaderCompileQueue::run_worker() {
   const DxcShaderCompiler compiler;
   std::unique_lock lock(mutex_);
   for (;;) {
-    work_ready_.wait(lock, [&] { return stopping_ || !queue_.empty(); });
+    work_ready_.wait(lock, [&] { return stopping_ || !queue_.empty() || !urgent_.empty(); });
     if (stopping_) return;
-    auto job = std::move(queue_.front());
-    queue_.pop_front();
+    auto& source = urgent_.empty() ? queue_ : urgent_;
+    auto job = std::move(source.front());
+    source.pop_front();
     ++running_;
     lock.unlock();
+    if (job.task) {
+      try {
+        job.task();
+      } catch (...) {
+        // A task reports its own failures; one that threw has nothing to add.
+      }
+      job.task = nullptr;
+      lock.lock();
+      --running_;
+      work_done_.notify_all();
+      continue;
+    }
     if (job.lower) {
       Prepared prepared{};
       try {

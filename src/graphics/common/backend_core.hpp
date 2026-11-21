@@ -79,6 +79,7 @@
 #include "xenon/gpu/resource_ir.hpp"
 #include "xenon/gpu/gpu_resolve.hpp"
 #include "xenon/gpu/perf_stats.hpp"
+#include "xenon/gpu/pipeline_build.hpp"
 #include <thread>
 #include "xenon/gpu/guest_read_sync.hpp"
 #include "xenon/gpu/scanout.hpp"
@@ -110,6 +111,7 @@ class BackendCore {
   using RenderTargetImage = typename Api::RenderTargetImage;
   using DepthTargetImage = typename Api::DepthTargetImage;
   using GraphicsPipeline = typename Api::GraphicsPipeline;
+  using PipelineSlot = typename PipelineBuilds<GraphicsPipeline>::Slot;
 
   // Backend hooks. Derived implements these:
   //   bool create_render_target(RenderTargetImage&, const EdramSurfaceLayout&,
@@ -155,7 +157,10 @@ class BackendCore {
   struct DrawRecording {
     const DrawResourceState& state;
     const ProcessedPrimitiveBatch& batch;
-    const GraphicsPipeline& pipeline;
+    // The draw's pipeline, maybe still being built (async_pipelines): a
+    // backend keeps the slot and waits for it when the draw is recorded
+    // (await_pipeline()), not when it is prepared.
+    const PipelineSlot& pipeline;
     const std::array<RenderTargetImage*, 4>& targets;
     std::size_t color_count;
     DepthTargetImage* depth;
@@ -262,7 +267,23 @@ class BackendCore {
   std::unordered_map<std::uint64_t, std::unique_ptr<DepthTargetImage>> depth_targets{};
   std::unordered_map<std::uint64_t, EdramOwnerId> depth_target_owners{};
   std::unordered_map<EdramOwnerId, DepthTargetImage*> owner_depth_targets{};
-  std::unordered_map<std::uint64_t, std::unique_ptr<GraphicsPipeline>> pipelines{};
+  // Pipelines by key, built on the shader worker pool (pipeline_build.hpp);
+  // XENON_ASYNC_PIPELINES=0 builds them where the draw is prepared.
+  PipelineBuilds<GraphicsPipeline> pipelines{};
+  bool pipeline_executor_bound{};
+  // Waits for every pipeline build in flight: before the objects they read (the
+  // root signature or layout, the device) are destroyed.
+  void drain_pipeline_builds() { pipelines.drain(); }
+  ~BackendCore() { pipelines.drain(); }
+  BackendCore() = default;
+  // The state `slot` is waited to, and failures reported once per draw that
+  // needed it: records the failure in `error` when the build failed.
+  // Returns the pipeline when it is ready.
+  [[nodiscard]] const GraphicsPipeline* await_pipeline(const PipelineSlot& slot) {
+    if (pipelines.wait(slot) == PipelineState::Ready) return &slot.pipeline;
+    if (error.empty()) error = named(slot.error());
+    return nullptr;
+  }
   // Pipelines the backend's persistent cache supplied (statistics are read
   // from other threads).
   std::atomic<std::uint64_t> pipeline_cache_hits{};

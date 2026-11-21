@@ -165,6 +165,14 @@ enum class Counter : std::uint32_t {
   ImLoadMisses,        // IM_LOAD reloads that swapped, hashed and decoded
   MirrorBatches,       // guest-memory mirror copy batches submitted
   MirrorRanges,        // dirty ranges those batches carried
+  ConstantFillsSkipped,  // draws whose staged constants needed no CPU fill at all
+  ConstantBlocksFilled,  // 256-byte constant blocks the CPU fill rewrote
+  TextureConsumeJournal,  // texture staleness checks answered from the write journal
+  TextureConsumeWalks,    // ... that had to walk the texture's page epochs
+  PipelineWaitNs,      // recording waited this long for an async pipeline build
+  PipelineWaits,       // draws that had to wait for their pipeline
+  PipelinesQueued,     // pipelines handed to the async build workers
+  PipelineFailures,    // pipeline builds that failed
   Count,
 };
 

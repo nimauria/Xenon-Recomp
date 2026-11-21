@@ -174,7 +174,7 @@ ResourceLayout::DrawBinding ResourceLayout::prepare_draw(std::uint32_t frame_ind
   auto& frame = frames_[frame_index];
   // Constants identical to an earlier draw's in this batch (same frame, lower
   // slot) point at its slot: the copy into the mapped buffer is the cost.
-  const auto constants_slot = constants_cache_.resolve(
+  const auto constants_slot = constants_cache_.resolve_staged(
       frame_index, 0u, draw_slot, constants_staging_, [&](std::uint32_t slot) {
         const auto slot_offset = static_cast<std::size_t>(constant_stride_ * slot);
         std::copy(constants_staging_.begin(), constants_staging_.end(),

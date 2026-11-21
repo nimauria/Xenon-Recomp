@@ -15,7 +15,10 @@
 //    worker threads, so nothing per draw touches an atomic).
 //  * ConstantsSlotCache: decides whether a draw's staged shader constants
 //    equal those already written to an earlier slot of the same batch, so the
-//    draw can point at that slot instead of copying another 9.7 KB.
+//    draw can point at that slot instead of copying another 9.7 KB. It also
+//    keeps the staged constants in step with the register file by dirty 256-byte
+//    blocks (stage()): a draw after which no shader constant register moved
+//    refills and compares only the always-changing draw-state tail.
 
 #include <algorithm>
 #include <array>
@@ -27,6 +30,7 @@
 #include <type_traits>
 
 #include "xenon/gpu/perf_stats.hpp"
+#include "xenon/gpu/resource_ir.hpp"
 
 namespace xenon::gpu {
 
@@ -68,6 +72,8 @@ class BindShadow {
 class ConstantsSlotCache {
  public:
   static constexpr std::size_t kMaxBytes = 16384;
+  static constexpr std::size_t kBlockBytes = 256;
+  static constexpr std::uint64_t kAllBlocks = ~std::uint64_t{0};
 
   // The slot an earlier draw of this batch wrote identical constants to, when
   // there is one. `slot` is the slot the current draw was assigned: only a
@@ -77,9 +83,27 @@ class ConstantsSlotCache {
   [[nodiscard]] std::optional<std::uint32_t> reusable(std::uint32_t frame, std::uint64_t batch,
                                                       std::uint32_t slot,
                                                       std::span<const std::byte> staged) const noexcept {
-    if (!valid_ || frame != frame_ || batch != batch_ || slot_ >= slot ||
-        staged.size() != size_ || std::memcmp(copy_.data(), staged.data(), size_) != 0)
+    return reusable(frame, batch, slot, staged, kAllBlocks);
+  }
+  // As above, comparing only the 256-byte blocks in `changed` (bit n = bytes
+  // [256n, 256n + 256)): the others are known to equal the cached copy.
+  [[nodiscard]] std::optional<std::uint32_t> reusable(std::uint32_t frame, std::uint64_t batch,
+                                                      std::uint32_t slot,
+                                                      std::span<const std::byte> staged,
+                                                      std::uint64_t changed) const noexcept {
+    if (!valid_ || frame != frame_ || batch != batch_ || slot_ >= slot || staged.size() != size_)
       return std::nullopt;
+    if (changed == kAllBlocks) {
+      if (std::memcmp(copy_.data(), staged.data(), size_) != 0) return std::nullopt;
+      return slot_;
+    }
+    for (std::size_t block = 0; block * kBlockBytes < size_; ++block) {
+      if (block >= 64 || !(changed & (std::uint64_t{1} << block))) continue;
+      const auto offset = block * kBlockBytes;
+      const auto length = (std::min)(kBlockBytes, size_ - offset);
+      if (std::memcmp(copy_.data() + offset, staged.data() + offset, length) != 0)
+        return std::nullopt;
+    }
     return slot_;
   }
   // Records that `staged` was written to `slot` (a new upload).
@@ -92,14 +116,68 @@ class ConstantsSlotCache {
     slot_ = slot;
     valid_ = size_ == staged.size();
   }
-  void reset() noexcept { valid_ = false; }
+  // The staging buffer was written by something other than stage(): compare
+  // everything next time and refill it from the registers.
+  void mark_all_changed() noexcept {
+    pending_ = kAllBlocks;
+    sync_.invalidate();
+  }
+  void reset() noexcept {
+    valid_ = false;
+    sync_.invalidate();
+    pending_ = kAllBlocks;
+  }
+
+  // Brings `staging` up to date with `tracker`'s registers (rewriting only the
+  // blocks that changed since the last call, see ResourceStateTracker::
+  // update_constant_buffer) and remembers which blocks the next resolve() has
+  // to compare. Returns the staged bytes, empty when `staging` is too small.
+  // Blocks changed by calls whose draw never reached resolve() stay pending.
+  std::span<std::byte> stage(const ResourceStateTracker& tracker,
+                             std::span<std::byte> staging) noexcept {
+    ResourceStateTracker::ConstantBlockMask changed{};
+    if (!tracker.update_constant_buffer(staging, sync_, changed)) return {};
+    pending_ |= changed;
+    constexpr std::uint64_t kTail = kAllBlocks & ~((std::uint64_t{1} << ResourceStateTracker::kDrawStateFirstBlock) - 1u);
+    if (!(changed & ~kTail)) {
+      ++fills_skipped_;
+      perf::add(perf::Counter::ConstantFillsSkipped, 1u);
+    }
+    return staging;
+  }
+  // stage() calls that found no shader-constant register changed since the
+  // previous one (only the draw-state tail was rebuilt).
+  [[nodiscard]] std::uint64_t fills_skipped() const noexcept { return fills_skipped_; }
 
   // Convenience for the layouts: reuse or upload via `write(slot)`.
-  // Returns the slot holding the constants and counts the outcome.
+  // Returns the slot holding the constants and counts the outcome. Compares the
+  // whole staged buffer; resolve_staged() is the cheaper form for a buffer
+  // maintained by stage().
   template <class Write>
   std::uint32_t resolve(std::uint32_t frame, std::uint64_t batch, std::uint32_t slot,
                         std::span<const std::byte> staged, Write&& write) {
-    if (const auto earlier = reusable(frame, batch, slot, staged)) {
+    pending_ = 0;
+    return settle(frame, batch, slot, staged, kAllBlocks, write);
+  }
+  // resolve() for a buffer last brought up to date by stage(): only the blocks
+  // changed since the previous resolve are compared (the rest equal the cached
+  // copy, which every resolve leaves equal to the staged bytes). A buffer
+  // written any other way (mark_all_changed()) is compared in full.
+  template <class Write>
+  std::uint32_t resolve_staged(std::uint32_t frame, std::uint64_t batch, std::uint32_t slot,
+                               std::span<const std::byte> staged, Write&& write) {
+    const auto compare = pending_;
+    pending_ = 0;
+    return settle(frame, batch, slot, staged, compare, write);
+  }
+  [[nodiscard]] std::uint64_t uploads() const noexcept { return uploads_; }
+  [[nodiscard]] std::uint64_t reuses() const noexcept { return reuses_; }
+
+ private:
+  template <class Write>
+  std::uint32_t settle(std::uint32_t frame, std::uint64_t batch, std::uint32_t slot,
+                       std::span<const std::byte> staged, std::uint64_t compare, Write& write) {
+    if (const auto earlier = reusable(frame, batch, slot, staged, compare)) {
       ++reuses_;
       perf::add(perf::Counter::ConstantReuses, 1u);
       return *earlier;
@@ -110,10 +188,6 @@ class ConstantsSlotCache {
     perf::add(perf::Counter::ConstantUploads, 1u);
     return slot;
   }
-  [[nodiscard]] std::uint64_t uploads() const noexcept { return uploads_; }
-  [[nodiscard]] std::uint64_t reuses() const noexcept { return reuses_; }
-
- private:
   std::array<std::byte, kMaxBytes> copy_{};
   std::size_t size_{};
   std::uint32_t frame_{UINT32_MAX};
@@ -122,6 +196,11 @@ class ConstantsSlotCache {
   bool valid_{};
   std::uint64_t uploads_{};
   std::uint64_t reuses_{};
+  std::uint64_t fills_skipped_{};
+  // The staging buffer's synchronisation with the tracker, and the blocks that
+  // changed since the last resolve().
+  ResourceStateTracker::ConstantSync sync_{};
+  std::uint64_t pending_{kAllBlocks};
 };
 
 }  // namespace xenon::gpu

@@ -319,8 +319,10 @@ void BackendCore<Derived, Api>::consume_draw(const ir::DrawPacket* draw,
     }
   }
   phases.at("vertex buffers");
-  auto constants = resources.constants();
-  if (!resource_state.write_constant_buffer(constants)) {
+  // Only the constant blocks whose registers changed since the previous draw
+  // are rewritten, and compared against the slot cache.
+  auto constants = resources.stage_constants(resource_state);
+  if (constants.empty()) {
     error = named("shader constant upload failed");
     ready = false;
     return;
@@ -751,45 +753,75 @@ void BackendCore<Derived, Api>::consume_draw(const ir::DrawPacket* draw,
     }
     if (float20_depth_variant) pipeline_key ^= 0x20E4D24F5A17A11Cull;
     if (memexport_writable) pipeline_key ^= 0x4D454D4558504F52ull;
-    if (!pipelines.contains(pipeline_key)) {
-      auto pipeline = std::make_unique<GraphicsPipeline>();
-      std::array<typename Api::Format, 4> formats{};
-      std::array<std::uint8_t, 4> write_masks{};
-      std::array<BlendState, 4> blend_states{};
+    if (!pipeline_executor_bound) {
+      pipelines.set_executor(async_pipelines_enabled() ? shader_prefetch.get() : nullptr);
+      pipeline_executor_bound = true;
+    }
+    if (pipelines.needs_build(pipeline_key)) {
+      // The build's inputs, copied: it runs on a worker while this thread goes
+      // on (shaders are shared, immutable; the rest are values).
+      struct Recipe {
+        std::shared_ptr<const CompiledShader> vertex, pixel, geometry;
+        std::array<typename Api::Format, 4> formats{};
+        std::array<std::uint8_t, 4> write_masks{};
+        std::array<BlendState, 4> blend_states{};
+        std::size_t color_count{};
+        MsaaSamples samples{};
+        HostPrimitiveTopology topology{};
+        RasterState raster{};
+        typename Api::Format depth_format{};
+        std::optional<DepthTargetDescriptor> depth_state{};
+        decltype(self().pipeline_root()) root{};
+        decltype(context.device()) device{};
+        decltype(self().native_pipeline_cache()) cache{};
+      };
+      auto recipe = std::make_shared<Recipe>();
+      recipe->vertex = vertex_shader;
+      recipe->pixel = pixel_shader;
+      recipe->geometry = batch.requires_rectangle_expansion ? rectangle_list_shader
+                         : point_sprites                    ? point_sprite_shader
+                                                            : nullptr;
+      recipe->color_count = color_count;
       for (std::size_t i = 0; i < color_count; ++i) {
-        formats[i] = Api::color_format(active_targets[i]);
+        recipe->formats[i] = Api::color_format(active_targets[i]);
         if (active_targets[i]) {
-          write_masks[i] = active_write_masks[i];
-          blend_states[i] = active_blends[i];
+          recipe->write_masks[i] = active_write_masks[i];
+          recipe->blend_states[i] = active_blends[i];
         }
       }
-      const std::span<const typename Api::Format> format_span(formats.data(),
-                                                              color_count);
-      const std::span<const std::uint8_t> write_mask_span(
-          write_masks.data(), color_count);
-      const std::span<const BlendState> blend_state_span(
-          blend_states.data(), color_count);
-      const perf::ScopedTime pipeline_time(perf::Counter::PipelineCreateNs,
-                                           perf::Counter::PipelineCreates);
-      // A backend with a persistent pipeline cache creates through it.
-      if constexpr (requires { self().native_pipeline_cache(); })
-        pipeline->set_pipeline_cache(self().native_pipeline_cache());
-      if (!pipeline->initialize(
-              context.device(), self().pipeline_root(),
-              *vertex_shader, *pixel_shader,
-              batch.requires_rectangle_expansion ? rectangle_list_shader.get()
-              : point_sprites                    ? point_sprite_shader.get()
-                                                 : nullptr,
-              format_span, samples,
-              batch.topology, raster, write_mask_span, blend_state_span,
-              active_depth ? active_depth->format() : Api::kUndefinedFormat,
-              active_depth ? &state.depth_target : nullptr)) {
-        error = pipeline->error();
-        return;
-      }
-      if (pipeline->loaded_from_library())
-        pipeline_cache_hits.fetch_add(1u, std::memory_order_relaxed);
-      pipelines.emplace(pipeline_key, std::move(pipeline));
+      recipe->samples = samples;
+      recipe->topology = batch.topology;
+      recipe->raster = raster;
+      recipe->depth_format = active_depth ? active_depth->format() : Api::kUndefinedFormat;
+      if (active_depth) recipe->depth_state = state.depth_target;
+      recipe->root = self().pipeline_root();
+      recipe->device = context.device();
+      recipe->cache = self().native_pipeline_cache();
+      pipelines.request(
+          pipeline_key,
+          [this, recipe](GraphicsPipeline& pipeline, std::string& failure) {
+            // A backend with a persistent pipeline cache creates through it.
+            pipeline.set_pipeline_cache(recipe->cache);
+            if (!pipeline.initialize(
+                    recipe->device, recipe->root, *recipe->vertex, *recipe->pixel,
+                    recipe->geometry.get(),
+                    std::span<const typename Api::Format>(recipe->formats.data(),
+                                                          recipe->color_count),
+                    recipe->samples, recipe->topology, recipe->raster,
+                    std::span<const std::uint8_t>(recipe->write_masks.data(),
+                                                  recipe->color_count),
+                    std::span<const BlendState>(recipe->blend_states.data(),
+                                                recipe->color_count),
+                    recipe->depth_format,
+                    recipe->depth_state ? &*recipe->depth_state : nullptr)) {
+              failure = pipeline.error();
+              return false;
+            }
+            if (pipeline.loaded_from_library())
+              pipeline_cache_hits.fetch_add(1u, std::memory_order_relaxed);
+            return true;
+          },
+          /*urgent=*/true);
     }
     const auto index_byte_size =
         batch.indexed ? batch.indices.size() * sizeof(std::uint32_t) : 0u;
@@ -797,7 +829,7 @@ void BackendCore<Derived, Api>::consume_draw(const ir::DrawPacket* draw,
       error = named("transient upload arena exhausted by one submission");
       return;
     }
-    const auto* pipeline = pipelines.at(pipeline_key).get();
+    const auto& pipeline_slot = *pipelines.find(pipeline_key);
     const auto render_width = color_count
                                   ? self().color_render_width(state, active_targets[0])
                                   : active_depth
@@ -873,7 +905,7 @@ void BackendCore<Derived, Api>::consume_draw(const ir::DrawPacket* draw,
     }
     if (!make_transient_upload_room(index_byte_size)) return;
     if (!self().record_draw(
-            DrawRecording{state, batch, *pipeline, active_targets, color_count,
+            DrawRecording{state, batch, pipeline_slot, active_targets, color_count,
                           active_depth, index_byte_size, memexport_writable,
                           render_width, render_height, scissor_left,
                           scissor_top, scissor_right, scissor_bottom,

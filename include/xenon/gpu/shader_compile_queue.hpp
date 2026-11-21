@@ -27,17 +27,18 @@
 #include <vector>
 
 #include "xenon/gpu/dxc_shader_compiler.hpp"
+#include "xenon/gpu/pipeline_build.hpp"
 
 namespace xenon::gpu {
 
-class ShaderCompileQueue {
+class ShaderCompileQueue final : public PipelineExecutor {
  public:
   using Clock = std::chrono::steady_clock;
 
   // `workers` of 0 picks three quarters of the hardware threads (at least
   // one), as xenia sizes its pipeline creation threads.
   ShaderCompileQueue(ShaderCache& cache, unsigned workers = 0);
-  ~ShaderCompileQueue();
+  ~ShaderCompileQueue() override;
   ShaderCompileQueue(const ShaderCompileQueue&) = delete;
   ShaderCompileQueue& operator=(const ShaderCompileQueue&) = delete;
 
@@ -70,6 +71,16 @@ class ShaderCompileQueue {
   // Whether `key` was prefetched (queued, running or done).
   [[nodiscard]] bool prefetched(std::uint64_t key) const;
 
+  // General tasks on the same workers (pipeline creation, see
+  // pipeline_build.hpp), in priority order: every urgent task runs before any
+  // non-urgent one - shader compiles and prefetches included - each group in
+  // submission order. A task must not wait for another task or compile of the
+  // queue (it could occupy the last free worker); the pipeline builds do not.
+  void submit(std::uint64_t id, std::function<void()> task, bool urgent) override;
+  // Moves a task still waiting in the normal group to the end of the urgent
+  // group. False when `id` is not waiting there.
+  bool promote(std::uint64_t id) override;
+
   // Compiles queued or running.
   [[nodiscard]] std::size_t pending() const;
   [[nodiscard]] unsigned worker_count() const noexcept {
@@ -85,6 +96,7 @@ class ShaderCompileQueue {
     LoweredShader shader;
     ShaderCompileOptions options;
     Lowering lower{};  // set: a prefetch job, lowered on the worker
+    std::function<void()> task{};  // set: a general task (submit())
   };
   struct PreparedEntry {
     bool done{};
@@ -98,6 +110,7 @@ class ShaderCompileQueue {
   std::condition_variable work_ready_;
   std::condition_variable work_done_;
   std::deque<Job> queue_;
+  std::deque<Job> urgent_;  // urgent tasks, run before queue_
   std::size_t running_ = 0;
   bool stopping_ = false;
   // A key's entry exists from its first request; the pointer is set when it

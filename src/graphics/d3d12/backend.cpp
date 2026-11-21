@@ -83,6 +83,7 @@ class Backend::Impl : public detail::BackendCore<Backend::Impl, BackendApi> {
     // Native draws may still be using render targets, textures, descriptor
     // snapshots and upload arenas owned by this Impl. Drain them before member
     // destruction starts.
+    drain_pipeline_builds();  // builds read the root signature and the device
     (void)queue.wait_idle();
     if (pipeline_library) pipeline_library->save();
   }
@@ -437,6 +438,8 @@ class Backend::Impl : public detail::BackendCore<Backend::Impl, BackendApi> {
     UINT reserved{};
   };
   struct PreparedDraw {
+    // The draw's pipeline, waited for when its run is recorded (close_draw_run).
+    const PipelineSlot* pipeline_slot{};
     ID3D12PipelineState* pipeline{};
     ID3D12RootSignature* root_signature{};
     D3D12_PRIMITIVE_TOPOLOGY topology{D3D_PRIMITIVE_TOPOLOGY_UNDEFINED};
@@ -501,9 +504,8 @@ class Backend::Impl : public detail::BackendCore<Backend::Impl, BackendApi> {
       record_failed = true;
       return true;
     }
-    prepared.pipeline = draw.pipeline.pipeline();
+    prepared.pipeline_slot = &draw.pipeline;
     prepared.root_signature = resources.root_signature();
-    prepared.topology = draw.pipeline.native_topology();
     prepared.resource_heap = resources.resource_heap(frame_index);
     prepared.sampler_heap = resources.sampler_heap(frame_index);
     prepared.indexed = draw.batch.indexed;
@@ -556,6 +558,17 @@ class Backend::Impl : public detail::BackendCore<Backend::Impl, BackendApi> {
     if (open_run.empty()) return;
     auto run = std::move(open_run);
     open_run.clear();
+    // The latest point a draw needs its pipeline: its run is about to be handed
+    // to command recording. Builds queued while the run's draws were prepared
+    // have been running since; a failed one drops its draw and reports.
+    std::erase_if(run, [&](PreparedDraw& draw) {
+      const auto* pipeline = await_pipeline(*draw.pipeline_slot);
+      if (!pipeline) return true;
+      draw.pipeline = pipeline->pipeline();
+      draw.topology = pipeline->native_topology();
+      return false;
+    });
+    if (run.empty()) return;
     const bool parallel = run.size() >= parallel_run_draws;
     if (!queue.record_run(
             [this, run = std::move(run)](ID3D12GraphicsCommandList* list) {

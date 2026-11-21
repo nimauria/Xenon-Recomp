@@ -420,7 +420,7 @@ ResourceLayout::DrawTables ResourceLayout::prepare_draw(std::uint32_t frame_inde
   }
   // Constants identical to an earlier draw's in this batch point at its slot
   // (the mapped upload memory is write-combined: the copy is the cost).
-  const auto constants_slot = constants_cache_.resolve(
+  const auto constants_slot = constants_cache_.resolve_staged(
       frame_index, batch, draw_slot, constants_staging_, [&](std::uint32_t slot) {
         const auto offset = std::size_t(slot) * kConstantBufferBytes;
         std::copy(constants_staging_.begin(), constants_staging_.end(),

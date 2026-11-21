@@ -70,8 +70,17 @@ class ResourceLayout {
   static constexpr std::uint32_t kSamplerRegions = 2048u / kSamplerCount;
   [[nodiscard]] std::uint64_t constants_uploaded() const noexcept { return constants_cache_.uploads(); }
   [[nodiscard]] std::uint64_t constants_reused() const noexcept { return constants_cache_.reuses(); }
+  // The staging buffer for a caller that writes it itself (tests): the next
+  // draw compares and refills everything.
   [[nodiscard]] std::span<std::byte> constants() noexcept {
+    constants_cache_.mark_all_changed();
     return constants_staging_;
+  }
+  // The staging buffer brought up to date with `state`'s registers, rewriting
+  // only the 256-byte blocks that changed since the last draw. Empty on
+  // failure.
+  [[nodiscard]] std::span<std::byte> stage_constants(const ResourceStateTracker& state) noexcept {
+    return constants_cache_.stage(state, constants_staging_);
   }
   [[nodiscard]] bool ready() const noexcept { return root_signature_ != nullptr; }
   [[nodiscard]] ID3D12RootSignature* root_signature() const noexcept {

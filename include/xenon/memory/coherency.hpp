@@ -5,6 +5,8 @@
 #include <bit>
 #include <cstdint>
 #include <mutex>
+#include <span>
+#include <utility>
 #include <vector>
 
 #include "xenon/cpu/memory_ordering.hpp"
@@ -244,6 +246,44 @@ class GuestMemoryCoherency {
       if (epoch > since_epoch) return true;
     }
     return false;
+  }
+
+  enum class JournalProbe : std::uint8_t { Clean, Dirty, Unknown };
+
+  // Answers "did any write with an epoch in (since_epoch, latest assigned]
+  // touch a page of one of these [begin, end) byte ranges" from the write
+  // journal alone, one pass over the epochs in the interval instead of one
+  // look at every page of every range. Page granular, like the page-epoch walk
+  // it replaces: a write is compared by the pages it covers, and so is the
+  // range. Unknown when the journal cannot answer exactly (more epochs than
+  // it holds, an entry overwritten, or a writer that has taken an epoch but
+  // not yet published its journal entry): the caller walks the pages instead.
+  [[nodiscard]] JournalProbe probe_ranges_since(
+      std::span<const std::pair<std::uint64_t, std::uint64_t>> ranges,
+      std::uint64_t since_epoch) const noexcept {
+    const auto latest = write_epoch_.load(std::memory_order_acquire);
+    if (latest <= since_epoch) return JournalProbe::Clean;
+    if (latest - since_epoch > kWriteJournalCapacity) return JournalProbe::Unknown;
+    for (auto epoch = since_epoch + 1u; epoch <= latest; ++epoch) {
+      const auto index = static_cast<std::uint32_t>(epoch) & (kWriteJournalCapacity - 1u);
+      if (write_journal_epochs_[index].load(std::memory_order_acquire) != epoch)
+        return JournalProbe::Unknown;
+      const auto packed = write_journal_ranges_[index].load(std::memory_order_relaxed);
+      if (write_journal_epochs_[index].load(std::memory_order_acquire) != epoch)
+        return JournalProbe::Unknown;
+      const auto size = static_cast<std::uint32_t>(packed);
+      if (!size) continue;
+      const auto address = static_cast<std::uint32_t>(packed >> 32u);
+      const std::uint64_t first_page = address / kBasePageSize;
+      const std::uint64_t last_page = (std::uint64_t{address} + size - 1u) / kBasePageSize;
+      for (const auto& range : ranges) {
+        if (range.second <= range.first || range.first >= kPhysicalMemorySize) continue;
+        const auto end = (std::min<std::uint64_t>)(range.second, kPhysicalMemorySize);
+        if (first_page <= (end - 1u) / kBasePageSize && last_page >= range.first / kBasePageSize)
+          return JournalProbe::Dirty;
+      }
+    }
+    return JournalProbe::Clean;
   }
 
   // The newest epoch any page of the range was written at (page granularity:
