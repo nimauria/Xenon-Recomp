@@ -33,6 +33,41 @@ struct FlushOnExit {
   ~FlushOnExit() { flush(); }
 };
 
+// One-entry cache of an indirect call or branch site (`bctr`, `bctrl`,
+// `bclr`-through-register, vtable and function-pointer calls): the guest
+// target it last resolved to and the native function that resolved to. A
+// generated site declares one `static thread_local IndirectSite` and resolves
+// through lookup_cached().
+struct IndirectSite {
+  GuestAddress target{};
+  NativeCompiledEntry entry{};
+  std::uint64_t generation{};
+  CompiledLookupCallback lookup{};
+  void* registry{};
+};
+
+// context.lookup_compiled(target, kind), answered from the site's cache when
+// the same target was resolved by the same lookup (callback and registry) and
+// the host's dispatch generation has not moved since. Only a native function
+// is cached - a miss always goes through the lookup, so its miss observer and
+// the caller's dynamic-fallback path still run. A context with no dispatch
+// generation (tests, tools, a module's own wrapper context) always looks up.
+inline NativeCompiledEntry lookup_cached(IndirectSite& site, ExecutionContext& context,
+                                         GuestAddress target, CompiledLookupKind kind) {
+  const auto* counter = context.dispatch_generation;
+  if (!counter) [[unlikely]] return context.lookup_compiled(target, kind);
+  // Read before the lookup: a bump racing it leaves the entry stamped with the
+  // older generation, so the next call looks up again.
+  const auto generation = counter->load(std::memory_order_acquire);
+  if (site.entry && site.target == target && site.generation == generation &&
+      site.lookup == context.compiled_lookup && site.registry == context.compiled_registry)
+      [[likely]]
+    return site.entry;
+  auto* entry = context.lookup_compiled(target, kind);
+  if (entry) site = {target, entry, generation, context.compiled_lookup, context.compiled_registry};
+  return entry;
+}
+
 // The guest lowered its hardware thread's priority inside a spin-wait
 // (`or 1,1,1` / `or 6,6,6` / `or 31,31,31`): tell the host core the same, so
 // its sibling thread gets the pipeline while this one polls.

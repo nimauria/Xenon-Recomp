@@ -33,6 +33,10 @@ inline std::string decl(const Instruction&i,const std::string&e){return std::str
 // one function's emission on this thread; inactive for the single-block path.
 struct RegisterPromotion {
   bool active{};
+  // Indirect call and branch sites resolve through a per-site cache
+  // (aot::lookup_cached); next_site numbers them within the function.
+  bool cache_indirect{};
+  unsigned next_site{};
 };
 inline thread_local RegisterPromotion t_promotion{};
 

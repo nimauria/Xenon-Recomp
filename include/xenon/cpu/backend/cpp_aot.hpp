@@ -27,6 +27,26 @@ struct DirectCallBinding {
   // in a loop, since guest functions that tail-branch to each other in a
   // cycle would otherwise recurse without bound.
   bool leaf{};
+
+  // For a register save/restore helper: the moves it makes, so a function
+  // holding guest registers in locals makes them inline, from and into its
+  // locals, instead of writing every promoted register back for the call.
+  // Registers `spill_first`..31 (64..127 for VMX128) go to or come from
+  // base + spill_offset + (register - 14 or 64) * width, the base being r1
+  // (GPR, FPR) or r12 (VMX, VMX128); a GPR save also stores r12 (the
+  // caller's LR) as a word at r1 + spill_link_offset, and the GPR restore
+  // reloads LR from there and returns through it.
+  enum class Spill : std::uint8_t {
+    None,
+    SaveGprLr, RestoreGprLr,
+    SaveFpr, RestoreFpr,
+    SaveVmx, RestoreVmx,
+    SaveVmx128, RestoreVmx128,
+  };
+  Spill spill{Spill::None};
+  std::uint32_t spill_first{};
+  std::int32_t spill_offset{};
+  std::int32_t spill_link_offset{};
 };
 
 // Stable generated symbol used for a dispatchable alternate guest entry into
@@ -48,8 +68,14 @@ class CppAotBackend {
   // stores go through a byte pointer that may alias anything, so with the
   // registers in CpuState the host compiler had to reload every one after
   // every store. Off, every access goes to CpuState as before.
-  explicit CppAotBackend(bool promote_registers = true) noexcept
-      : promote_registers_(promote_registers) {}
+  //
+  // Indirect call and branch sites (whole-function path) each keep a one-entry
+  // cache of the native function their last guest target resolved to
+  // (aot::lookup_cached), valid while the host dispatch generation stands.
+  explicit CppAotBackend(bool promote_registers = true,
+                         bool cache_indirect_sites = true) noexcept
+      : promote_registers_(promote_registers),
+        cache_indirect_sites_(cache_indirect_sites) {}
 
   [[nodiscard]] std::string emit_function(const ir::Block& block,
                                           std::string_view function_name) const;
@@ -84,9 +110,11 @@ class CppAotBackend {
       const ir::Function& function);
 
   [[nodiscard]] bool promotes_registers() const noexcept { return promote_registers_; }
+  [[nodiscard]] bool caches_indirect_sites() const noexcept { return cache_indirect_sites_; }
 
  private:
   bool promote_registers_{true};
+  bool cache_indirect_sites_{true};
 };
 
 }  // namespace xenon::cpu::backend

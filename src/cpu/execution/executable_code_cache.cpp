@@ -1,4 +1,5 @@
 #include "xenon/cpu/executable_code_cache.hpp"
+#include "xenon/cpu/dispatch_generation.hpp"
 
 #include <algorithm>
 #include <limits>
@@ -287,6 +288,7 @@ NativeCompiledEntry ExecutableCodeCache::lookup_v2(ExecutionContext& context,
       !snapshot_matches(context.memory_access, it->second.source)) {
     clear_hot(entry);
     entries_.erase(it);
+    bump_dispatch_generation();
     stale_evictions_.fetch_add(1u, std::memory_order_relaxed);
   }
   return nullptr;
@@ -337,6 +339,7 @@ bool ExecutableCodeCache::ranges_overlap(GuestAddress a,
 void ExecutableCodeCache::invalidate_guest_range(GuestAddress base,
                                                   std::uint32_t size) {
   if (!size) return;
+  bump_dispatch_generation();
   std::unique_lock lock(mutex_);
   std::erase_if(entries_, [&](const auto& pair) {
     const auto erase = ranges_overlap(pair.second.source.base,
@@ -347,6 +350,7 @@ void ExecutableCodeCache::invalidate_guest_range(GuestAddress base,
 }
 
 void ExecutableCodeCache::clear() {
+  bump_dispatch_generation();
   std::unique_lock lock(mutex_);
   entries_.clear();
   clear_hot_all();

@@ -136,6 +136,105 @@ const DirectCallBinding* find_direct_call(
   return nullptr;
 }
 
+// A register save/restore helper bound with Spill info, made inline while the
+// function holds its registers in locals (see DirectCallBinding::Spill): the
+// same guest memory accesses as the helper in runtime_helpers.hpp, on the
+// locals, with no flush/reload around them. Unlike the call, nothing here
+// reads CpuState but lr.
+const DirectCallBinding* find_inline_spill(
+    GuestAddress target, std::span<const DirectCallBinding> direct_calls,
+    const std::unordered_set<GuestAddress>& local_targets) {
+  if (!t_promotion.active || local_targets.contains(target)) return nullptr;
+  const auto* binding = find_direct_call(target, direct_calls);
+  return binding && binding->spill != DirectCallBinding::Spill::None ? binding : nullptr;
+}
+
+bool spill_is_gpr_lr(DirectCallBinding::Spill s) {
+  return s == DirectCallBinding::Spill::SaveGprLr || s == DirectCallBinding::Spill::RestoreGprLr;
+}
+bool spill_is_save(DirectCallBinding::Spill s) {
+  using S = DirectCallBinding::Spill;
+  return s == S::SaveGprLr || s == S::SaveFpr || s == S::SaveVmx || s == S::SaveVmx128;
+}
+
+// The registers a spill touches, and its base register (1 or 12).
+void mark_spill_registers(const DirectCallBinding& b, std::array<bool, 32>& used_gpr,
+                          std::array<bool, 32>& used_fpr, std::array<bool, 128>& used_vr) {
+  using S = DirectCallBinding::Spill;
+  switch (b.spill) {
+    case S::SaveGprLr: case S::RestoreGprLr:
+      used_gpr[1] = true;
+      if (b.spill == S::SaveGprLr) used_gpr[12] = true;
+      for (unsigned r = b.spill_first; r < 32u; ++r) used_gpr[r] = true;
+      break;
+    case S::SaveFpr: case S::RestoreFpr:
+      used_gpr[1] = true;
+      for (unsigned r = b.spill_first; r < 32u; ++r) used_fpr[r] = true;
+      break;
+    case S::SaveVmx: case S::RestoreVmx:
+      used_gpr[12] = true;
+      for (unsigned r = b.spill_first; r < 32u; ++r) used_vr[r] = true;
+      break;
+    case S::SaveVmx128: case S::RestoreVmx128:
+      used_gpr[12] = true;
+      for (unsigned r = b.spill_first; r < 128u; ++r) used_vr[r] = true;
+      break;
+    case S::None: break;
+  }
+}
+
+std::string spill_address(unsigned base_gpr, std::int64_t offset) {
+  std::ostringstream o;
+  const auto magnitude = offset < 0 ? -offset : offset;
+  o << "static_cast<GuestAddress>(" << gpr_ref(base_gpr) << (offset < 0 ? " - " : " + ")
+    << "0x" << std::hex << std::uppercase << magnitude << "ull)";
+  return o.str();
+}
+
+// The helper's loads or stores, in its order, as statements.
+std::string spill_statements(const DirectCallBinding& b) {
+  using S = DirectCallBinding::Spill;
+  std::ostringstream o;
+  const bool save = spill_is_save(b.spill);
+  const bool vector = b.spill == S::SaveVmx || b.spill == S::RestoreVmx ||
+                      b.spill == S::SaveVmx128 || b.spill == S::RestoreVmx128;
+  const bool fpr = b.spill == S::SaveFpr || b.spill == S::RestoreFpr;
+  const bool vmx128 = b.spill == S::SaveVmx128 || b.spill == S::RestoreVmx128;
+  const unsigned base_gpr = vector ? 12u : 1u;
+  const unsigned origin = vmx128 ? 64u : 14u;
+  const unsigned last = vmx128 ? 127u : 31u;
+  const unsigned width = vector ? 16u : 8u;
+  for (unsigned r = b.spill_first; r <= last; ++r) {
+    const auto address = spill_address(
+        base_gpr, static_cast<std::int64_t>(b.spill_offset) +
+                      static_cast<std::int64_t>((r - origin) * width));
+    const auto reg = vector ? vr_ref(r) : fpr ? fpr_ref(r) : gpr_ref(r);
+    if (save) o << "memory_access." << (vector ? "write128" : "write64_be") << "(" << address << ","
+                << reg << "); ";
+    else o << reg << "=memory_access." << (vector ? "read128" : "read64_be") << "(" << address << "); ";
+  }
+  if (spill_is_gpr_lr(b.spill)) {
+    const auto address = spill_address(base_gpr, b.spill_link_offset);
+    if (save) o << "memory_access.write32_be(" << address << ",static_cast<std::uint32_t>("
+                << gpr_ref(12) << ")); ";
+    else o << "state.lr=memory_access.read32_be(" << address << "); ";
+  }
+  return o.str();
+}
+
+// Every helper returns through lr once its moves are done.
+constexpr std::string_view kSpillReturnTarget = "static_cast<GuestAddress>(state.lr & ~3ull)";
+
+// As a call at `expected_return`: carries on unless the helper would have
+// returned somewhere else (lr no longer the return address).
+void emit_inline_spill_call(std::ostringstream& o, const DirectCallBinding& b,
+                            GuestAddress expected_return, std::string_view indent) {
+  o << indent << spill_statements(b) << "\n";
+  o << indent << "{ const auto xenon_spill_target=" << kSpillReturnTarget
+    << "; if(xenon_spill_target!=" << expected_return
+    << "u) return {FlowReason::Return,xenon_spill_target,0}; }\n";
+}
+
 // Every call site used to inline a switch over all of the function's local
 // labels to resume a guest longjmp. That made generated code O(call sites x
 // labels) - about a fifth of every shard - and gave each function a dense
@@ -268,6 +367,17 @@ std::string emit_host_hook(const Instruction& i, const ir::Block& block,
   return o.str();
 }
 
+// The expression resolving an indirect target (`guest_target`) for one site: the
+// plain lookup, or - with indirect-site caching on - a lookup through a new
+// per-site cache, whose declaration goes to `declaration`.
+std::string indirect_lookup(std::string& declaration, std::string_view kind) {
+  if (!t_promotion.cache_indirect)
+    return "context.lookup_compiled(guest_target,CompiledLookupKind::" + std::string(kind) + ")";
+  const auto site = "xenon_site_" + std::to_string(t_promotion.next_site++);
+  declaration = "static thread_local aot::IndirectSite " + site + "; ";
+  return "aot::lookup_cached(" + site + ",context,guest_target,CompiledLookupKind::" + std::string(kind) + ")";
+}
+
 std::string emit_one_in_function(const Instruction& i,
                                  const std::vector<Type>& value_types,
                                  const ir::Block& block,
@@ -285,6 +395,9 @@ std::string emit_one_in_function(const Instruction& i,
       if (local_targets.contains(guest_target)) {
         if (is_back_edge(i, block, guest_target)) o << "  " << safepoint_poll() << "\n";
         o << "  goto " << local_label(guest_target) << ";\n";
+      } else if (const auto* spill = find_inline_spill(guest_target, direct_calls, local_targets)) {
+        o << "  { " << spill_statements(*spill) << "return {FlowReason::Return," << kSpillReturnTarget
+          << ",0}; }\n";
       } else if (const auto* leaf = find_direct_call(guest_target, direct_calls);
                  leaf && leaf->leaf) {
         // What the caller's follow_tail_branches() would run, called here.
@@ -305,6 +418,12 @@ std::string emit_one_in_function(const Instruction& i,
       if (local_targets.contains(guest_target)) {
         o << "  { " << flush_registers() << "auto rr=" << local_dispatch_symbol << "(context," << guest_target << "u);\n";
         emit_call_result_check(o, "rr", expected_return, "    ");
+        o << "  }\n";
+        return o.str();
+      }
+      if (const auto* spill = find_inline_spill(guest_target, direct_calls, local_targets)) {
+        o << "  {\n";
+        emit_inline_spill_call(o, *spill, expected_return, "    ");
         o << "  }\n";
         return o.str();
       }
@@ -331,6 +450,11 @@ std::string emit_one_in_function(const Instruction& i,
       const auto guest_target = static_cast<GuestAddress>(*target);
       const auto expected_return = static_cast<GuestAddress>(i.guest_address + 4u);
       o << "  if(" << arg(i,0) << ") {\n";
+      if (const auto* spill = find_inline_spill(guest_target, direct_calls, local_targets)) {
+        emit_inline_spill_call(o, *spill, expected_return, "    ");
+        o << "  }\n";
+        return o.str();
+      }
       if (t_promotion.active) o << "    " << flush_registers() << "\n";
       if (local_targets.contains(guest_target)) {
         o << "    auto rr=" << local_dispatch_symbol << "(context," << guest_target << "u);\n";
@@ -357,6 +481,9 @@ std::string emit_one_in_function(const Instruction& i,
       if (local_targets.contains(guest_target)) {
         if (is_back_edge(i, block, guest_target)) o << safepoint_poll();
         o << "goto " << local_label(guest_target) << "; }\n";
+      } else if (const auto* spill = find_inline_spill(guest_target, direct_calls, local_targets)) {
+        o << "{ " << spill_statements(*spill) << "return {FlowReason::Return," << kSpillReturnTarget
+          << ",0}; } }\n";
       } else if (const auto* leaf = find_direct_call(guest_target, direct_calls);
                  leaf && leaf->leaf) {
         o << "{ " << flush_registers() << "auto xr=" << leaf->native_symbol << "(context); "
@@ -381,17 +508,22 @@ std::string emit_one_in_function(const Instruction& i,
     o << indent << "ExecutionResult rr{}; bool handled_local=false; if("
       << is_local_symbol(local_dispatch_symbol) << "(guest_target)) { rr="
       << local_dispatch_symbol << "(context,guest_target); handled_local=true; }\n";
-    o << indent << "if(!handled_local) { if(auto* native=context.lookup_compiled(guest_target,CompiledLookupKind::Call)) rr=native(context); else { auto fallback=context.try_dynamic_fallback(guest_target,CompiledLookupKind::Call); rr=fallback.handled ? fallback.result : runtime.call(raw_target,state,memory); } }\n";
+    std::string site_declaration;
+    const auto lookup = indirect_lookup(site_declaration, "Call");
+    o << indent << site_declaration;
+    o << indent << "if(!handled_local) { if(auto* native=" << lookup << ") rr=native(context); else { auto fallback=context.try_dynamic_fallback(guest_target,CompiledLookupKind::Call); rr=fallback.handled ? fallback.result : runtime.call(raw_target,state,memory); } }\n";
     emit_call_result_check(o, "rr", expected_return, indent);
     if (!condition.empty()) o << "  }\n";
     return o.str();
   }
 
   if (i.op == Op::BranchIndirect && i.imm0 == 0u && i.imm1 != 1u) {
+    std::string site_declaration;
+    const auto lookup = indirect_lookup(site_declaration, "Branch");
     o << "  if(" << arg(i,0) << ") { const auto guest_target=static_cast<GuestAddress>("
-      << arg(i,1) << " & ~3ull); if(" << is_local_symbol(local_dispatch_symbol)
+      << arg(i,1) << " & ~3ull); " << site_declaration << "if(" << is_local_symbol(local_dispatch_symbol)
       << "(guest_target)) { " << kLocalBranchTarget << "=guest_target; goto "
-      << kLocalBranchLabel << "; } " << flush_registers() << "if(auto* native=context.lookup_compiled(guest_target,CompiledLookupKind::Branch)) { auto xr=native(context); " << reload_registers() << "return xr; } auto fallback=context.try_dynamic_fallback(guest_target,CompiledLookupKind::Branch); " << reload_registers() << "if(fallback.handled) return fallback.result; state.nia=guest_target; return {FlowReason::Branch,guest_target,0}; }\n";
+      << kLocalBranchLabel << "; } " << flush_registers() << "if(auto* native=" << lookup << ") { auto xr=native(context); " << reload_registers() << "return xr; } auto fallback=context.try_dynamic_fallback(guest_target,CompiledLookupKind::Branch); " << reload_registers() << "if(fallback.handled) return fallback.result; state.nia=guest_target; return {FlowReason::Branch,guest_target,0}; }\n";
     return o.str();
   }
 
@@ -471,9 +603,12 @@ std::string CppAotBackend::emit_function(
   // Register promotion for this function's emission (see the constructor);
   // the single-block path never promotes.
   struct PromotionScope {
-    explicit PromotionScope(bool on) noexcept { t_promotion.active = on; }
+    PromotionScope(bool on, bool cache_indirect) noexcept {
+      t_promotion.active = on;
+      t_promotion.cache_indirect = cache_indirect;
+    }
     ~PromotionScope() { t_promotion = {}; }
-  } promotion_scope(promote_registers_);
+  } promotion_scope(promote_registers_, cache_indirect_sites_);
   std::array<bool, 32> used_gpr{};
   std::array<bool, 32> used_fpr{};
   std::array<bool, 128> used_vr{};
@@ -494,6 +629,20 @@ std::string CppAotBackend::emit_function(
 
   std::unordered_set<GuestAddress> local_targets;
   for (const auto& block : function.blocks) local_targets.insert(block.guest_address);
+  // Register spills made inline read and write their registers as locals.
+  for (const auto& block : function.blocks) {
+    for (const auto& i : block.instructions) {
+      std::optional<std::uint64_t> target;
+      if ((i.op == Op::Call || i.op == Op::Branch) && !i.args.empty())
+        target = constant_value(block, i.args[0]);
+      else if (i.op == Op::BranchIf && i.args.size() >= 2 && i.imm0 <= 1u)
+        target = constant_value(block, i.args[1]);
+      if (!target) continue;
+      if (const auto* spill = find_inline_spill(static_cast<GuestAddress>(*target),
+                                                direct_calls, local_targets))
+        mark_spill_registers(*spill, used_gpr, used_fpr, used_vr);
+    }
+  }
   for (const auto& block : function.blocks) {
     for (const auto& edge : block.successors) {
       if ((edge.kind == ir::EdgeKind::Branch || edge.kind == ir::EdgeKind::Fallthrough) &&

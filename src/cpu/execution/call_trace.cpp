@@ -1,5 +1,7 @@
 #include "xenon/cpu/call_trace.hpp"
 
+#include "xenon/cpu/dispatch_generation.hpp"
+
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -493,6 +495,7 @@ bool configure(const Settings& settings) {
   }
   g_configured.store(true);
   g_active.store(!functions.empty() || settings.graph || !s.interpret.empty());
+  bump_dispatch_generation();  // traced lookups answer differently now
   return true;
 }
 

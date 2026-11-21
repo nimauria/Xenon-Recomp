@@ -7,6 +7,7 @@
 #include "core/session/session_internal.hpp"
 #include "xenon/logging/diagnostic_events.hpp"
 #include "xenon/cpu/call_trace.hpp"
+#include "xenon/cpu/dispatch_generation.hpp"
 #include "xenon/logging/logger.hpp"
 #include "xenon/logging/probe_log.hpp"
 
@@ -57,6 +58,12 @@ XenonSession::GuestDispatchOutcome XenonSession::dispatch_guest_thread(
     compiled_registry_binder_(context);
   }
   cpu::call_trace::bind(context);
+  // Indirect call sites of the generated code may cache what they resolved
+  // while the lookup is the module's static registry. Not under call tracing
+  // (every call must reach the tracing lookup) and not for the code cache's
+  // lookup (it revalidates guest memory on each one).
+  if (compiled_registry_binder_ && !cpu::call_trace::active())
+    context.dispatch_generation = &cpu::dispatch_generation();
   // Write-trap reports name this thread's guest instruction.
   struct WriteTrapState {
     const cpu::CpuState* outer;

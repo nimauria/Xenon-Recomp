@@ -4,6 +4,7 @@
 #include <string_view>
 
 #include "core/session/session_internal.hpp"
+#include "xenon/cpu/dispatch_generation.hpp"
 
 #if defined(_WIN32)
 #define WIN32_LEAN_AND_MEAN
@@ -95,6 +96,7 @@ bool declared_revisions_include(std::string_view declared, const std::string& ef
 }  // namespace
 
 void XenonSession::load_native_extension() {
+  cpu::bump_dispatch_generation();  // whatever call sites cached belongs to the old module
   native_extension_bound_ = false;
   native_extension_error_.clear();
   compiled_registry_binder_ = nullptr;
@@ -177,6 +179,7 @@ void XenonSession::load_native_extension() {
 }
 
 void XenonSession::unload_native_extension() noexcept {
+  cpu::bump_dispatch_generation();
   if (native_extension_handle_) {
     unload_native_library(native_extension_handle_);
     native_extension_handle_ = nullptr;

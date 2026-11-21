@@ -6,6 +6,7 @@
 
 #include "recomp/compilation/project_generation_internal.hpp"
 #include "xenon/cpu/backend/cpp_aot.hpp"
+#include "xenon/recomp/runtime_helpers.hpp"
 #include "xenon/recomp/worker_pool.hpp"
 
 namespace xenon::recomp::detail {
@@ -42,6 +43,47 @@ DirectCallSymbols build_direct_call_symbols(
     direct_call_symbols.emplace(
         address, cpu::backend::DirectCallBinding{address, std::move(symbol), std::move(header), leaf});
   };
+  // A register save/restore helper, with the moves it makes (see
+  // DirectCallBinding::Spill and runtime_helpers.hpp) so a promoted function
+  // can make them inline.
+  const auto bind_spill = [&](const analysis::RuntimeHelper& helper) {
+    using Spill = cpu::backend::DirectCallBinding::Spill;
+    Spill spill = Spill::None;
+    std::uint32_t first = helper.register_start.value_or(14u);
+    std::int32_t offset = 0;
+    std::int32_t link_offset = 0;
+    switch (helper.kind) {
+      case analysis::RuntimeHelperKind::SaveGprLr: spill = Spill::SaveGprLr; break;
+      case analysis::RuntimeHelperKind::RestoreGprLr: spill = Spill::RestoreGprLr; break;
+      case analysis::RuntimeHelperKind::SaveFpr: spill = Spill::SaveFpr; break;
+      case analysis::RuntimeHelperKind::RestoreFpr: spill = Spill::RestoreFpr; break;
+      case analysis::RuntimeHelperKind::SaveVmx: spill = Spill::SaveVmx; break;
+      case analysis::RuntimeHelperKind::RestoreVmx: spill = Spill::RestoreVmx; break;
+      case analysis::RuntimeHelperKind::SaveVmx128:
+        spill = Spill::SaveVmx128;
+        first = helper.register_start.value_or(64u);
+        break;
+      case analysis::RuntimeHelperKind::RestoreVmx128:
+        spill = Spill::RestoreVmx128;
+        first = helper.register_start.value_or(64u);
+        break;
+      default: return;
+    }
+    switch (spill) {
+      case Spill::SaveGprLr: case Spill::RestoreGprLr:
+        offset = runtime_helpers::kGprLrBaseOffset;
+        link_offset = runtime_helpers::kGprLrLrOffset;
+        break;
+      case Spill::SaveFpr: case Spill::RestoreFpr: offset = runtime_helpers::kFprBaseOffset; break;
+      case Spill::SaveVmx: case Spill::RestoreVmx: offset = runtime_helpers::kVmxBaseOffset; break;
+      default: offset = runtime_helpers::kVmx128BaseOffset; break;
+    }
+    auto& binding = direct_call_symbols.at(helper.address);
+    binding.spill = spill;
+    binding.spill_first = first;
+    binding.spill_offset = offset;
+    binding.spill_link_offset = link_offset;
+  };
   for (const auto* function : codegen_items) bind(function->guest_start, function->name + "_v2");
   for (const auto& [owner, entries] : alternate_entries_by_owner) {
     const auto owner_it = std::find_if(codegen_items.begin(), codegen_items.end(),
@@ -59,6 +101,7 @@ DirectCallSymbols build_direct_call_symbols(
         continue;
       bind(helper.address, "xenon::recomp::runtime_helpers::" + runtime_helper_native_symbol(helper),
            "xenon/recomp/runtime_helpers.hpp", true);
+      bind_spill(helper);
     }
   }
   for (const auto& function : report.functions) {
@@ -100,11 +143,25 @@ EmittedFunctionSources emit_function_sources(
 #endif
     return !(value && std::string_view(value) == "0");
   }();
+  // Per-site caches for indirect calls and branches (aot::lookup_cached);
+  // XENON_CODEGEN_INDIRECT_CACHE=0 turns them off. Part of every source's
+  // cache key.
+  const bool cache_indirect = [] {
+#if defined(_MSC_VER)
+#pragma warning(push)
+#pragma warning(disable : 4996)
+#endif
+    const char* value = std::getenv("XENON_CODEGEN_INDIRECT_CACHE");
+#if defined(_MSC_VER)
+#pragma warning(pop)
+#endif
+    return !(value && std::string_view(value) == "0");
+  }();
   pool.parallel_for(codegen_items.size(), [&](std::size_t i) {
     // cpu::backend::CppAotBackend holds only its options and every method is
     // const (see include/xenon/cpu/backend/cpp_aot.hpp), so a fresh instance
     // per call is both correct and cheap.
-    cpu::backend::CppAotBackend backend(promote_registers);
+    cpu::backend::CppAotBackend backend(promote_registers, cache_indirect);
     const auto& function = *codegen_items[i];
     const auto aliases_it = alternate_entries_by_owner.find(function.guest_start);
     const std::span<const GuestAddress> alternate_entries =
@@ -125,7 +182,8 @@ EmittedFunctionSources emit_function_sources(
       if (!bound.insert(target).second) return;
       direct_calls.push_back(symbol_it->second);
       direct_call_key += std::to_string(target) + "=" + symbol_it->second.native_symbol +
-                         (symbol_it->second.leaf ? "!" : "") + ";";
+                         (symbol_it->second.leaf ? "!" : "") +
+                         (symbol_it->second.spill != cpu::backend::DirectCallBinding::Spill::None ? "s" : "") + ";";
     };
     for (const auto target : cpu::backend::CppAotBackend::static_call_targets(function.ir))
       bind(target, false);
@@ -149,6 +207,7 @@ EmittedFunctionSources emit_function_sources(
          {"symbol", function.name}, {"aliases", aliases},
          {"direct_calls", direct_call_key},
          {"promote_registers", promote_registers ? "1" : "0"},
+         {"indirect_cache", cache_indirect ? "1" : "0"},
          {"producer_build", graph::producer_identity("source")},
          {"cpu_semantics", options.graph_versions.semantics}}, {}};
     // Absent without hooks, so hook-free functions keep their keys.

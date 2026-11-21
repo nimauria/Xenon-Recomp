@@ -220,6 +220,12 @@ struct ExecutionContext {
   // spinning inside one compiled function stays preemptible, as on hardware.
   // Appended last so modules built against the earlier layout still work.
   const std::atomic<bool>* safepoint_flag{};
+  // The host's dispatch generation (dispatch_generation.hpp), set only on
+  // contexts whose compiled_lookup is a static registry that cannot change
+  // between generation bumps. Generated indirect call sites cache their
+  // resolved target while it holds the same value; null disables the cache.
+  // Appended last, like safepoint_flag.
+  const std::atomic<std::uint64_t>* dispatch_generation{};
 
   // Whether the thread has been asked to stop: code holding guest registers
   // in locals checks this, writes them back, then calls

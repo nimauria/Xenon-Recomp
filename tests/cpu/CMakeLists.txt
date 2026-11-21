@@ -196,6 +196,8 @@ int main() {
   xenon_add_generated_cpu_test(large_function codegen_large_function.cpp large_function.cpp)
   xenon_add_generated_cpu_test(register_helpers codegen_register_helpers.cpp register_helpers.cpp)
   xenon_add_generated_cpu_test(register_promotion codegen_register_promotion.cpp register_promotion.cpp)
+  xenon_add_generated_cpu_test(register_spills codegen_register_spills.cpp register_spills.cpp)
+  xenon_add_generated_cpu_test(indirect_cache codegen_indirect_cache.cpp indirect_cache.cpp)
   if(XENON_ENABLE_MEMORY)
 
     add_executable(xenon_dynamic_fallback_tests
