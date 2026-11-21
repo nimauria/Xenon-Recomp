@@ -10,6 +10,7 @@
 #include <condition_variable>
 #include <cstdio>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 
@@ -47,10 +48,89 @@ const xenon::logging::HostThreadProfile* find(
   return nullptr;
 }
 
+// The caller histogram with synthetic stacks: no sampling, exact numbers.
+void caller_histogram_tests() {
+  using xenon::logging::CallerHistogram;
+  using xenon::logging::HostSampler;
+  // Addresses: 0x100 the hot spin (a guest function), 0x200/0x201 call sites
+  // in one host helper, 0x300 a guest caller A, 0x400 a guest caller B.
+  CallerHistogram histogram;
+  const std::uintptr_t via_helper_a[] = {0x100, 0x200, 0x300};
+  const std::uintptr_t via_helper_b[] = {0x100, 0x201, 0x300};   // same helper, other call site
+  const std::uintptr_t direct_b[] = {0x100, 0x400};
+  const std::uintptr_t leaf_only[] = {0x100};
+  const std::uintptr_t other_pc[] = {0x999, 0x300};
+  for (int i = 0; i < 5; ++i) histogram.add(via_helper_a, 3);
+  for (int i = 0; i < 3; ++i) histogram.add(via_helper_b, 3);
+  for (int i = 0; i < 2; ++i) histogram.add(direct_b, 2);
+  histogram.add(leaf_only, 1);
+  histogram.add(other_pc, 2);
+  assert(histogram.total(0x100) == 11u);
+  assert(histogram.total(0x999) == 1u);
+  assert(histogram.total(0x12345) == 0u);
+
+  const auto name_of = [](std::uintptr_t address) -> std::string {
+    if (address == 0x200 || address == 0x201) return "helper";
+    if (address == 0x300) return "guest A";
+    if (address == 0x400) return "guest B";
+    return "other";
+  };
+  const auto guest_name_of = [](std::uintptr_t address) -> std::optional<std::string> {
+    if (address == 0x100) return "guest SPIN";
+    if (address == 0x300) return "guest A";
+    if (address == 0x400) return "guest B";
+    return std::nullopt;
+  };
+  const auto result = histogram.resolve(0x100, name_of, guest_name_of);
+  assert(result.total == 11u);
+  // Immediate parents: the helper (two call sites, one name) took 8 of 11, B 2,
+  // and the leaf-only sample has no parent.
+  assert(result.parents.size() == 3u);
+  assert(result.parents[0].symbol == "helper" && result.parents[0].count == 8u);
+  assert(result.parents[1].symbol == "guest B" && result.parents[1].count == 2u);
+  assert(result.parents[2].symbol == "(none)" && result.parents[2].count == 1u);
+  // Guest callers: walking past the non-guest helper reaches A for 8 samples.
+  assert(result.guest_callers.size() == 3u);
+  assert(result.guest_callers[0].symbol == "guest A" && result.guest_callers[0].count == 8u);
+  assert(result.guest_callers[1].symbol == "guest B" && result.guest_callers[1].count == 2u);
+  assert(result.guest_callers[2].symbol == "(none)" && result.guest_callers[2].count == 1u);
+  // Without a guest symbolizer every guest caller is "(none)".
+  const auto unnamed = histogram.resolve(0x100, name_of, {});
+  assert(unnamed.guest_callers.size() == 1u && unnamed.guest_callers[0].symbol == "(none)");
+
+  // Bounded: past the per-PC chain limit the samples still count in the total
+  // but are listed as not recorded.
+  CallerHistogram flood;
+  for (std::uintptr_t i = 1; i <= CallerHistogram::kMaxChainsPerPc + 50u; ++i) {
+    const std::uintptr_t stack[] = {0x100, 0x10000 + i};
+    flood.add(stack, 2);
+  }
+  const auto bounded = flood.resolve(0x100, name_of, guest_name_of);
+  assert(bounded.total == CallerHistogram::kMaxChainsPerPc + 50u);
+  assert(bounded.parents.back().symbol == "(not recorded)" ||
+         bounded.parents.front().symbol == "(not recorded)" ||
+         [&] {
+           for (const auto& entry : bounded.parents)
+             if (entry.symbol == "(not recorded)") return entry.count == 50u;
+           return false;
+         }());
+
+  // The code symbolizer decides what is guest code.
+  xenon::logging::set_code_symbolizer([](std::uintptr_t address) -> std::optional<std::string> {
+    if (address == 0x500) return "guest 82000000";
+    return std::nullopt;
+  });
+  assert(HostSampler::symbolize_guest(0x500) == std::optional<std::string>("guest 82000000"));
+  assert(!HostSampler::symbolize_guest(0x501));
+  xenon::logging::set_code_symbolizer({});
+  assert(!HostSampler::symbolize_guest(0x500));
+}
+
 }  // namespace
 
 int main() {
   using xenon::logging::HostSampler;
+  caller_histogram_tests();
   if (!HostSampler::supported()) {
     std::puts("host sampler unsupported on this host: skipped");
     return 0;
@@ -129,7 +209,18 @@ int main() {
   std::printf("symbolized: %s\n", self.c_str());
   assert(!self.empty() && self.rfind("0x", 0) != 0);
 
+  // The hottest function carries its caller histogram (Windows x64 walks
+  // the stack, so the parent is a real frame; elsewhere only the PC is kept
+  // and the caller reads "(none)"), and the report lists it.
+  const auto& top_entry = busy_profile->functions.front();
+  assert(!top_entry.callers.empty() && !top_entry.guest_callers.empty());
+  std::uint64_t caller_samples = 0;
+  for (const auto& caller : top_entry.callers) caller_samples += caller.count;
+  assert(caller_samples == top_entry.self);
+
   const auto report = sampler.report();
+  assert(report.find("called from:") != std::string::npos);
+  assert(report.find("guest caller:") != std::string::npos);
   assert(report.find("\"sampler-busy\"") != std::string::npos);
   assert(report.find("host profile: interval 1000 us") == 0);
   std::puts("host sampler tests passed");

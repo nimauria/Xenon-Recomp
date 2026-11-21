@@ -165,7 +165,7 @@ void XenonSession::dump_presented_frame(const gpu::PresentationFrame& frame) {
     const char* value = std::getenv("XENON_FRAME_DUMP");
     return value && *value ? std::filesystem::path(value) : std::filesystem::path{};
   }();
-  if (directory.empty() || !gpu_) return;
+  if ((directory.empty() && !anomaly_capture_gate_.enabled()) || !gpu_) return;
   static const std::uint64_t every = [] {
     const char* value = std::getenv("XENON_FRAME_DUMP_EVERY");
     const auto parsed = value ? std::strtoull(value, nullptr, 10) : 0ull;
@@ -181,7 +181,7 @@ void XenonSession::dump_presented_frame(const gpu::PresentationFrame& frame) {
   static const bool anomaly_watch = [] {
     const char* value = std::getenv("XENON_FRAME_ANOMALY");
     return value && *value && std::string_view(value) != "0";
-  }();
+  }() || anomaly_capture_gate_.enabled();
   if (anomaly_watch) {
     gpu::PreparedPresentationFrame small{};
     if (gpu_->capture_scanout(frame, 64u, 36u, small) && small.valid) {
@@ -192,6 +192,7 @@ void XenonSession::dump_presented_frame(const gpu::PresentationFrame& frame) {
                               std::chrono::steady_clock::now().time_since_epoch())
                               .count();
       const auto save = [&](std::string_view label) {
+        if (directory.empty()) return;
         gpu::PreparedPresentationFrame image{};
         if (!gpu_->capture_scanout(frame, 640u, 360u, image)) return;
         std::error_code error;
@@ -215,6 +216,22 @@ void XenonSession::dump_presented_frame(const gpu::PresentationFrame& frame) {
         log_line(kind);
         save(kind == "brightness jump" ? std::string_view("jump") : kind);
         anomaly_followups_ = 2;
+        // XENON_ANOMALY_CAPTURE: record the frames that follow as a portable
+        // GPU capture (the same facility as XENON_GPU_CAPTURE), once per
+        // cooldown and at most a few times a run.
+        if (anomaly_capture_gate_.enabled() && graphics_system_ &&
+            !graphics_system_->frame_capture_armed()) {
+          const std::filesystem::path probe_directory = logging::probe_log_directory();
+          if (!probe_directory.empty() &&
+              anomaly_capture_gate_.should_arm(static_cast<std::uint64_t>(now_ms))) {
+            const auto path = probe_directory / ("gpu_capture_anomaly_" + std::to_string(now_ms) +
+                                                 "_" + std::to_string(index) + ".xgc");
+            graphics_system_->arm_frame_capture(path, 2u);
+            logging::append_run_log("anomalies.log", "%lld ms frame %llu: GPU capture armed -> %s\n",
+                                    static_cast<long long>(now_ms),
+                                    static_cast<unsigned long long>(index), path.string().c_str());
+          }
+        }
       } else if (anomaly_followups_ > 0) {
         --anomaly_followups_;
         log_line("  after");
@@ -223,7 +240,7 @@ void XenonSession::dump_presented_frame(const gpu::PresentationFrame& frame) {
       last_frame_stats_ = stats;
     }
   }
-  if (index % every != 0u) return;
+  if (directory.empty() || index % every != 0u) return;
   // With probe logs on, the guest bytes behind the dumped frame are hashed
   // the same way full-frame resolves are (frontbuffer_diag.log), so a stale
   // dump can be told apart: a hash no resolve produced means the scan-out
@@ -300,6 +317,7 @@ std::uint32_t XenonSession::run_gpu_pump_thread() {
   // second; the outcome goes to the console and gpu_capture.log.
   struct LiveCapture {
     bool enabled{};
+    bool manual{};  // XENON_GPU_CAPTURE=1: capture.signal and the draw threshold
     std::uint32_t frames{2};
     std::uint64_t draw_threshold{30000};
     std::uint64_t automatic_left{1};
@@ -316,11 +334,15 @@ std::uint32_t XenonSession::run_gpu_pump_thread() {
       return end && *end == '\0' ? static_cast<std::uint64_t>(parsed) : fallback;
     };
     const char* enabled = std::getenv("XENON_GPU_CAPTURE");
-    capture.enabled = enabled && enabled[0] == '1' && enabled[1] == '\0';
+    const bool manual = enabled && enabled[0] == '1' && enabled[1] == '\0';
+    // XENON_ANOMALY_CAPTURE arms captures from the present path (dump_
+    // presented_frame); the poll below only has to collect their results.
+    capture.enabled = manual || anomaly_capture_gate_.enabled();
+    capture.manual = manual;
     capture.frames = static_cast<std::uint32_t>(
         (std::min<std::uint64_t>)((std::max<std::uint64_t>)(number("XENON_GPU_CAPTURE_FRAMES", 2), 1), 600));
     capture.draw_threshold = number("XENON_GPU_CAPTURE_DRAWS", 30000);
-    capture.automatic_left = number("XENON_GPU_CAPTURE_COUNT", 1);
+    capture.automatic_left = manual ? number("XENON_GPU_CAPTURE_COUNT", 1) : 0;
   }
   const auto poll_live_capture = [&](Clock::time_point now) {
     if (auto result = graphics_system_->take_frame_capture_result()) {
@@ -344,7 +366,7 @@ std::uint32_t XenonSession::run_gpu_pump_thread() {
     const auto draws = graphics_system_->command_processor().draw_count();
     const auto draws_this_second = draws - capture.draws_at_check;
     capture.draws_at_check = draws;
-    if (first || graphics_system_->frame_capture_armed()) return;
+    if (first || !capture.manual || graphics_system_->frame_capture_armed()) return;
     const std::filesystem::path directory = logging::probe_log_directory();
     if (directory.empty()) return;
     std::error_code ignored;

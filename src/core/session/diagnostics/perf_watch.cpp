@@ -81,6 +81,7 @@ void XenonSession::start_perf_watch() {
       }
       for (const auto& hitch : hitches) {
         const double at_s = static_cast<double>(hitch.at_ns - to_ns(perf_watch_start_)) / 1e9;
+        bottleneck_ledger_.add_hitch(hitch.verdict.interval_ms, hitch.verdict.expected_ms);
         logging::append_run_log("hitches.log", "+%.3fs frame took %.1f ms (recent median %.1f ms)\n",
                                 at_s, hitch.verdict.interval_ms, hitch.verdict.expected_ms);
         if (hitch.at_ns - last_full_report >= kFullReportIntervalNs) {
@@ -100,6 +101,9 @@ void XenonSession::start_perf_watch() {
           const double at_s = static_cast<double>(now - to_ns(perf_watch_start_)) / 1e9;
           logging::append_run_log("slow_events.log", "+%.3fs over 5 ms in the last 5 s:\n", at_s);
           for (const auto& tally : tallies) {
+            bottleneck_ledger_.add_slow(tally.category, tally.name, tally.count,
+                                        static_cast<double>(tally.total_ns) / 1e6,
+                                        static_cast<double>(tally.max_ns) / 1e6);
             logging::append_run_log(
                 "slow_events.log", "    %-8s %-40s x%-5llu total %8.1f ms  max %7.1f ms\n",
                 tally.category.c_str(), tally.name.c_str(),
@@ -107,6 +111,7 @@ void XenonSession::start_perf_watch() {
                 static_cast<double>(tally.total_ns) / 1e6, static_cast<double>(tally.max_ns) / 1e6);
           }
         }
+        write_bottleneck_report();
       }
     }
   });
@@ -115,7 +120,18 @@ void XenonSession::start_perf_watch() {
 void XenonSession::stop_perf_watch() noexcept {
   perf_watch_enabled_.store(false, std::memory_order_release);
   perf_watch_running_.store(false, std::memory_order_release);
-  if (perf_watch_thread_.joinable()) perf_watch_thread_.join();
+  if (perf_watch_thread_.joinable()) {
+    perf_watch_thread_.join();
+    try {
+      for (const auto& tally : hitch_monitor_.take_slow_tallies())
+        bottleneck_ledger_.add_slow(tally.category, tally.name, tally.count,
+                                    static_cast<double>(tally.total_ns) / 1e6,
+                                    static_cast<double>(tally.max_ns) / 1e6);
+      write_bottleneck_report();
+    } catch (...) {
+      // Diagnostics must never take the session down while it stops.
+    }
+  }
 }
 
 void XenonSession::note_presented_frame_for_hitches(Clock::time_point when) {

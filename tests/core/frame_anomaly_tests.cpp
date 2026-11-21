@@ -63,8 +63,39 @@ void test_classification() {
 
 }  // namespace
 
+void test_capture_gate() {
+  using xenon::core::AnomalyCaptureGate;
+  // Off: never arms.
+  {
+    AnomalyCaptureGate gate(AnomalyCaptureGate::Options{false, 3, 1000});
+    assert(!gate.enabled() && !gate.should_arm(0) && gate.armed_count() == 0u);
+  }
+  // On: the first anomaly arms; others inside the cooldown do not (exactly
+  // once per cooldown window); the next after it does; the limit is final.
+  AnomalyCaptureGate gate(AnomalyCaptureGate::Options{true, 3, 1000});
+  assert(gate.should_arm(5000));
+  assert(!gate.should_arm(5001));
+  assert(!gate.should_arm(5999));  // 999 ms later: still cooling down
+  assert(gate.armed_count() == 1u);
+  assert(gate.should_arm(6000));   // exactly the cooldown
+  assert(!gate.should_arm(6500));
+  assert(gate.should_arm(9000));
+  assert(gate.armed_count() == 3u);
+  assert(!gate.should_arm(100000));  // max count respected
+  assert(!gate.should_arm(200000));
+  assert(gate.armed_count() == 3u);
+  // A cooldown of zero still honours the count.
+  AnomalyCaptureGate burst(AnomalyCaptureGate::Options{true, 2, 0});
+  assert(burst.should_arm(1) && burst.should_arm(1) && !burst.should_arm(1));
+  // A clock that starts at 0 is not mistaken for "never armed".
+  AnomalyCaptureGate early(AnomalyCaptureGate::Options{true, 5, 100});
+  assert(early.should_arm(0));
+  assert(!early.should_arm(50));
+}
+
 int main() {
   test_stats();
   test_classification();
+  test_capture_gate();
   return 0;
 }

@@ -1,6 +1,7 @@
 #include "xenon/core/frame_anomaly.hpp"
 
 #include <cmath>
+#include <cstdlib>
 
 namespace xenon::core {
 
@@ -48,6 +49,53 @@ std::string_view classify_frame_change(const FrameColorStats& previous,
   if (current.green_fraction > 0.6 && previous.green_fraction < 0.3) return "green";
   if (std::fabs(current.luminance - previous.luminance) > 60.0) return "brightness jump";
   return {};
+}
+
+AnomalyCaptureGate::Options AnomalyCaptureGate::options_from_environment() {
+  Options options{};
+  const auto number = [](const char* name, std::uint64_t fallback) {
+#if defined(_MSC_VER)
+#pragma warning(push)
+#pragma warning(disable : 4996)  // read once at session start
+#endif
+    const char* value = std::getenv(name);
+#if defined(_MSC_VER)
+#pragma warning(pop)
+#endif
+    if (!value || !*value) return fallback;
+    char* end = nullptr;
+    const auto parsed = std::strtoull(value, &end, 10);
+    return end && *end == '\0' ? static_cast<std::uint64_t>(parsed) : fallback;
+  };
+#if defined(_MSC_VER)
+#pragma warning(push)
+#pragma warning(disable : 4996)
+#endif
+  const char* on = std::getenv("XENON_ANOMALY_CAPTURE");
+#if defined(_MSC_VER)
+#pragma warning(pop)
+#endif
+  options.enabled = on && *on && !(on[0] == '0' && on[1] == '\0');
+  options.max_count = static_cast<std::uint32_t>((std::min<std::uint64_t>)(
+      number("XENON_ANOMALY_CAPTURE_COUNT", options.max_count), 1000u));
+  options.cooldown_ms = number("XENON_ANOMALY_CAPTURE_COOLDOWN_MS", options.cooldown_ms);
+  return options;
+}
+
+bool AnomalyCaptureGate::should_arm(std::uint64_t now_ms) {
+  if (!options_.enabled) return false;
+  std::scoped_lock lock(mutex_);
+  if (armed_ >= options_.max_count) return false;
+  if (have_last_ && now_ms < last_ms_ + options_.cooldown_ms) return false;
+  ++armed_;
+  have_last_ = true;
+  last_ms_ = now_ms;
+  return true;
+}
+
+std::uint32_t AnomalyCaptureGate::armed_count() const {
+  std::scoped_lock lock(mutex_);
+  return armed_;
 }
 
 }  // namespace xenon::core

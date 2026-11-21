@@ -24,4 +24,9 @@ if(XENON_BUILD_TESTS)
   target_link_libraries(xenon_host_sampler_tests PRIVATE xenon_logging)
   xenon_enable_test_asserts(xenon_host_sampler_tests)
   add_test(NAME xenon_host_sampler_tests COMMAND xenon_host_sampler_tests)
+  # tools/run_summary.py: run-log metrics and the baseline budget check.
+  if(Python3_Interpreter_FOUND)
+    add_test(NAME xenon_run_summary_tests
+      COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/run_summary_tests.py")
+  endif()
 endif()

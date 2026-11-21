@@ -42,6 +42,7 @@ add_library(xenon_core STATIC
   session/diagnostics/guest_profile.cpp
   session/diagnostics/perf_watch.cpp
   session/diagnostics/guest_profiler.cpp
+  session/diagnostics/bottlenecks.cpp
   session/diagnostics/memory_watch.cpp
   session/diagnostics/runtime_probes.cpp
   session/diagnostics/session_capability_report.cpp
@@ -59,6 +60,7 @@ add_library(xenon_core STATIC
   guest_code_map.cpp
   hitch_monitor.cpp
   frame_anomaly.cpp
+  bottleneck_report.cpp
   guest_memory_watch.cpp
 )
 target_include_directories(xenon_core

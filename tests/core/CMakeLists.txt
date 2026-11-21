@@ -141,6 +141,8 @@ if(XENON_BUILD_TESTS)
     guest_code_map_tests.cpp xenon_core)
   xenon_add_standalone_test(xenon_hitch_monitor_tests
     hitch_monitor_tests.cpp xenon_core)
+  xenon_add_standalone_test(xenon_bottleneck_report_tests
+    bottleneck_report_tests.cpp xenon_core)
   xenon_add_standalone_test(xenon_frame_anomaly_tests
     frame_anomaly_tests.cpp xenon_core)
   xenon_add_standalone_test(xenon_guest_memory_watch_tests

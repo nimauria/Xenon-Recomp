@@ -145,6 +145,7 @@ void XenonSession::start_guest_profile() {
           }
         };
         replace(guest_profile_path_, [this](std::ostream& out) { guest_profiler_.write(out); });
+        replace(blocked_callers_path(), [this](std::ostream& out) { write_blocked_callers(out); });
         logging::write_host_profile_snapshot();
         if (kernel::wait_profile_enabled()) {
           const auto directory = logging::probe_log_directory();
@@ -169,17 +170,39 @@ void XenonSession::start_guest_profile() {
               name->second = thread->name();
           }
           std::string blocked;
+          std::uint32_t blocked_lr = 0;
           if (const auto it = in_flight.find(thread_id); it != in_flight.end()) {
+            blocked_lr = static_cast<std::uint32_t>(it->second.lr);
             blocked = it->second.descriptor
                           ? it->second.descriptor->library + '!' + it->second.descriptor->name
                           : "export #" + std::to_string(it->second.ordinal);
           }
           guest_profiler_.record(elapsed, thread_id, name->second,
-                                 static_cast<cpu::GuestAddress>(guest_state->cia), blocked);
+                                 static_cast<cpu::GuestAddress>(guest_state->cia), blocked, blocked_lr);
         }
       }
       std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
+  });
+}
+
+// blocked_callers.log: which guest call site each blocked thread sat in a
+// kernel export from (the link register at the call), by guest function.
+std::filesystem::path XenonSession::blocked_callers_path() const {
+  const auto directory = logging::probe_log_directory();
+  return directory.empty() ? std::filesystem::path("blocked_callers.log")
+                           : std::filesystem::path(directory) / "blocked_callers.log";
+}
+
+void XenonSession::write_blocked_callers(std::ostream& out) const {
+  guest_profiler_.write_blocked_callers(out, 6, [this](std::uint32_t lr) -> std::string {
+    if (!loaded_xex_) return {};
+    if (const auto* function = xbox::function_metadata_containing(loaded_xex_->image, lr)) {
+      char text[16];
+      std::snprintf(text, sizeof(text), "%08X", static_cast<std::uint32_t>(function->begin));
+      return text;
+    }
+    return {};
   });
 }
 
@@ -205,6 +228,8 @@ void XenonSession::stop_guest_profile() noexcept {
   try {
     std::ofstream out(guest_profile_path_, std::ios::trunc);
     guest_profiler_.write(out);
+    std::ofstream callers(blocked_callers_path(), std::ios::trunc);
+    write_blocked_callers(callers);
     std::cout << "[XenonSession] guest profile: " << guest_profiler_.samples()
               << " samples written to " << guest_profile_path_ << std::endl;
   } catch (...) {

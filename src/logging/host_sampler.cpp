@@ -55,6 +55,7 @@ struct HostSampler::State {
     bool alive{true};
     std::unordered_map<std::uintptr_t, std::uint64_t> self;
     std::unordered_map<std::uintptr_t, std::uint64_t> inclusive;
+    CallerHistogram callers;
   };
 
   HostSamplerOptions options{};
@@ -299,6 +300,7 @@ void HostSampler::State::run() {
         thread.have_cpu = true;
         thread.last_cpu = cpu;
         ++thread.self[frames[0]];
+        if (options.caller_functions) thread.callers.add(frames, count);
         // Each address once per sample, whatever recursion repeats it.
         seen.clear();
         for (std::size_t i = 0; i < count; ++i)
@@ -419,6 +421,82 @@ void set_code_symbolizer(CodeSymbolizer symbolizer) {
   g_code_symbolizer = std::move(symbolizer);
 }
 
+std::optional<std::string> HostSampler::symbolize_guest(std::uintptr_t address) {
+  std::scoped_lock lock(g_code_symbolizer_mutex);
+  if (g_code_symbolizer) return g_code_symbolizer(address);
+  return std::nullopt;
+}
+
+void CallerHistogram::add(const std::uintptr_t* frames, std::size_t count) {
+  if (!count) return;
+  auto it = by_pc_.find(frames[0]);
+  if (it == by_pc_.end()) {
+    if (chains_ >= kMaxChains && by_pc_.size() >= kMaxChains) return;
+    it = by_pc_.try_emplace(frames[0]).first;
+  }
+  auto& per_pc = it->second;
+  ++per_pc.total;
+  Chain chain{};
+  for (std::size_t i = 1; i < count && i <= kDepth; ++i) chain.frames[i - 1] = frames[i];
+  const auto found = per_pc.chains.find(chain);
+  if (found != per_pc.chains.end()) {
+    ++found->second;
+    return;
+  }
+  if (per_pc.chains.size() >= kMaxChainsPerPc || chains_ >= kMaxChains) return;
+  per_pc.chains.emplace(chain, 1u);
+  ++chains_;
+}
+
+std::uint64_t CallerHistogram::total(std::uintptr_t self) const {
+  const auto it = by_pc_.find(self);
+  return it == by_pc_.end() ? 0u : it->second.total;
+}
+
+CallerHistogram::Result CallerHistogram::resolve(
+    std::uintptr_t self, const std::function<std::string(std::uintptr_t)>& name_of,
+    const std::function<std::optional<std::string>(std::uintptr_t)>& guest_name_of) const {
+  Result result{};
+  const auto it = by_pc_.find(self);
+  if (it == by_pc_.end()) return result;
+  result.total = it->second.total;
+  const auto self_guest = guest_name_of ? guest_name_of(self) : std::nullopt;
+  std::unordered_map<std::string, std::uint64_t> parents, guests;
+  std::uint64_t attributed = 0;
+  for (const auto& [chain, count] : it->second.chains) {
+    attributed += count;
+    parents[chain.frames[0] ? name_of(chain.frames[0]) : std::string("(none)")] += count;
+    std::string guest = "(none)";
+    if (guest_name_of) {
+      for (const auto frame : chain.frames) {
+        if (!frame) break;
+        auto name = guest_name_of(frame);
+        if (name && (!self_guest || *name != *self_guest)) {
+          guest = std::move(*name);
+          break;
+        }
+      }
+    }
+    guests[guest] += count;
+  }
+  if (attributed < result.total) {
+    parents["(not recorded)"] += result.total - attributed;
+    guests["(not recorded)"] += result.total - attributed;
+  }
+  const auto sorted = [](const std::unordered_map<std::string, std::uint64_t>& map) {
+    std::vector<HostCallerEntry> entries;
+    entries.reserve(map.size());
+    for (const auto& [symbol, count] : map) entries.push_back({symbol, count});
+    std::sort(entries.begin(), entries.end(), [](const auto& a, const auto& b) {
+      return a.count != b.count ? a.count > b.count : a.symbol < b.symbol;
+    });
+    return entries;
+  };
+  result.parents = sorted(parents);
+  result.guest_callers = sorted(guests);
+  return result;
+}
+
 std::string HostSampler::symbolize(std::uintptr_t address) {
   {
     std::scoped_lock lock(g_code_symbolizer_mutex);
@@ -522,6 +600,38 @@ std::vector<HostThreadProfile> HostSampler::profiles() const {
               [](const HostSampleEntry& a, const HostSampleEntry& b) {
                 return a.self != b.self ? a.self > b.self : a.inclusive > b.inclusive;
               });
+    // Callers of the heaviest self functions. The histogram is keyed by
+    // address and a symbol can cover several addresses (call sites, inlined
+    // copies), so each entry gathers every address that names it.
+    if (state_->options.caller_functions) {
+      std::unordered_map<std::string, std::vector<std::uintptr_t>> addresses_of;
+      for (const auto& [address, count] : thread.self)
+        addresses_of[name_of(address)].push_back(address);
+      const auto guest_name = [&](std::uintptr_t address) { return symbolize_guest(address); };
+      const std::function<std::string(std::uintptr_t)> resolve_name =
+          [&](std::uintptr_t address) { return name_of(address); };
+      for (std::size_t i = 0;
+           i < profile.functions.size() && i < state_->options.caller_functions; ++i) {
+        auto& entry = profile.functions[i];
+        if (!entry.self) break;
+        std::unordered_map<std::string, std::uint64_t> parents, guests;
+        for (const auto address : addresses_of[entry.symbol]) {
+          const auto resolved = thread.callers.resolve(address, resolve_name, guest_name);
+          for (const auto& caller : resolved.parents) parents[caller.symbol] += caller.count;
+          for (const auto& caller : resolved.guest_callers) guests[caller.symbol] += caller.count;
+        }
+        const auto order = [](const std::unordered_map<std::string, std::uint64_t>& map) {
+          std::vector<HostCallerEntry> entries;
+          for (const auto& [symbol, count] : map) entries.push_back({symbol, count});
+          std::sort(entries.begin(), entries.end(), [](const auto& a, const auto& b) {
+            return a.count != b.count ? a.count > b.count : a.symbol < b.symbol;
+          });
+          return entries;
+        };
+        entry.callers = order(parents);
+        entry.guest_callers = order(guests);
+      }
+    }
     result.push_back(std::move(profile));
   }
   std::sort(result.begin(), result.end(), [](const auto& a, const auto& b) {
@@ -581,6 +691,36 @@ std::string HostSampler::report() const {
                     entry->symbol.c_str());
       out += line;
     }
+    // Who calls the hottest functions: the immediate parent frame and the
+    // nearest guest function up the stack, as shares of the function's own
+    // self samples.
+    bool header = false;
+    for (const auto& entry : thread.functions) {
+      if (entry.callers.empty() && entry.guest_callers.empty()) continue;
+      if (!header) {
+        out += "  callers of the heaviest self-time functions (share of the function's self "
+               "samples):\n";
+        header = true;
+      }
+      std::snprintf(line, sizeof(line), "  %.400s (self %.2f%%)\n", entry.symbol.c_str(),
+                    100.0 * static_cast<double>(entry.self) / samples);
+      out += line;
+      const auto write_list = [&](const char* label, const std::vector<HostCallerEntry>& list) {
+        std::string text = std::string("    ") + label;
+        std::size_t shown = 0;
+        for (const auto& caller : list) {
+          if (shown++ >= 6) break;
+          std::snprintf(line, sizeof(line), "%s%.200s %.0f%%", shown == 1 ? " " : ", ",
+                        caller.symbol.c_str(),
+                        100.0 * static_cast<double>(caller.count) /
+                            static_cast<double>(entry.self));
+          text += line;
+        }
+        out += text + "\n";
+      };
+      write_list("called from:", entry.callers);
+      write_list("guest caller:", entry.guest_callers);
+    }
   }
   if (quiet) {
     std::snprintf(line, sizeof(line), "\n%zu threads with fewer than %llu samples not listed\n",
@@ -622,6 +762,12 @@ std::optional<HostSamplerOptions> host_sampler_options_from_environment() {
     const auto micros = std::strtoll(value, nullptr, 10);
     if (micros <= 0) return std::nullopt;
     options.interval = std::chrono::microseconds((std::max)(100ll, static_cast<long long>(micros)));
+  }
+  if (const char* callers = std::getenv("XENON_HOST_PROFILE_CALLERS"); callers && *callers) {
+    char* end = nullptr;
+    const auto parsed = std::strtoull(callers, &end, 10);
+    if (end && *end == '\0')
+      options.caller_functions = static_cast<std::size_t>((std::min)(parsed, 200ull));
   }
   return options;
 }

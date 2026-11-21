@@ -4,11 +4,13 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <filesystem>
 #include <functional>
 #include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <ostream>
 #include <set>
 #include <span>
 #include <string>
@@ -26,6 +28,7 @@
 #include "xenon/core/frame_anomaly.hpp"
 #include "xenon/core/guest_memory_watch.hpp"
 #include "xenon/core/guest_profiler.hpp"
+#include "xenon/core/bottleneck_report.hpp"
 #include "xenon/core/hitch_monitor.hpp"
 #include "xenon/core/in_flight_calls.hpp"
 #include "xenon/core/guest_thread_context.hpp"
@@ -642,6 +645,9 @@ class XenonSession final : public cpu::RuntimeServices {
   // after an anomaly are still saved (GPU pump thread only).
   FrameColorStats last_frame_stats_{};
   int anomaly_followups_{};
+  // XENON_ANOMALY_CAPTURE=1: a detected frame anomaly also arms the GPU frame
+  // capture (limits: XENON_ANOMALY_CAPTURE_COUNT / _COOLDOWN_MS).
+  AnomalyCaptureGate anomaly_capture_gate_{AnomalyCaptureGate::options_from_environment()};
   // Entry point for gpu_vsync_thread_: at 60 Hz, asks the worker to present
   // and delivers the vsync interrupt, whatever the worker is doing - as on
   // hardware, vertical blank does not wait for the GPU.
@@ -681,6 +687,9 @@ class XenonSession final : public cpu::RuntimeServices {
   // per-second profile when the session stops (diagnostics/guest_profile.cpp).
   void start_guest_profile();
   void stop_guest_profile() noexcept;
+  // blocked_callers.log: guest call sites of blocked kernel waits, by thread.
+  [[nodiscard]] std::filesystem::path blocked_callers_path() const;
+  void write_blocked_callers(std::ostream& out) const;
   // Performance watch (diagnostics/perf_watch.cpp), on unless
   // XENON_HITCH_LOG=0: samples where every guest thread is every 2 ms, and
   // writes hitches.log (each presented frame well over the recent median,
@@ -695,6 +704,9 @@ class XenonSession final : public cpu::RuntimeServices {
   // logged with `detail` (thread, arguments).
   void note_timed_event(const char* category, std::string_view name, std::uint64_t duration_ns,
                         std::uint32_t thread_id, const std::string& detail);
+  // bottlenecks.log: the run's ranked bottlenecks, rewritten every 5 s and at
+  // stop (diagnostics/bottlenecks.cpp).
+  void write_bottleneck_report();
   void write_hitch_report(std::uint64_t at_ns, const HitchMonitor::FrameVerdict& verdict,
                           const std::string& frame_line);
   // Text describing which guest threads were executing (outside a kernel call)
@@ -723,6 +735,7 @@ class XenonSession final : public cpu::RuntimeServices {
   GuestProfiler guest_profiler_{};
   HitchMonitor hitch_monitor_{};
   std::thread perf_watch_thread_{};
+  BottleneckLedger bottleneck_ledger_{};
   std::atomic<bool> perf_watch_running_{false};
   std::atomic<bool> perf_watch_enabled_{false};
   std::chrono::steady_clock::time_point perf_watch_start_{};
