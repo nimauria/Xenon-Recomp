@@ -85,13 +85,13 @@ std::uint32_t to_status(kernel::WaitResult result, std::uint32_t signaled_index_
 }
 
 // Reads a nullable Xbox LARGE_INTEGER timeout pointer (NULL = wait forever).
-std::chrono::milliseconds read_timeout(ExportCallContext& context,
-                                       cpu::GuestAddress timeout_ptr) {
+std::chrono::nanoseconds read_timeout(ExportCallContext& context,
+                                      cpu::GuestAddress timeout_ptr) {
   if (timeout_ptr == 0u) {
     return xbox_infinite_timeout();
   }
   const auto raw = static_cast<std::int64_t>(context.memory.read64_be(timeout_ptr));
-  return xbox_timeout_to_relative_ms(raw);
+  return xbox_timeout_to_relative(raw);
 }
 
 }  // namespace
@@ -155,14 +155,17 @@ bool nt_remove_io_completion_export(kernel::KernelProcess& process, ExportCallCo
     return true;
   }
   const auto timeout = read_timeout(context, static_cast<cpu::GuestAddress>(context.cpu.gpr[7]));
-  const bool infinite = timeout == xbox_infinite_timeout();
-  const auto deadline = std::chrono::steady_clock::now() + (infinite ? std::chrono::milliseconds(0) : timeout);
+  // As the kernel waits: negative, or INFINITE (0xFFFFFFFF ms) or more.
+  const bool infinite =
+      timeout.count() < 0 || timeout >= std::chrono::milliseconds(0xFFFFFFFFll);
+  const auto deadline =
+      std::chrono::steady_clock::now() + (infinite ? std::chrono::nanoseconds(0) : timeout);
   kernel::CompletionPacket packet{};
   while (!port->try_remove(packet)) {
     auto remaining = infinite ? timeout
-                              : std::chrono::duration_cast<std::chrono::milliseconds>(
+                              : std::chrono::duration_cast<std::chrono::nanoseconds>(
                                     deadline - std::chrono::steady_clock::now());
-    if (!infinite && remaining.count() < 0) remaining = std::chrono::milliseconds(0);
+    if (!infinite && remaining.count() < 0) remaining = std::chrono::nanoseconds(0);
     const auto result = kernel::wait_for_single_object(port->ready_event(), remaining,
                                                        context.thread_id);
     if (result == kernel::WaitResult::Success) continue;  // another remover may win it
@@ -725,7 +728,7 @@ bool nt_set_timer_ex_export(kernel::KernelProcess& process, ExportCallContext& c
                                    (unsigned)handle, (unsigned)routine_ptr, (unsigned)period_ms);
 
   const auto raw = static_cast<std::int64_t>(context.memory.read64_be(due_time_ptr));
-  const auto relative_due = xbox_timeout_to_relative_ms(raw);
+  const auto relative_due = xbox_timeout_to_relative(raw);
   const std::optional<std::chrono::milliseconds> period =
       period_ms == 0u ? std::nullopt
                       : std::optional<std::chrono::milliseconds>(period_ms);

@@ -37,6 +37,11 @@ bool ke_query_system_time(ExportCallContext& context) {
 // PLARGE_INTEGER interval (100ns units; negative = relative, positive =
 // absolute, mandatory per real NT/Xbox semantics) -> r3 = NTSTATUS.
 //
+// The interval keeps its 100 ns precision (xbox_timeout_to_relative()): a
+// zero or already-past interval yields the processor once, and an interval
+// below a millisecond delays for that long rather than being truncated to a
+// zero-length return (see kernel::delay_current_thread()).
+//
 // Xenon's 1:1 guest-thread:host-thread model means blocking the calling host
 // thread here genuinely suspends only this guest thread - other guest
 // threads (each their own host thread) keep running, matching real Xbox 360
@@ -49,7 +54,7 @@ bool ke_delay_execution_thread(ExportCallContext& context) {
   context.cpu.gpr[3] = 0u;  // STATUS_SUCCESS
   if (interval_ptr != 0u) {
     const auto raw = static_cast<std::int64_t>(context.memory.read64_be(interval_ptr));
-    const auto delay = xbox_timeout_to_relative_ms(raw);
+    const auto delay = xbox_timeout_to_relative(raw);
     const auto result = kernel::delay_current_thread(delay, alertable);
     if (result == kernel::WaitResult::UserApc) {
       deliver_user_apcs(context);

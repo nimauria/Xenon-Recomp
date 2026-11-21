@@ -21,7 +21,7 @@ class KernelSemaphore final : public KernelObject {
   // (detail::dispatcher_mutex()), such as signal_and_wait_for_object().
   [[nodiscard]] bool release_locked(std::int32_t release_count,
                                     std::int32_t* previous_count = nullptr);
-  [[nodiscard]] bool wait_for(std::chrono::milliseconds timeout);
+  [[nodiscard]] bool wait_for(std::chrono::nanoseconds timeout);
   [[nodiscard]] std::int32_t count() const;
   [[nodiscard]] std::int32_t maximum_count() const noexcept { return maximum_count_; }
 

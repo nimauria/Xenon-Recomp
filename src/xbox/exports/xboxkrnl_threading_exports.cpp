@@ -12,6 +12,7 @@
 #include "xenon/kernel/handle_table.hpp"
 #include "xenon/kernel/process.hpp"
 #include "xenon/kernel/thread.hpp"
+#include "xenon/kernel/wait.hpp"
 #include "xenon/kernel/xbox_io.hpp"
 #include "xenon/logging/diagnostic_events.hpp"
 #include "xenon/logging/logger.hpp"
@@ -570,10 +571,12 @@ bool interlocked_flush_slist(ExportCallContext& context) {
   }
 }
 
-// NtYieldExecution: give up the rest of the time slice. STATUS_SUCCESS means
-// another thread was made runnable; a host yield reports success.
+// NtYieldExecution: give up the rest of the time slice to another ready
+// thread (the host's SwitchToThread, kernel::yield_current_thread()).
+// Reports STATUS_SUCCESS whether or not another thread ran, as Xenia does;
+// no title is known to test for STATUS_NO_YIELD_PERFORMED.
 bool nt_yield_execution(ExportCallContext& context) {
-  std::this_thread::yield();
+  static_cast<void>(kernel::yield_current_thread());
   context.cpu.gpr[3] = status::Success;
   return true;
 }

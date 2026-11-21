@@ -72,12 +72,12 @@ std::uint32_t to_status(kernel::WaitResult result, std::uint32_t signaled_index_
   return status::Unsuccessful;
 }
 
-std::chrono::milliseconds read_timeout(ExportCallContext& context, cpu::GuestAddress timeout_ptr) {
+std::chrono::nanoseconds read_timeout(ExportCallContext& context, cpu::GuestAddress timeout_ptr) {
   if (timeout_ptr == 0u) {
     return xbox_infinite_timeout();
   }
   const auto raw = static_cast<std::int64_t>(context.memory.read64_be(timeout_ptr));
-  return xbox_timeout_to_relative_ms(raw);
+  return xbox_timeout_to_relative(raw);
 }
 
 }  // namespace

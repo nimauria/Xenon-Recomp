@@ -38,10 +38,11 @@ inline void record(logging::events::EventKind kind, const core::ExportCallContex
   logging::events::record(event);
 }
 
-// The WaitBegin value: the timeout in milliseconds, 0xFFFFFFFF for none.
-inline std::uint32_t timeout_value(std::chrono::milliseconds timeout) {
-  if (timeout.count() < 0 || timeout.count() >= 0xFFFFFFFFll) return 0xFFFFFFFFu;
-  return static_cast<std::uint32_t>(timeout.count());
+// The WaitBegin value: the timeout in milliseconds (rounded up, so a
+// sub-millisecond timeout is not shown as 0), 0xFFFFFFFF for none.
+inline std::uint32_t timeout_value(std::chrono::nanoseconds timeout) {
+  if (timeout.count() < 0 || timeout >= std::chrono::milliseconds(0xFFFFFFFFll)) return 0xFFFFFFFFu;
+  return static_cast<std::uint32_t>(std::chrono::ceil<std::chrono::milliseconds>(timeout).count());
 }
 
 // resolve_dispatcher_object() for a Ke* export, recording a GuestStateAdopted

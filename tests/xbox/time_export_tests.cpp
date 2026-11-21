@@ -7,11 +7,13 @@
 #include <chrono>
 #include <cstdint>
 #include <iostream>
+#include <limits>
 #include <thread>
 
 #include "xenon/core/export_registry.hpp"
 #include "xenon/kernel/time.hpp"
 #include "xenon/memory/address_space.hpp"
+#include "xenon/xbox/xbox_time_convert.hpp"
 #include "xenon/xbox/xboxkrnl_time_exports.hpp"
 
 using namespace xenon;
@@ -136,6 +138,57 @@ void test_ke_delay_execution_thread_relative_blocks_calling_thread() {
   assert(elapsed >= std::chrono::milliseconds(kDelayMs - 5));
 }
 
+// Regression: the conversion used to truncate to whole milliseconds, so a
+// 0.5 ms guest timeout became 0 (return at once) and 1.5 ms became 1 ms.
+void test_timeout_conversion_keeps_100ns_precision() {
+  using std::chrono::nanoseconds;
+  assert(xbox::xbox_timeout_to_relative(0) == nanoseconds(0));
+  assert(xbox::xbox_timeout_to_relative(-1) == nanoseconds(100));
+  assert(xbox::xbox_timeout_to_relative(-5'000) == std::chrono::microseconds(500));
+  assert(xbox::xbox_timeout_to_relative(-15'000) == std::chrono::microseconds(1500));
+  assert(xbox::xbox_timeout_to_relative(-10'000'000) == std::chrono::seconds(1));
+  // Absolute, in the past: already due.
+  assert(xbox::xbox_timeout_to_relative(1) == nanoseconds(0));
+  // Absolute, 2 ms ahead: 2 ms less the time spent getting here.
+  const auto ahead = xbox::xbox_timeout_to_relative(
+      static_cast<std::int64_t>(kernel::TimeServices::system_time() + 20'000));
+  assert(ahead > std::chrono::microseconds(1500) && ahead <= std::chrono::milliseconds(2));
+  // The longest relative timeout saturates (a kernel wait treats it as
+  // infinite) instead of overflowing.
+  assert(xbox::xbox_timeout_to_relative((std::numeric_limits<std::int64_t>::min)()) ==
+         (nanoseconds::max)());
+}
+
+// A sub-millisecond interval delays for at least that long (it used to
+// return at once), and a zero interval returns STATUS_SUCCESS after yielding.
+void test_ke_delay_execution_thread_sub_millisecond_and_zero() {
+  core::ExportRegistry registry;
+  assert(xbox::register_xboxkrnl_time_exports(registry));
+  memory::AddressSpace memory(memory::GuestTranslationMode::Compact);
+  assert(memory.initialize());
+  memory::GuestAddress interval{};
+  assert(memory.allocate(8, 8, memory::kReadWrite, false, interval));
+  cpu::CpuState cpu{};
+  core::ExportCallContext call{cpu, memory, 0, 0};
+
+  for (const std::int64_t raw : {std::int64_t{-3'000}, std::int64_t{-7'000}}) {
+    memory.write64_be(interval, static_cast<std::uint64_t>(raw));
+    cpu.gpr[3] = 0;
+    cpu.gpr[4] = 0;
+    cpu.gpr[5] = interval;
+    const auto start = std::chrono::steady_clock::now();
+    const auto result = registry.invoke("xboxkrnl", 0x05Au, call);
+    const auto elapsed = std::chrono::steady_clock::now() - start;
+    assert(result.handled && result.success && cpu.gpr[3] == 0u);
+    assert(elapsed >= std::chrono::nanoseconds(-raw * 100) && "a delay must never end early");
+  }
+
+  memory.write64_be(interval, 0u);
+  cpu.gpr[5] = interval;
+  const auto result = registry.invoke("xboxkrnl", 0x05Au, call);
+  assert(result.handled && result.success && cpu.gpr[3] == 0u);
+}
+
 void test_ke_stall_execution_processor_blocks_for_microseconds() {
   core::ExportRegistry registry;
   assert(xbox::register_xboxkrnl_time_exports(registry));
@@ -164,6 +217,8 @@ int main() {
   test_performance_counter_is_monotonic_and_tracks_real_time();
   test_ke_query_system_time_writes_guest_memory();
   test_ke_delay_execution_thread_relative_blocks_calling_thread();
+  test_timeout_conversion_keeps_100ns_precision();
+  test_ke_delay_execution_thread_sub_millisecond_and_zero();
   test_ke_stall_execution_processor_blocks_for_microseconds();
 
   std::cout << "All xboxkrnl time export tests passed!\n";

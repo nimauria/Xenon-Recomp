@@ -28,6 +28,20 @@ enum class WaitResult : std::uint32_t {
   Failed = 0xFFFFFFFF,
 };
 
+// Timeouts and delays keep the guest's 100 ns precision: a negative timeout,
+// or one of 0xFFFFFFFF ms or more, waits forever; zero tests and returns; any
+// other timeout ends the wait at a steady_clock deadline that is never early.
+// (Existing callers that pass std::chrono::milliseconds convert implicitly.)
+//
+// A wait that cannot be satisfied at once registers and, before it blocks
+// its host thread, spins for a few microseconds (wait_spin_limit()) watching
+// its own grant: the signaller still satisfies and consumes the object for
+// it under the dispatcher lock, exactly as for a blocked waiter, so
+// auto-reset, mutant ownership, semaphore counts and APC/alert handling are
+// unchanged; the spin only saves the block and the wakeup when the signal
+// comes quickly. Whether a wait spins adapts per object to how recent spins
+// on it ended (see MultiWaitList::spin_advised()).
+
 // Wait for a single object to be signaled. waiting_thread_id identifies the
 // calling guest thread and is only meaningful for ObjectType::Mutant (a
 // mutant's ownership is thread-identity-scoped); pass the real calling
@@ -38,7 +52,7 @@ enum class WaitResult : std::uint32_t {
 // know their own thread identity.
 [[nodiscard]] WaitResult wait_for_single_object(
     const std::shared_ptr<KernelObject>& object,
-    std::chrono::milliseconds timeout,
+    std::chrono::nanoseconds timeout,
     std::uint32_t waiting_thread_id = 0,
     bool alertable = false);
 
@@ -49,7 +63,7 @@ enum class WaitResult : std::uint32_t {
 [[nodiscard]] WaitResult wait_for_multiple_objects(
     std::span<const std::shared_ptr<KernelObject>> objects,
     bool wait_all,
-    std::chrono::milliseconds timeout,
+    std::chrono::nanoseconds timeout,
     std::uint32_t* signaled_index = nullptr,
     std::uint32_t waiting_thread_id = 0,
     bool alertable = false);
@@ -60,7 +74,7 @@ enum class WaitResult : std::uint32_t {
 // it satisfiable, ahead of any wait registered after it (see
 // multi_wait_list.hpp).
 [[nodiscard]] WaitResult wait_for_objects(std::span<KernelObject* const> objects, bool wait_all,
-                                          std::chrono::milliseconds timeout,
+                                          std::chrono::nanoseconds timeout,
                                           std::uint32_t* signaled_index = nullptr,
                                           std::uint32_t waiting_thread_id = 0,
                                           bool alertable = false);
@@ -73,16 +87,32 @@ enum class WaitResult : std::uint32_t {
 // without waiting when `signal` returns false.
 [[nodiscard]] WaitResult signal_and_wait_for_object(const std::function<bool()>& signal,
                                                     const std::shared_ptr<KernelObject>& object,
-                                                    std::chrono::milliseconds timeout,
+                                                    std::chrono::nanoseconds timeout,
                                                     std::uint32_t waiting_thread_id = 0,
                                                     bool alertable = false);
 
-// Sleeps the calling thread for `delay` (KeDelayExecutionThread). On a
-// KernelThread the sleep ends early, returning Terminating, if the thread is
-// terminated, or UserApc, if `alertable` and a user APC is queued for it;
-// otherwise it returns Success.
-[[nodiscard]] WaitResult delay_current_thread(std::chrono::milliseconds delay,
+// Sleeps the calling thread for `delay` (KeDelayExecutionThread), to 100 ns
+// precision. A delay always gives up the processor: a zero or negative delay
+// yields it once (yield_current_thread()), as a zero interval does on the
+// Xbox 360, and a delay shorter than the host can block for precisely yields
+// until it ends rather than returning at once. On a KernelThread the sleep
+// ends early, returning Terminating, if the thread is terminated, or UserApc,
+// if `alertable` and a user APC is queued for it; otherwise it returns Success.
+[[nodiscard]] WaitResult delay_current_thread(std::chrono::nanoseconds delay,
                                               bool alertable = false);
+
+// Gives the rest of the calling host thread's time slice to another ready
+// thread (SwitchToThread on Windows, sched_yield elsewhere) - NtYieldExecution
+// and a zero-interval KeDelayExecutionThread. Returns whether the host
+// reported running another thread.
+bool yield_current_thread() noexcept;
+
+// The longest a registered wait spins before it blocks: 4 us unless
+// XENON_WAIT_SPIN sets it (0 turns spinning off; N spins up to N us, at most
+// 100). Never spins on a single-processor host.
+[[nodiscard]] std::chrono::nanoseconds wait_spin_limit() noexcept;
+// Overrides the limit (tests; a session option): zero turns spinning off.
+void set_wait_spin_limit(std::chrono::nanoseconds limit) noexcept;
 
 // The waits currently registered on a waitable object (0 for any other):
 // for diagnostics and tests.
@@ -94,7 +124,7 @@ enum class WaitResult : std::uint32_t {
 // Helper to wait on specific object types. See wait_for_single_object() for
 // waiting_thread_id.
 [[nodiscard]] bool wait_on_object(KernelObject& object,
-                                  std::chrono::milliseconds timeout,
+                                  std::chrono::nanoseconds timeout,
                                   std::uint32_t waiting_thread_id = 0);
 
 }  // namespace xenon::kernel

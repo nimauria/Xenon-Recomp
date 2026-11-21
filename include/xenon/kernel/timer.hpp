@@ -30,11 +30,12 @@ class KernelTimer final : public KernelObject {
   // (kernel::KernelProcess::timer_manager()) to have this timer scheduled
   // via schedule(); set() itself has no timer thread of its own (see
   // next_due_time()/fire() below).
-  [[nodiscard]] bool set(std::chrono::milliseconds due_time,
+  // due_time keeps the guest's 100 ns precision.
+  [[nodiscard]] bool set(std::chrono::nanoseconds due_time,
                          std::optional<std::chrono::milliseconds> period = std::nullopt,
                          TimerCallback callback = nullptr);
   [[nodiscard]] bool cancel();
-  [[nodiscard]] bool wait_for(std::chrono::milliseconds timeout);
+  [[nodiscard]] bool wait_for(std::chrono::nanoseconds timeout);
   [[nodiscard]] bool is_signaled() const;
 
   // Absolute due time if currently active (set() was called and cancel()

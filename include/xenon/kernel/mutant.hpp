@@ -27,7 +27,7 @@ class KernelMutant final : public KernelObject {
   // abandoned, when given, reports whether this acquisition took over a
   // mutant whose previous owner exited without releasing it (the wait then
   // returns STATUS_ABANDONED rather than STATUS_SUCCESS).
-  [[nodiscard]] bool acquire(std::uint32_t owner_thread_id, std::chrono::milliseconds timeout,
+  [[nodiscard]] bool acquire(std::uint32_t owner_thread_id, std::chrono::nanoseconds timeout,
                              bool* abandoned = nullptr);
   [[nodiscard]] bool release(std::uint32_t owner_thread_id);
   // As above, for a caller already holding the dispatcher lock

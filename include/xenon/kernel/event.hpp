@@ -28,7 +28,7 @@ class KernelEvent final : public KernelObject {
   // True for a notification (manual-reset) event, false for a synchronization
   // (auto-reset) event - EVENT_BASIC_INFORMATION's EventType is the inverse.
   [[nodiscard]] bool manual_reset() const noexcept { return manual_reset_; }
-  [[nodiscard]] bool wait_for(std::chrono::milliseconds timeout);
+  [[nodiscard]] bool wait_for(std::chrono::nanoseconds timeout);
 
   // For an event embedded in guest memory: from now on every state change is
   // stored into `mirror` (SignalState 1 or 0), starting with the current one.

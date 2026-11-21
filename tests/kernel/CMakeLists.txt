@@ -35,6 +35,13 @@ if(XENON_BUILD_TESTS)
     target_link_libraries(xenon_kernel_wait_profile_tests PRIVATE xenon_kernel)
     xenon_enable_test_asserts(xenon_kernel_wait_profile_tests)
     add_test(NAME xenon_kernel_wait_profile_tests COMMAND xenon_kernel_wait_profile_tests)
+    add_executable(xenon_kernel_wait_scheduling_tests wait_scheduling_tests.cpp)
+    target_link_libraries(xenon_kernel_wait_scheduling_tests PRIVATE xenon_kernel)
+    xenon_enable_test_asserts(xenon_kernel_wait_scheduling_tests)
+    add_test(NAME xenon_kernel_wait_scheduling_tests COMMAND xenon_kernel_wait_scheduling_tests)
+    # Its stress phases run 12 threads and its yield checks pin two threads
+    # to one processor: run it alone so parallel tests do not starve them.
+    set_tests_properties(xenon_kernel_wait_scheduling_tests PROPERTIES RUN_SERIAL TRUE)
     add_executable(xenon_kernel_mutant_abandonment_tests mutant_abandonment_tests.cpp)
     target_link_libraries(xenon_kernel_mutant_abandonment_tests PRIVATE xenon_kernel)
     xenon_enable_test_asserts(xenon_kernel_mutant_abandonment_tests)

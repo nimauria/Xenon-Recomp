@@ -43,7 +43,7 @@ KernelMutant::~KernelMutant() {
   live.mutants.erase(this);
 }
 
-bool KernelMutant::acquire(std::uint32_t owner_thread_id, std::chrono::milliseconds timeout,
+bool KernelMutant::acquire(std::uint32_t owner_thread_id, std::chrono::nanoseconds timeout,
                            bool* abandoned) {
   // Already owned by this thread: satisfied at once, deepening the recursion.
   // Otherwise wait for the mutant to become available.

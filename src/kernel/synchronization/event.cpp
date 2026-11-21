@@ -41,7 +41,7 @@ bool KernelEvent::signaled() const {
   return signaled_;
 }
 
-bool KernelEvent::wait_for(std::chrono::milliseconds timeout) {
+bool KernelEvent::wait_for(std::chrono::nanoseconds timeout) {
   KernelObject* const self = this;
   return wait_for_objects(std::span(&self, 1), false, timeout) == WaitResult::Success;
 }

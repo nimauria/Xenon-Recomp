@@ -39,7 +39,7 @@ bool KernelSemaphore::release_locked(std::int32_t release_count, std::int32_t* p
   return true;
 }
 
-bool KernelSemaphore::wait_for(std::chrono::milliseconds timeout) {
+bool KernelSemaphore::wait_for(std::chrono::nanoseconds timeout) {
   KernelObject* const self = this;
   return wait_for_objects(std::span(&self, 1), false, timeout) == WaitResult::Success;
 }

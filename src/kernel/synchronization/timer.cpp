@@ -1,5 +1,7 @@
 #include "xenon/kernel/timer.hpp"
 
+#include <algorithm>
+
 #include "xenon/kernel/wait.hpp"
 
 namespace xenon::kernel {
@@ -7,14 +9,17 @@ namespace xenon::kernel {
 KernelTimer::KernelTimer(TimerType type)
     : KernelObject(ObjectType::Timer), type_(type) {}
 
-bool KernelTimer::set(std::chrono::milliseconds due_time,
+bool KernelTimer::set(std::chrono::nanoseconds due_time,
                      std::optional<std::chrono::milliseconds> period,
                      TimerCallback callback) {
   TimerCallback fired_callback;
   {
     std::scoped_lock lock(mutex_);
 
-    due_time_ = std::chrono::steady_clock::now() + due_time;
+    // A due time beyond any run saturates rather than overflow the clock.
+    constexpr auto kLongestDue = std::chrono::hours(24 * 365 * 100);
+    due_time_ = std::chrono::steady_clock::now() +
+                (std::min)(due_time, std::chrono::nanoseconds(kLongestDue));
     period_ = period;
     callback_ = std::move(callback);
     active_ = true;
@@ -50,7 +55,7 @@ bool KernelTimer::cancel() {
   return true;
 }
 
-bool KernelTimer::wait_for(std::chrono::milliseconds timeout) {
+bool KernelTimer::wait_for(std::chrono::nanoseconds timeout) {
   KernelObject* const self = this;
   return wait_for_objects(std::span(&self, 1), false, timeout) == WaitResult::Success;
 }
