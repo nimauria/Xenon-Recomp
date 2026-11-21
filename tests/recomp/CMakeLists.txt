@@ -131,6 +131,11 @@ if(XENON_BUILD_TESTS)
   add_test(NAME xenon_heap_native_replacement_tests
     COMMAND xenon_heap_native_replacement_tests)
 
+  add_executable(xenon_native_copy_replacement_tests native_copy_replacement_tests.cpp)
+  target_link_libraries(xenon_native_copy_replacement_tests PRIVATE xenon_recomp)
+  xenon_enable_test_asserts(xenon_native_copy_replacement_tests)
+  add_test(NAME xenon_native_copy_replacement_tests COMMAND xenon_native_copy_replacement_tests)
+
   # Carrying hints between executable revisions (xenon/recomp/revision_mapping.hpp).
   add_executable(xenon_revision_mapping_tests revision_mapping_tests.cpp)
   target_link_libraries(xenon_revision_mapping_tests PRIVATE xenon_recomp)

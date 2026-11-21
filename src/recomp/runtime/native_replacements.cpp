@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <span>
 #include <thread>
 #include <vector>
 
@@ -26,11 +27,56 @@ ExecutionResult guest_return(cpu::CpuState& state) {
   return {FlowReason::Return, static_cast<GuestAddress>(state.lr & ~3ull), 0};
 }
 
-std::vector<std::byte> read_guest_bytes(cpu::MemoryAccessContext& memory, GuestAddress address,
-                                        std::uint32_t count) {
-  std::vector<std::byte> bytes(count);
-  memory.read_bytes(address, bytes);
-  return bytes;
+// Bytes staged on the stack per step of a copy or compare: no heap allocation
+// per call, and a guest thread's stack stays small.
+constexpr std::size_t kStageBytes = 4096u;
+
+// memmove of guest memory. A range that fits one stage is read whole before
+// anything is written, as before (a faulting source writes nothing). A larger
+// one moves stage by stage - forwards, or backwards when the destination lies
+// inside the source range - so overlapping ranges still copy correctly; a
+// fault partway then leaves the earlier stages written, as a hardware copy
+// loop would.
+void copy_guest_bytes(cpu::MemoryAccessContext& memory, GuestAddress dst, GuestAddress src,
+                      std::uint32_t count) {
+  std::byte stage[kStageBytes];
+  if (count <= kStageBytes) {
+    memory.read_bytes(src, std::span(stage, count));
+    memory.write_bytes(dst, std::span<const std::byte>(stage, count));
+    return;
+  }
+  const bool backwards = std::uint64_t{dst} > std::uint64_t{src} &&
+                         std::uint64_t{dst} < std::uint64_t{src} + count;
+  std::uint32_t done = 0;
+  while (done < count) {
+    const auto step = std::min<std::uint32_t>(static_cast<std::uint32_t>(kStageBytes), count - done);
+    const auto offset = backwards ? count - done - step : done;
+    memory.read_bytes(src + offset, std::span(stage, step));
+    memory.write_bytes(dst + offset, std::span<const std::byte>(stage, step));
+    done += step;
+  }
+}
+
+// memcmp of guest memory: the first differing byte's difference, else 0. Up to
+// half a stage per side is read whole before comparing; longer ranges compare
+// stage by stage and stop at the first difference.
+std::int32_t compare_guest_bytes(cpu::MemoryAccessContext& memory, GuestAddress lhs,
+                                 GuestAddress rhs, std::uint32_t count) {
+  constexpr std::size_t kHalf = kStageBytes / 2u;
+  std::byte a[kHalf];
+  std::byte b[kHalf];
+  for (std::uint32_t done = 0; done < count;) {
+    const auto step = std::min<std::uint32_t>(static_cast<std::uint32_t>(kHalf), count - done);
+    memory.read_bytes(lhs + done, std::span(a, step));
+    memory.read_bytes(rhs + done, std::span(b, step));
+    for (std::uint32_t i = 0; i < step; ++i) {
+      const auto x = std::to_integer<std::uint8_t>(a[i]);
+      const auto y = std::to_integer<std::uint8_t>(b[i]);
+      if (x != y) return static_cast<std::int32_t>(x) - static_cast<std::int32_t>(y);
+    }
+    done += step;
+  }
+  return 0;
 }
 
 // Reads a NUL-terminated guest string, bounded by `max_length` (0 = no
@@ -55,8 +101,7 @@ ExecutionResult memcpy_v2(ExecutionContext& context) {
   const auto dst = static_cast<GuestAddress>(state.gpr[3]);
   const auto src = static_cast<GuestAddress>(state.gpr[4]);
   const auto count = static_cast<std::uint32_t>(state.gpr[5]);
-  const auto bytes = read_guest_bytes(context.memory_access, src, count);
-  context.memory_access.write_bytes(dst, bytes);
+  copy_guest_bytes(context.memory_access, dst, src, count);
   state.gpr[3] = dst;  // memcpy returns dst
   return guest_return(state);
 }
@@ -91,8 +136,7 @@ ExecutionResult memcpy_checked_v2(ExecutionContext& context) {
     state.gpr[3] = 34u;  // ERANGE
     return guest_return(state);
   }
-  const auto bytes = read_guest_bytes(context.memory_access, src, count);
-  context.memory_access.write_bytes(dst, bytes);
+  copy_guest_bytes(context.memory_access, dst, src, count);
   state.gpr[3] = 0u;
   return guest_return(state);
 }
@@ -106,14 +150,7 @@ ExecutionResult memcmp_v2(ExecutionContext& context) {
   const auto lhs = static_cast<GuestAddress>(state.gpr[3]);
   const auto rhs = static_cast<GuestAddress>(state.gpr[4]);
   const auto count = static_cast<std::uint32_t>(state.gpr[5]);
-  const auto lhs_bytes = read_guest_bytes(context.memory_access, lhs, count);
-  const auto rhs_bytes = read_guest_bytes(context.memory_access, rhs, count);
-  std::int32_t result = 0;
-  for (std::uint32_t i = 0; i < count; ++i) {
-    const auto a = std::to_integer<std::uint8_t>(lhs_bytes[i]);
-    const auto b = std::to_integer<std::uint8_t>(rhs_bytes[i]);
-    if (a != b) { result = static_cast<std::int32_t>(a) - static_cast<std::int32_t>(b); break; }
-  }
+  const std::int32_t result = compare_guest_bytes(context.memory_access, lhs, rhs, count);
   state.gpr[3] = static_cast<std::uint64_t>(static_cast<std::int64_t>(result));
   return guest_return(state);
 }
