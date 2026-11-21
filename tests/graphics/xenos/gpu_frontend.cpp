@@ -2262,8 +2262,40 @@ void test_unexecuted_packets_are_unlowered(AddressSpace& memory, CommandProcesso
 
 }  // namespace
 
+// Command batches handed to the backend come back to a pool, and the next
+// batch reuses that storage instead of growing a vector from empty.
+void test_command_buffers_are_reused() {
+  namespace gir = xenon::gpu::ir;
+  gir::CommandBufferPool pool;
+  assert(pool.acquire().capacity() == 0u);
+  gir::Stream stream;
+  for (std::uint32_t i = 0; i < 100u; ++i) stream.emit(gir::RegisterWrite{i, i});
+  auto batch = stream.take(pool.acquire());
+  assert(batch.size() == 100u && stream.size() == 0u);
+  const auto* storage = batch.data();
+  const auto capacity = batch.capacity();
+  pool.release(std::move(batch));
+  assert(pool.kept() == 1u);
+  // The next batch is filled into the same storage, emptied.
+  for (std::uint32_t i = 0; i < 3u; ++i) stream.emit(gir::RegisterWrite{i, i});
+  auto first = stream.take(pool.acquire());
+  assert(first.size() == 3u && pool.kept() == 0u);
+  assert(stream.commands().data() == storage && stream.commands().capacity() == capacity &&
+         stream.size() == 0u);
+  // A bounded number of buffers is kept; empty vectors are not.
+  for (int i = 0; i < 8; ++i) {
+    std::vector<gir::Command> spare;
+    spare.reserve(4);
+    pool.release(std::move(spare));
+  }
+  pool.release(std::vector<gir::Command>{});
+  assert(pool.kept() == 4u);
+  std::cout << "  [ok] command batches reuse their storage\n";
+}
+
 int main() {
   test_headers();
+  test_command_buffers_are_reused();
   test_gpu_unsupported_counters_total();
 
   AddressSpace memory;

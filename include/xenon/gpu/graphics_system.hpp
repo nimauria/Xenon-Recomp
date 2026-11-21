@@ -190,6 +190,7 @@ class GraphicsSystem {
   memory::AddressSpace& memory_;
   RegisterFile registers_{};
   ir::Stream stream_{};
+  ir::CommandBufferPool command_buffers_{};
   Edram edram_{};
   CommandProcessor command_processor_;
   TemporalFrameAnalyzer temporal_{};

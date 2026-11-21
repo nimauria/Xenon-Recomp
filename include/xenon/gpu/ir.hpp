@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <variant>
 #include <vector>
 
@@ -157,6 +158,39 @@ class Stream {
 
  private:
   std::vector<Command> commands_{};
+};
+
+// Storage for command batches handed to the backend thread and back. The
+// thread that consumes a batch releases its vector here, and the next
+// Stream::take() reuses its capacity: without it every batch grew a new
+// vector from empty, moving each command at every reallocation (2% of the
+// GPU pump thread in AC6 flight).
+class CommandBufferPool {
+ public:
+  [[nodiscard]] std::vector<Command> acquire() {
+    std::scoped_lock lock(mutex_);
+    if (free_.empty()) return {};
+    auto commands = std::move(free_.back());
+    free_.pop_back();
+    return commands;
+  }
+  // Destroys the commands, outside the lock, and keeps the storage.
+  void release(std::vector<Command>&& commands) {
+    commands.clear();
+    if (commands.capacity() == 0u) return;
+    std::scoped_lock lock(mutex_);
+    if (free_.size() < kKept) free_.push_back(std::move(commands));
+  }
+  [[nodiscard]] std::size_t kept() const {
+    std::scoped_lock lock(mutex_);
+    return free_.size();
+  }
+
+ private:
+  // Batches in flight at once: one being filled, one queued, one consuming.
+  static constexpr std::size_t kKept = 4;
+  mutable std::mutex mutex_;
+  std::vector<std::vector<Command>> free_;
 };
 
 }  // namespace xenon::gpu::ir

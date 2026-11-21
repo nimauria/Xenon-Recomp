@@ -773,7 +773,7 @@ void GraphicsSystem::run_ir_then(Backend& backend, bool all, bool submit,
   if (all || command_processor_.draw_count() != draws_at_last_execute_) {
     draws_at_last_execute_ = command_processor_.draw_count();
     draws_since_hand_off_ = 0;
-    commands = stream_.take();
+    commands = stream_.take(command_buffers_.acquire());
     record_for_capture(commands);
     if (executor_.running()) backend.prefetch_shaders(commands);
     if (temporal_.active())
@@ -786,6 +786,7 @@ void GraphicsSystem::run_ir_then(Backend& backend, bool all, bool submit,
       consume_commands(backend, commands, submit, /*observe_temporal=*/false);
     if (then) then();
   });
+  command_buffers_.release(std::move(commands));
 }
 
 void GraphicsSystem::defer_guest_write(std::uint32_t address, std::function<void()> write,
@@ -988,7 +989,7 @@ void GraphicsSystem::execute_ir(Backend& backend, bool submit) {
     stream_.clear();
     return;
   }
-  auto commands = stream_.take();
+  auto commands = stream_.take(command_buffers_.acquire());
   // Shaders loaded in this stretch start compiling now, on workers, ahead of
   // the backend reaching them.
   backend.prefetch_shaders(commands);
@@ -999,6 +1000,7 @@ void GraphicsSystem::execute_ir(Backend& backend, bool submit) {
   // Nothing to play: at most the open batch to submit, in order - here when
   // the backend is idle, behind its work when a pipelined drain still runs.
   if (commands.empty()) {
+    command_buffers_.release(std::move(commands));
     if (!submit) return;
     if (executor_.idle())
       executor_.run([&] { consume_commands(backend, {}, true, /*observe_temporal=*/false); });
@@ -1008,8 +1010,9 @@ void GraphicsSystem::execute_ir(Backend& backend, bool submit) {
       });
     return;
   }
-  executor_.post([this, &backend, commands = std::move(commands), submit] {
+  executor_.post([this, &backend, commands = std::move(commands), submit]() mutable {
     consume_commands(backend, commands, submit, /*observe_temporal=*/false);
+    command_buffers_.release(std::move(commands));
   });
 }
 
