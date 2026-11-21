@@ -1,4 +1,5 @@
 #include "xenon/gpu/command_processor.hpp"
+#include "xenon/gpu/perf_stats.hpp"
 
 #include <algorithm>
 #include <array>
@@ -273,6 +274,7 @@ void CommandProcessor::reset() {
   active_pixel_program_.reset();
   active_vertex_decoded_.reset();
   active_pixel_decoded_.reset();
+  loaded_programs_.clear();
   command_memory_.clear();
   drain_reads_command_memory_ = false;
   shader_partition_ = {};
@@ -496,6 +498,40 @@ void CommandProcessor::write_physical_dword(std::uint32_t address_with_endian,
   write_guest_effect(address, bytes, "Xenos physical write has no backing");
   stream_.emit(ir::PhysicalMemoryWrite{address, logical_value, endian});
   ++stats_.physical_writes;
+}
+
+const CommandProcessor::LoadedProgram& CommandProcessor::load_program(
+    const std::array<std::uint32_t, 4>& key, ShaderStage stage, std::uint32_t start,
+    std::span<const std::byte> bytes, bool big_endian) {
+  auto found = loaded_programs_.find(key);
+  if (found != loaded_programs_.end() && found->second.bytes.size() == bytes.size() &&
+      std::memcmp(found->second.bytes.data(), bytes.data(), bytes.size()) == 0) {
+    ++stats_.shader_load_cache_hits;
+    perf::add(perf::Counter::ImLoadHits, 1u);
+    return found->second;
+  }
+  ++stats_.shader_load_cache_misses;
+  perf::add(perf::Counter::ImLoadMisses, 1u);
+  const auto dwords = bytes.size() / 4u;
+  std::vector<std::uint32_t> microcode;
+  microcode.reserve(dwords);
+  for (std::size_t i = 0; i < dwords; ++i) {
+    microcode.push_back(big_endian ? load_be32(bytes.data() + i * 4u)
+                                   : [&] {
+                                       std::uint32_t word;
+                                       std::memcpy(&word, bytes.data() + i * 4u, 4u);
+                                       return word;
+                                     }());
+  }
+  if (found == loaded_programs_.end()) {
+    if (loaded_programs_.size() >= kLoadedProgramLimit) loaded_programs_.clear();
+    found = loaded_programs_.try_emplace(key).first;
+  }
+  auto& entry = found->second;
+  entry.bytes.assign(bytes.begin(), bytes.end());
+  entry.program = ShaderProgram(stage, microcode, start);
+  entry.decoded = decode_program(entry.program);
+  return entry;
 }
 
 std::shared_ptr<const DecodedShader> CommandProcessor::decode_program(
@@ -1530,28 +1566,28 @@ void CommandProcessor::execute_type3(Reader& reader, const PacketHeader& header,
     if (std::uint64_t(address) + std::uint64_t(size) * 4u > memory::kPhysicalMemorySize) {
       throw std::out_of_range("PM4_IM_LOAD shader outside physical RAM");
     }
-    std::vector<std::byte> microcode_snapshot(std::size_t(size) * 4u);
+    // Reloading the microcode a title loaded before (AC6 every draw batch)
+    // skips the byte swap, the hash and the decode: the guest bytes are
+    // compared with the cached load's, so the result is identical.
+    load_scratch_.resize(std::size_t(size) * 4u);
     before_guest_memory_read(address, size * 4u);
-    if (!memory_.copy_physical_range(address, microcode_snapshot)) {
+    if (!memory_.copy_physical_range(address, load_scratch_)) {
       throw std::runtime_error("PM4_IM_LOAD shader snapshot failed");
     }
-    std::vector<std::uint32_t> microcode;
-    microcode.reserve(size);
-    for (std::uint32_t i = 0; i < size; ++i) {
-      microcode.push_back(
-          load_be32(microcode_snapshot.data() + std::size_t(i) * 4u));
-    }
-    ShaderProgram program(stage, microcode, start);
-    const ir::ShaderReference reference{true, program.hash(), start};
+    const auto& loaded = load_program({address, size, start, stage_bits}, stage, start,
+                                      load_scratch_, true);
+    const ir::ShaderReference reference{true, loaded.program.hash(), start};
+    ShaderProgram program = loaded.program;
+    auto decoded = loaded.decoded;
     if (stage == ShaderStage::Vertex) {
       active_vertex_shader_ = reference;
       active_vertex_program_ = program;
+      active_vertex_decoded_ = decoded;
     } else {
       active_pixel_shader_ = reference;
       active_pixel_program_ = program;
+      active_pixel_decoded_ = decoded;
     }
-    auto decoded = decode_program(program);
-    (stage == ShaderStage::Vertex ? active_vertex_decoded_ : active_pixel_decoded_) = decoded;
     stream_.emit(ir::ShaderLoad{header.opcode, false, address,
                                 std::move(program), std::move(decoded), payload});
     return;
@@ -1570,17 +1606,21 @@ void CommandProcessor::execute_type3(Reader& reader, const PacketHeader& header,
       throw std::runtime_error("truncated PM4_IM_LOAD_IMMEDIATE microcode");
     }
     const std::span<const std::uint32_t> microcode(payload.data() + 2, size);
-    ShaderProgram program(stage, microcode, start);
-    const ir::ShaderReference reference{true, program.hash(), start};
+    const auto& loaded = load_program(
+        {UINT32_MAX, size, start, stage_bits}, stage, start,
+        std::as_bytes(microcode), false);
+    const ir::ShaderReference reference{true, loaded.program.hash(), start};
+    ShaderProgram program = loaded.program;
+    auto decoded = loaded.decoded;
     if (stage == ShaderStage::Vertex) {
       active_vertex_shader_ = reference;
       active_vertex_program_ = program;
+      active_vertex_decoded_ = decoded;
     } else {
       active_pixel_shader_ = reference;
       active_pixel_program_ = program;
+      active_pixel_decoded_ = decoded;
     }
-    auto decoded = decode_program(program);
-    (stage == ShaderStage::Vertex ? active_vertex_decoded_ : active_pixel_decoded_) = decoded;
     stream_.emit(ir::ShaderLoad{header.opcode, true, 0,
                                 std::move(program), std::move(decoded), payload});
     return;

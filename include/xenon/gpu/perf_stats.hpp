@@ -60,6 +60,10 @@
 //               much work each render pass gives a native batch
 //   queue       backend work queue: the deepest it got (tasks waiting) and
 //               its mean depth when work was posted
+//   dedup       constant slots uploaded vs reused, command-list state sets
+//               recorded vs skipped, texture-tracker writes (and textures
+//               they touched), IM_LOAD cache hits/misses, mirror copy
+//               batches (and the dirty ranges they carried)
 //   barriers    the guest-visible barriers that held the frontend for a busy
 //               backend, by kind - CP interrupt, front-buffer flip, wait on
 //               memory or a register, guest write or instruction store -
@@ -150,6 +154,17 @@ enum class Counter : std::uint32_t {
   BarrierWaitNs,
   BarrierWrites,
   BarrierWriteNs,
+  // Per-draw redundancy removed (see bind_shadow.hpp):
+  ConstantUploads,     // draws that wrote their own shader-constant slot
+  ConstantReuses,      // draws that pointed at an earlier draw's identical slot
+  BindsSet,            // per-draw command-list state sets recorded
+  BindsSkipped,        // per-draw command-list state sets skipped (already held)
+  TextureMarkCalls,    // GPU/CPU writes passed to the texture dirty tracker
+  TextureMarkTouched,  // textures those writes newly made stale
+  ImLoadHits,          // IM_LOAD reloads served from the decoded-program cache
+  ImLoadMisses,        // IM_LOAD reloads that swapped, hashed and decoded
+  MirrorBatches,       // guest-memory mirror copy batches submitted
+  MirrorRanges,        // dirty ranges those batches carried
   Count,
 };
 

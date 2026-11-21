@@ -1815,6 +1815,60 @@ void test_shader_loads(AddressSpace& memory, CommandProcessor& cp,
   assert(shifted_load.program.hash() != pointer_load.program.hash());
   assert(shifted_load.decoded && shifted_load.decoded.get() != pointer_load.decoded.get());
   assert(shifted_load.decoded->start_slot == 1u);
+
+  // Reloading unchanged microcode (an IM_LOAD of the same address and size,
+  // or the same immediate payload) is served from the load cache: no byte
+  // swap, hash or decode, and the same program and decode as before.
+  {
+    const auto hits = cp.statistics().shader_load_cache_hits;
+    const auto misses = cp.statistics().shader_load_cache_misses;
+    cp.execute_buffer(pointer_cmd, 3);
+    const auto reload = std::get<xenon::gpu::ir::ShaderLoad>(stream.commands().back());
+    assert(cp.statistics().shader_load_cache_hits == hits + 1u);
+    assert(cp.statistics().shader_load_cache_misses == misses);
+    assert(reload.program.hash() == pointer_load.program.hash());
+    assert(reload.program.dwords().size() == 6u && reload.program.dwords()[2] == 0x21222324u);
+    assert(reload.decoded.get() == pointer_load.decoded.get());
+    assert(cp.active_vertex_program() && cp.active_vertex_program()->hash() == reload.program.hash());
+
+    write_words(memory, immediate_cmd,
+                {make_packet_type3(Type3Opcode::ImLoadImmediate, 8),
+                 0u, 6u,
+                 code[0], code[1], code[2], code[3], code[4], code[5]});
+    cp.execute_buffer(immediate_cmd, 9);
+    assert(cp.statistics().shader_load_cache_hits == hits + 2u);
+    const auto again = std::get<xenon::gpu::ir::ShaderLoad>(stream.commands().back());
+    assert(again.program.hash() == pointer_load.program.hash());
+
+    // One changed microcode word: a miss with a new hash, program and decode.
+    store_be32(memory, shader_addr + 8u, 0xDEADBEEFu);
+    cp.execute_buffer(pointer_cmd, 3);
+    const auto changed = std::get<xenon::gpu::ir::ShaderLoad>(stream.commands().back());
+    assert(cp.statistics().shader_load_cache_misses == misses + 1u);
+    assert(changed.program.hash() != pointer_load.program.hash());
+    assert(changed.program.dwords()[2] == 0xDEADBEEFu);
+    assert(changed.decoded.get() != pointer_load.decoded.get());
+    assert(cp.active_vertex_program()->hash() == changed.program.hash());
+    // The hash is exactly what a fresh program over the same words produces.
+    const std::array<std::uint32_t, 6> changed_code = {
+        0x01020304, 0x11121314, 0xDEADBEEFu, 0x31323334, 0x41424344, 0x51525354};
+    assert(changed.program.hash() ==
+           xenon::gpu::ShaderProgram(xenon::gpu::ShaderStage::Vertex, changed_code, 0).hash());
+    // Putting the word back finds the original program again (rebuilt: the
+    // cached entry held the changed bytes), with the original hash.
+    store_be32(memory, shader_addr + 8u, code[2]);
+    cp.execute_buffer(pointer_cmd, 3);
+    const auto restored = std::get<xenon::gpu::ir::ShaderLoad>(stream.commands().back());
+    assert(restored.program.hash() == pointer_load.program.hash());
+    assert(restored.decoded.get() == pointer_load.decoded.get());
+    // A different size at the same address is a different load.
+    write_words(memory, pointer_cmd,
+                {make_packet_type3(Type3Opcode::ImLoad, 2), shader_addr | 0u, 3u});
+    cp.execute_buffer(pointer_cmd, 3);
+    const auto shorter = std::get<xenon::gpu::ir::ShaderLoad>(stream.commands().back());
+    assert(shorter.program.dwords().size() == 3u);
+    assert(shorter.program.hash() != pointer_load.program.hash());
+  }
 }
 
 

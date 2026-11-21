@@ -155,7 +155,7 @@ std::string take_line(double seconds) {
   }
   std::sort(frames.begin(), frames.end());
   const double per = seconds > 0.0 ? 1.0 / seconds : 0.0;
-  char line[2048];
+  char line[2560];
   std::snprintf(line, sizeof(line),
                 "frames %.1f/s ms p50 %.1f p95 %.1f p99 %.1f max %.1f | swaps %.1f/s | ring %.0f ms "
                 "ir %.0f ms present %.0f ms | fence %.0f ms (%llu waits) | shader %llu (%.0f ms) "
@@ -168,7 +168,9 @@ std::string take_line(double seconds) {
                 "gpu %llu (%.1f MB, %.1f ms) | edram gpu store %llu (%.1f MB, %.1f ms) | rptr "
                 "early %llu held %llu | runs 0:%llu 1:%llu 2-3:%llu 4-15:%llu 16-63:%llu "
                 "64-255:%llu 256+:%llu | queue max %llu mean %.1f | barriers interrupt %llu (%.0f "
-                "ms) swap %llu (%.0f ms) wait %llu (%.0f ms) write %llu (%.0f ms)\n",
+                "ms) swap %llu (%.0f ms) wait %llu (%.0f ms) write %llu (%.0f ms) | dedup constants "
+                "up %llu reuse %llu binds set %llu skip %llu texmark %llu (%llu touched) "
+                "imload hit %llu miss %llu mirror batches %llu ranges %llu\n",
                 static_cast<double>(frames.size()) * per, percentile(frames, 0.5),
                 percentile(frames, 0.95), percentile(frames, 0.99), frames.empty() ? 0.0 : frames.back(),
                 static_cast<double>(take(Counter::Swaps)) * per, ms(take(Counter::RingNs)),
@@ -237,7 +239,17 @@ std::string take_line(double seconds) {
                 static_cast<unsigned long long>(take(Counter::BarrierWaits)),
                 ms(take(Counter::BarrierWaitNs)),
                 static_cast<unsigned long long>(take(Counter::BarrierWrites)),
-                ms(take(Counter::BarrierWriteNs)));
+                ms(take(Counter::BarrierWriteNs)),
+                static_cast<unsigned long long>(take(Counter::ConstantUploads)),
+                static_cast<unsigned long long>(take(Counter::ConstantReuses)),
+                static_cast<unsigned long long>(take(Counter::BindsSet)),
+                static_cast<unsigned long long>(take(Counter::BindsSkipped)),
+                static_cast<unsigned long long>(take(Counter::TextureMarkCalls)),
+                static_cast<unsigned long long>(take(Counter::TextureMarkTouched)),
+                static_cast<unsigned long long>(take(Counter::ImLoadHits)),
+                static_cast<unsigned long long>(take(Counter::ImLoadMisses)),
+                static_cast<unsigned long long>(take(Counter::MirrorBatches)),
+                static_cast<unsigned long long>(take(Counter::MirrorRanges)));
   return line;
 }
 

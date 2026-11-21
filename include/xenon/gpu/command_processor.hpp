@@ -4,7 +4,9 @@
 #include <chrono>
 #include <cstdint>
 #include <cstddef>
+#include <array>
 #include <functional>
+#include <map>
 #include <memory>
 #include <optional>
 #include <span>
@@ -64,6 +66,11 @@ class CommandProcessor {
     std::uint64_t scratch_writebacks{};
     std::uint64_t memory_constant_load_packets{};
     std::uint64_t shader_base_packets{};
+    // IM_LOAD / IM_LOAD_IMMEDIATE reloads whose microcode matched the cached
+    // load of the same (address, size, stage, start slot) byte for byte, so
+    // the swap, hash and decode were skipped; and those that did them.
+    std::uint64_t shader_load_cache_hits{};
+    std::uint64_t shader_load_cache_misses{};
     std::uint64_t shader_store_packets{};
     std::uint64_t shader_store_dwords{};
     std::uint64_t invalidate_state_packets{};
@@ -344,7 +351,23 @@ class CommandProcessor {
   void note_draw_memory_reads(const ir::DrawPacket& draw);
   // One decode per distinct program (ShaderProgram::hash() covers stage,
   // start slot and microcode); repeated loads share it.
-  std::unordered_map<std::uint64_t, std::shared_ptr<const DecodedShader>> decoded_programs_{};
+  std::unordered_map<std::uint64_t, std::shared_ptr<const DecodedShader>> decoded_programs_{};  // Programs the last IM_LOAD of each (address, dwords, stage, start slot)
+  // produced, with the guest bytes they came from: a reload whose bytes are
+  // unchanged reuses the program, its hash and its decode.
+  struct LoadedProgram {
+    std::vector<std::byte> bytes{};
+    ShaderProgram program{};
+    std::shared_ptr<const DecodedShader> decoded{};
+  };
+  std::map<std::array<std::uint32_t, 4>, LoadedProgram> loaded_programs_{};
+  std::vector<std::byte> load_scratch_{};
+  // Finds or builds the program for `bytes` (big-endian microcode as the
+  // guest wrote it, or host words for IM_LOAD_IMMEDIATE).
+  [[nodiscard]] const LoadedProgram& load_program(
+      const std::array<std::uint32_t, 4>& key, ShaderStage stage, std::uint32_t start,
+      std::span<const std::byte> bytes, bool big_endian);
+  static constexpr std::size_t kLoadedProgramLimit = 2048;
+
   [[nodiscard]] std::shared_ptr<const DecodedShader> decode_program(const ShaderProgram& program);
   ShaderPartitionState shader_partition_{};
   std::uint32_t bin_base_offset_{};

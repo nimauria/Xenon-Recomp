@@ -7,7 +7,8 @@ namespace xenon::gpu {
 ShaderProgram::ShaderProgram(ShaderStage stage,
                              std::span<const std::uint32_t> dwords,
                              std::uint32_t start_slot)
-    : stage_(stage), start_slot_(start_slot), dwords_(dwords.begin(), dwords.end()),
+    : stage_(stage), start_slot_(start_slot),
+      dwords_(std::make_shared<const std::vector<std::uint32_t>>(dwords.begin(), dwords.end())),
       hash_(calculate_hash(stage, start_slot, dwords)) {}
 
 ShaderInstruction96 ShaderProgram::instruction(std::size_t index) const {
@@ -15,8 +16,8 @@ ShaderInstruction96 ShaderProgram::instruction(std::size_t index) const {
     throw std::out_of_range("Xenos shader instruction index out of range");
   }
   const auto offset = index * 3u;
-  return ShaderInstruction96{{dwords_[offset], dwords_[offset + 1],
-                              dwords_[offset + 2]}};
+  const auto& words = *dwords_;
+  return ShaderInstruction96{{words[offset], words[offset + 1], words[offset + 2]}};
 }
 
 ControlFlowPair ShaderProgram::control_flow_pair(std::size_t index) const {

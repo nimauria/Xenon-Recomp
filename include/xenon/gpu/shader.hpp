@@ -3,6 +3,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <span>
 #include <vector>
 
@@ -64,13 +65,14 @@ class ShaderProgram {
   [[nodiscard]] std::uint32_t start_slot() const noexcept { return start_slot_; }
   [[nodiscard]] std::uint64_t hash() const noexcept { return hash_; }
   [[nodiscard]] bool complete_instruction_stream() const noexcept {
-    return (dwords_.size() % 3u) == 0;
+    return (dwords_size() % 3u) == 0;
   }
   [[nodiscard]] std::size_t instruction_count() const noexcept {
-    return dwords_.size() / 3u;
+    return dwords_size() / 3u;
   }
   [[nodiscard]] std::span<const std::uint32_t> dwords() const noexcept {
-    return dwords_;
+    return dwords_ ? std::span<const std::uint32_t>(*dwords_)
+                   : std::span<const std::uint32_t>{};
   }
   [[nodiscard]] ShaderInstruction96 instruction(std::size_t index) const;
   // Every 96-bit microcode group can also contain two packed 48-bit control-
@@ -84,7 +86,12 @@ class ShaderProgram {
 
   ShaderStage stage_{ShaderStage::Vertex};
   std::uint32_t start_slot_{};
-  std::vector<std::uint32_t> dwords_{};
+  [[nodiscard]] std::size_t dwords_size() const noexcept {
+    return dwords_ ? dwords_->size() : 0u;
+  }
+  // Shared and immutable: titles reload the same microcode many times a
+  // frame, and a program is copied into the active state and the IR stream.
+  std::shared_ptr<const std::vector<std::uint32_t>> dwords_{};
   std::uint64_t hash_{};
 };
 
